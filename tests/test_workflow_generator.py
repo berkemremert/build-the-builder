@@ -1189,6 +1189,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual(("no_promise", "hardship"), (state["close_outcome"], state["close_reason"]))
         paid_state = {"product_json": json.dumps(products), "product_count": "1",
                       "discussion_action": "done_no_promise", "single_sensitive_intent": "paid_current_due",
+                      "single_current_due_paid_claim": "yes",
                       "recorded_ids": "[]"}
         self.assertEqual("single_paid_notice", _first_engine_route(workflow["nodes"]["account_discussion"], paid_state))
         self.assertIn("one business day", workflow["nodes"]["single_paid_notice"]["on_enter"]["text"].lower())
@@ -1198,6 +1199,34 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         _run_code_node(workflow, "finalize", paid_state)
         self.assertEqual("paid", paid_state["close_outcome"])
         self.assertEqual("", paid_state["close_reason"])
+
+    def test_current_due_paid_guard_is_scoped_and_keeps_hardship_priority(self) -> None:
+        workflow = self._build("brief-a.md")
+        node = workflow["nodes"]["account_discussion"]
+        field = next(item for item in node["extraction_schema"]
+                     if item["name"] == "single_current_due_paid_claim")
+        self.assertEqual(["yes", "no"], field["enum_values"])
+        self.assertEqual(0.55, field["min_confidence"])
+        description = field["description"].lower()
+        for phrase in ("i already paid it in the app this morning",
+                       "i paid it in the app this morning",
+                       "i actually paid that in the app this morning"):
+            self.assertIn(phrase, description)
+        for negative in ("closed this product last year", "last month's instalment",
+                         "paid this account in the past", "promise to pay tomorrow",
+                         "paid a different product", "deny owing"):
+            self.assertIn(negative, description)
+        state = {"product_count": "1", "single_current_due_paid_claim": "yes",
+                 "single_sensitive_intent": "none", "discussion_action": "continue"}
+        self.assertEqual("single_paid_notice", _first_engine_route(node, state))
+        state["single_sensitive_intent"] = "hardship"
+        self.assertEqual("single_hardship", _first_engine_route(node, state))
+        state["single_sensitive_intent"] = "paid_current_due"
+        state["single_current_due_paid_claim"] = "no"
+        self.assertNotEqual("single_paid_notice", _first_engine_route(node, state))
+        state["single_current_due_paid_claim"] = "yes"
+        state["product_count"] = "2"
+        self.assertNotEqual("single_paid_notice", _first_engine_route(node, state))
 
     def test_two_call_purpose_demands_route_to_engine_declined_close(self) -> None:
         workflow = self._build("brief-a.md")

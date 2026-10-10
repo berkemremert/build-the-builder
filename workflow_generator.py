@@ -57,8 +57,9 @@ def _bank_non_recording(name: str, false_codes: list[str], no_write_codes: list[
                  *(_check(name + "_response.status_code", "equals", code) for code in no_write_codes))
 
 
-def _enum(name: str, choices: list[str], description: str) -> dict:
-    return {"name": name, "type": "string", "enum_values": choices, "description": description, "min_confidence": 0.65}
+def _enum(name: str, choices: list[str], description: str, min_confidence: float = 0.65) -> dict:
+    return {"name": name, "type": "string", "enum_values": choices, "description": description,
+            "min_confidence": min_confidence}
 
 
 def _code_node(name: str, source: str, next_node: str) -> dict:
@@ -1876,7 +1877,11 @@ except Exception:
     transitions = [
         _eq("transfer_human", "discussion_action", "transfer_human"),
         _to("single_hardship", "Hardship takes priority over restructuring", single_intent("hardship")),
-        _to("single_paid_notice", "Current past-due amount was paid", single_intent("paid_current_due")),
+        _to("single_paid_notice", "Current past-due amount was paid",
+            _when({"logic": "and", "conditions": [
+                _check("product_count", "equals", "1"),
+                _check("single_current_due_paid_claim", "equals", "yes"),
+            ]})),
         _to("transfer_restructuring", "Caller requests lower instalments or a new payment plan",
             _when({"logic": "and", "conditions": [
                 _check("product_count", "equals", "1"),
@@ -1926,6 +1931,9 @@ except Exception:
                                                            "Classify ONLY the latest caller answer using the source policy. proposal_ready when the caller gives a specific payment day, including today or a weekday; for a one-product account use its full past-due amount when the caller names only a date. vague_date when a one-product caller intends to pay but gives only a vague period such as 'the week after next'; ask for an exact day. A bare yes/I confirm to an earlier read-back in this node is continue, never proposal_ready. done_no_promise only when all products have final paid/dispute/hardship/refused reasons and no transfer is wanted. A no to today without another date is continue while the workflow makes a counted first offer. Transfer actions take priority except hardship takes priority over restructuring."),
                                                      _enum("single_sensitive_intent", ["hardship", "paid_current_due", "none"],
                                                            "For a one-product account classify ONLY the latest caller answer. hardship if the caller mentions illness, a death in the family, or job loss, even alongside a request for lower instalments. paid_current_due only if they say this current past-due amount was already paid; a product closed or paid off in the past is a dispute, not this intent. none otherwise. Hardship takes priority over restructuring."),
+                                                     _enum("single_current_due_paid_claim", ["yes", "no"],
+                                                           "For a one-product account, classify ONLY the LATEST caller answer about the current product and the past-due amount just stated. yes only if the caller reports that this current past-due amount was already paid, including 'I already paid it in the app this morning', 'I paid it in the app this morning', or 'I actually paid that in the app this morning' immediately after the account question. no if they only paid off or closed this product last year, paid last month's instalment while the current amount remains due, have paid this account in the past, promise to pay tomorrow or later, paid a different product, or deny owing or ever having this product. These historical or debt-denial claims are disputes, not payment of the current past-due amount.",
+                                                           min_confidence=0.55),
                                                      _enum("single_restructuring_request", ["yes", "no"],
                                                            "For a one-product account, yes if the LATEST caller answer explicitly asks for lower instalments, smaller recurring payments, restructuring, or a new payment plan. Keep yes when they also say the amount is unaffordable. This is independent of discussion_action and single_amount_intent. no otherwise."),
                                                      _enum("single_robot_question", ["yes", "no"],
