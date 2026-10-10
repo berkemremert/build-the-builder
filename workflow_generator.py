@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from api_bindings import promise_request_fields
+from api_bindings import account_collection_field, promise_request_fields
 
 
 def _check(variable: str, operator: str, operand: Any = "") -> dict:
@@ -226,14 +226,17 @@ def _holiday_dates(policy: dict) -> list[str]:
         source = "\n".join(str(policy.get(key) or "") for key in
                            ("global_rules", "verified_call", "opening"))
     dates: set[str] = set()
-    for match in re.finditer(r"\b20\d{2}-\d{2}-\d{2}\b", source):
+    matches = list(re.finditer(r"\b20\d{2}-\d{2}-\d{2}\b", source))
+    for index, match in enumerate(matches):
         start = max(source.rfind(mark, 0, match.start()) for mark in (";", ".", "\n")) + 1
         ends = [source.find(mark, match.end()) for mark in (";", ".", "\n")]
         end = min((point for point in ends if point >= 0), default=len(source))
         clause = source[start:end].lower()
         if "holiday" not in clause:
             continue
-        if re.search(r"\b(?:no longer|not|removed|revoked|cancelled|canceled)\b", clause):
+        next_date = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        following = source[match.end():min(end, next_date)].lower()
+        if re.search(r"\b(?:no longer|not|removed|revoked|cancelled|canceled)\b", following):
             dates.discard(match.group())
         else:
             dates.add(match.group())
@@ -302,15 +305,24 @@ def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
     policy_outcomes = (policy or {}).get("outcomes") or {}
     policy_keys = list(policy_outcomes) if isinstance(policy_outcomes, dict) else []
     source = str((policy or {}).get("raw_brief") or "")
+    source_roles = {"promise": "promise", "paid": "paid", "transfer": "transferred",
+                    "transferred": "transferred", "no promise": "no_promise",
+                    "identity failure": "not_verified", "not reached": "not_reached"}
+    source_codes = {}
+    for match in re.finditer(
+        r"\b(no\s+promise|identity\s+failure|not\s+reached|transferred|transfer|promise|paid)\s*[:=]\s*([A-Za-z0-9_-]+)",
+        source, re.I,
+    ):
+        source_codes[source_roles[" ".join(match.group(1).lower().split())]] = match.group(2)
     for role, hints in aliases.items():
-        explicit = policy_outcomes.get(role) if isinstance(policy_outcomes, dict) else None
-        if isinstance(explicit, str) and explicit in values:
-            result[role] = explicit
-            continue
         replacements = re.findall(r"replace\s+(?:outcome\s+)?" + re.escape(role) +
-                                  r"\s+with\s+([a-z_]+)", source, flags=re.IGNORECASE)
+                                  r"\s+with\s+([a-z0-9_-]+)", source, flags=re.IGNORECASE)
         if replacements and replacements[-1] in values:
             result[role] = replacements[-1]
+        elif source_codes.get(role) in values:
+            result[role] = source_codes[role]
+        elif isinstance(policy_outcomes, dict) and policy_outcomes.get(role) in values:
+            result[role] = policy_outcomes[role]
         elif role in values:
             result[role] = role
         else:
@@ -328,6 +340,10 @@ def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str
     note_schema = _api_spec(openapi, "add_note")[2]
     note_enum = [str(value) for value in ((note_schema.get("properties") or {}).get("reason") or {}).get("enum") or []]
     source = str(policy.get("raw_brief") or "") + "\n" + str(policy.get("tool_policy") or "")
+    explicit_codes = {}
+    for code_list in re.finditer(r"reason\s+code\s+list\s*:\s*([^\n.]+)", source, re.I):
+        for match in re.finditer(r"\b([a-z_]+)\s*[:=]\s*([A-Za-z0-9_-]+)", code_list.group(1), re.I):
+            explicit_codes[match.group(1).lower()] = match.group(2)
     aliases = {
         "refused": ("refused", "declined", "refusal"),
         "hardship": ("hardship", "vulnerable", "difficulty"),
@@ -349,12 +365,17 @@ def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str
     close_result = {}
     for role, hints in aliases.items():
         replacements = re.findall(r"replace\s+(?:the\s+)?(?:refusal\s+code\s+)?" + re.escape(role) +
-                                  r"\s+with\s+([a-z_]+)", source, flags=re.IGNORECASE)
+                                  r"\s+with\s+([a-z0-9_-]+)", source, flags=re.IGNORECASE)
         for allowed, target in ((note_enum, result), (close_enum, close_result)):
-            if not allowed:
-                target[role] = role
-            elif replacements and replacements[-1] in allowed:
+            explicit = explicit_codes.get(role)
+            if replacements and (not allowed or replacements[-1] in allowed):
                 target[role] = replacements[-1]
+            elif explicit and (not allowed or explicit in allowed):
+                target[role] = explicit
+            elif explicit and target is close_result:
+                raise ValueError(f"Reason code {explicit!r} for {role} is absent from close_call enum {allowed!r}")
+            elif not allowed:
+                target[role] = role
             elif role in allowed:
                 target[role] = role
             else:
@@ -584,7 +605,8 @@ except Exception:
 """
 
 
-def _prepare_code(holidays: list[str], item_fields: dict, bands: list[dict], offer_last_business_day: bool) -> str:
+def _prepare_code(holidays: list[str], item_fields: dict, bands: list[dict],
+                  offer_last_business_day: bool, collection_field: str) -> str:
     amount_field = "past_due" if "past_due" in item_fields else next(
         (k for k in item_fields if "due" in k or "balance" in k), "past_due")
     days_field = "days_late" if "days_late" in item_fields else next(
@@ -595,14 +617,14 @@ def _prepare_code(holidays: list[str], item_fields: dict, bands: list[dict], off
     return f"""import json
 import datetime
 try:
-    raw = vars.get('account_products') or vars.get('load_account_response.data.products') or vars.get('get_account_response.data.products') or []
+    raw = vars.get('account_products') or vars.get('load_account_response.data.{collection_field}') or vars.get('get_account_response.data.{collection_field}') or []
     if isinstance(raw, str):
         raw = json.loads(raw)
     if not isinstance(raw, list):
         raw = []
     if not raw:
         groups = dict()
-        for prefix in ('load_account_response.data.products.', 'get_account_response.data.products.'):
+        for prefix in ('load_account_response.data.{collection_field}.', 'get_account_response.data.{collection_field}.'):
             for key, value in vars.items():
                 if str(key).startswith(prefix):
                     tail = str(key)[len(prefix):].split('.', 1)
@@ -1576,7 +1598,8 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
         tool_policy = {}
     account_path, account_method, _ = _api_spec(openapi, "get_account")
     response_schema = (openapi.get("paths") or {}).get(account_path, {}).get(account_method.lower(), {}).get("responses", {}).get("200", {}).get("content", {}).get("application/json", {}).get("schema", {})
-    item_fields = response_schema.get("properties", {}).get("products", {}).get("items", {}).get("properties", {})
+    collection_field = account_collection_field(response_schema)
+    item_fields = response_schema.get("properties", {}).get(collection_field, {}).get("items", {}).get("properties", {})
     holidays = _holiday_dates(policy)
     bands = _deadline_bands(policy)
     identity_fields = _identity_fields(openapi, policy)
@@ -1745,10 +1768,10 @@ except Exception:
     nodes["load_account"] = {
         "name": "load_account", "node_type": "api_request", "on_enter": {"type": "silent"},
         "passthrough": True, "passthrough_default_transition": "prepare_account",
-        "pre_actions": [account], "response_mapping": [{"path": "data.products", "variable": "account_products"}],
+        "pre_actions": [account], "response_mapping": [{"path": "data." + collection_field, "variable": "account_products"}],
         "transitions": [_always("prepare_account")],
     }
-    nodes["prepare_account"] = _code_node("prepare_account", _prepare_code(holidays, item_fields, bands, offer_last_business_day), "account_discussion")
+    nodes["prepare_account"] = _code_node("prepare_account", _prepare_code(holidays, item_fields, bands, offer_last_business_day, collection_field), "account_discussion")
     nodes["prepare_account"]["transitions"] = [
         _eq("account_unavailable", "product_count", "0"), _always("account_discussion")]
     nodes["account_unavailable"] = _conversation(

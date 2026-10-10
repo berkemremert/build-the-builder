@@ -8,7 +8,7 @@ import unittest
 
 from probe_changed_brief import _code, synthetic_api, synthetic_policy
 from qa import validate_workflow
-from workflow_generator import build_workflow
+from workflow_generator import _holiday_dates, build_workflow
 
 
 class ChangedBriefGeneralityTests(unittest.TestCase):
@@ -47,6 +47,51 @@ class ChangedBriefGeneralityTests(unittest.TestCase):
         errors = validate_workflow(broken, api)
         self.assertTrue(any("payment_total.default" in error and "pending_amount" in error
                             for error in errors), errors)
+
+    def test_later_source_code_list_overrides_stale_extracted_mapping(self) -> None:
+        policy = synthetic_policy()
+        policy["outcomes"]["not_verified"] = "C1"
+        workflow = build_workflow(policy, synthetic_api())
+        self.assertIn("'C6'", _code(workflow, "finish_identity_failed"))
+
+    def test_renamed_account_response_collection_is_read_and_checked(self) -> None:
+        api = synthetic_api()
+        response = api["paths"]["/get_account"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+        response["properties"]["accounts"] = response["properties"].pop("products")
+        workflow = build_workflow(synthetic_policy(), api)
+        self.assertEqual([], validate_workflow(workflow, api))
+        self.assertEqual([{"path": "data.accounts", "variable": "account_products"}],
+                         workflow["nodes"]["load_account"]["response_mapping"])
+        state = {"now": "2031-04-16T10:00", "load_account_response.data.accounts": [{
+            "product_id": "a7", "type": "reserve_account", "past_due": 87,
+            "days_late": 4, "floor_amount": 21,
+        }]}
+        exec(_code(workflow, "prepare_account"), {"vars": state})
+        self.assertEqual("1", state["product_count"])
+        self.assertEqual("a7", json.loads(state["product_json"])[0]["product_id"])
+        broken = copy.deepcopy(workflow)
+        broken["nodes"]["load_account"]["response_mapping"][0]["path"] = "data.products"
+        self.assertTrue(any("data.accounts" in error for error in validate_workflow(broken, api)))
+
+    def test_explicit_opaque_close_reasons_and_invalid_code(self) -> None:
+        api = synthetic_api()
+        policy = synthetic_policy()
+        policy["raw_brief"] += ("\nReason code list: failed=R1, declined=R2, "
+                                "wrong_number=R3, service_error=R4, refused=R5.\n")
+        workflow = build_workflow(policy, api)
+        self.assertEqual([], validate_workflow(workflow, api))
+        self.assertIn("'R1'", _code(workflow, "finish_identity_failed"))
+        self.assertIn("'R3'", _code(workflow, "finish_wrong_number"))
+        policy["raw_brief"] += "Reason code list: failed=R9.\n"
+        with self.assertRaisesRegex(ValueError, "R9.*close_call"):
+            build_workflow(policy, api)
+
+    def test_same_sentence_holiday_revoke_and_add_are_independent(self) -> None:
+        policy = {"raw_brief": (
+            "2031-04-18 is a bank holiday. Later memo: 2031-04-18 is no longer a bank holiday, "
+            "and 2031-04-21 is now a bank holiday."
+        )}
+        self.assertEqual(["2031-04-21"], _holiday_dates(policy))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from collections import deque
 from itertools import product
 from pathlib import Path
 
-from api_bindings import promise_request_fields
+from api_bindings import account_collection_field, promise_request_fields
 
 
 ROOT = Path(__file__).resolve().parent
@@ -433,6 +433,27 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                   all(isinstance(action, dict) and isinstance(action.get("function"), dict) and
                       action["function"].get("handler") == "__function__:code_exec" for action in actions)):
                 errors.append(f"{loc}.response_mapping cannot read code_exec output data; use vars in the code snippet")
+        if name == "load_account" and actions:
+            action = actions[0] if isinstance(actions[0], dict) else {}
+            fn = action.get("function") if isinstance(action.get("function"), dict) else {}
+            params = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else {}
+            props = params.get("properties") if isinstance(params.get("properties"), dict) else {}
+            url_spec = props.get("url") if isinstance(props.get("url"), dict) else {}
+            url = url_spec.get("default")
+            if fn.get("name") == "get_account" and url in expected_urls:
+                api_path, api_method = expected_urls[url]
+                operation = openapi["paths"][api_path][api_method]
+                response_schema = (((operation.get("responses") or {}).get("200") or {})
+                                   .get("content", {}).get("application/json", {}).get("schema", {}))
+                try:
+                    collection = account_collection_field(response_schema)
+                except ValueError as exc:
+                    errors.append(f"{loc}: {exc}")
+                else:
+                    expected_mapping = {"path": "data." + collection, "variable": "account_products"}
+                    mapping = node.get("response_mapping")
+                    if not isinstance(mapping, list) or expected_mapping not in mapping:
+                        errors.append(f"{loc}.response_mapping: map {expected_mapping['path']} to account_products")
         if kind == "end_call":
             if node.get("transitions"):
                 errors.append(f"{loc}: end_call nodes must not have outgoing transitions")

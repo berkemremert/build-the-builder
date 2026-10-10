@@ -29,3 +29,17 @@ def promise_request_fields(schema: dict) -> dict[str, str]:
     if ambiguous:
         raise ValueError(f"create_promise request fields need one product, amount and date mapping: {ambiguous}")
     return {role: names[0] for role, names in found.items()}
+
+
+def account_collection_field(response_schema: dict) -> str:
+    """Find the account's single product collection in an OpenAPI response."""
+    properties = response_schema.get("properties") or {}
+    arrays = [name for name, spec in properties.items()
+              if isinstance(spec, dict) and spec.get("type") == "array" and
+              isinstance(spec.get("items"), dict) and
+              (spec["items"].get("type") == "object" or spec["items"].get("properties"))]
+    if "products" in arrays:
+        return "products"
+    if len(arrays) == 1:
+        return arrays[0]
+    raise ValueError(f"get_account response needs one product collection; found {arrays!r}")
