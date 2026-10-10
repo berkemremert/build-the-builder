@@ -783,10 +783,26 @@ try:
                 months = ('january','february','march','april','may','june','july','august','september','october','november','december')
                 month = next((index + 1 for index, word in enumerate(months) if word in date_raw), None)
                 number = re.search(r'(?<!\\d)([0-3]?\\d)(?:st|nd|rd|th)?(?!\\d)', date_raw)
+                named_days = dict((name, index + 1) for index, name in enumerate((
+                    'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+                    'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth',
+                    'eighteenth', 'nineteenth', 'twentieth', 'twenty first', 'twenty second', 'twenty third',
+                    'twenty fourth', 'twenty fifth', 'twenty sixth', 'twenty seventh', 'twenty eighth',
+                    'twenty ninth', 'thirtieth', 'thirty first')))
+                spoken_day = None
+                if month:
+                    normalized = re.sub(r'[-\\s]+', ' ', date_raw)
+                    day_pattern = '|'.join(re.escape(name) for name in sorted(named_days, key=len, reverse=True))
+                    month_pattern = '|'.join(months)
+                    before = re.search(r'\\b(?:the\\s+)?(' + day_pattern + r')(?:\\s+of)?\\s+(?:' + month_pattern + r')\\b', normalized)
+                    after = re.search(r'\\b(?:' + month_pattern + r')\\s+(?:the\\s+)?(' + day_pattern + r')\\b', normalized)
+                    spoken = before or after
+                    if spoken:
+                        spoken_day = named_days[spoken.group(1)]
                 weekdays = ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')
                 weekday = next((index for index, word in enumerate(weekdays) if word in date_raw), None)
-                if number and (month or weekday is not None):
-                    day_number = int(number.group(1))
+                if (number or spoken_day) and (month or weekday is not None):
+                    day_number = spoken_day or int(number.group(1))
                     chosen_month = month or today.month
                     chosen_year = today.year
                     day = datetime.date(chosen_year, chosen_month, day_number)
@@ -827,6 +843,7 @@ try:
     vars['readback_terms_json'] = json.dumps(ordered)
     vars['confirmation_readback'] = ' '.join(adjustments) + (' ' if adjustments else '') + 'To confirm, you will pay ' + '; '.join(lines) + '.'
     vars['proposal_validation_state'] = 'ready'
+    vars['multi_correction_attempts'] = '0'
     vars['proposed_terms_json'] = ''
     vars['proposed_date_words'] = ''
 except Exception as error:
@@ -1203,6 +1220,11 @@ except Exception:
 
 _MULTI_REVISE_CODE = """import json
 try:
+    attempts = int(vars.get('multi_correction_attempts') or 0) + 1
+except Exception:
+    attempts = 1
+vars['multi_correction_attempts'] = str(attempts)
+try:
     terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
     products = json.loads(str(vars.get('product_json') or '[]'))
     known = set(str(item.get('product_id') or '') for item in products)
@@ -1223,9 +1245,9 @@ try:
     vars['proposed_terms_json'] = json.dumps([terms[str(item.get('product_id') or '')] for item in products
                                               if str(item.get('product_id') or '') in terms])
     vars['multi_corrected_terms_json'] = ''
-    vars['multi_next'] = 'confirm' if changed else 'clarify'
+    vars['multi_next'] = 'confirm' if changed else 'service_error' if attempts >= 3 else 'clarify'
 except Exception:
-    vars['multi_next'] = 'clarify'
+    vars['multi_next'] = 'service_error' if attempts >= 3 else 'clarify'
 """
 
 
@@ -1525,8 +1547,10 @@ except Exception:
             transitions=transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_correction"] = _conversation(
-            "multi_correction", "The combined read-back needs a correction. Ask for the exact changed product, amount and day; keep all other proposed terms. "
-            "Do not restart the all-products-today question or repeat persuasion offers. No tool call is allowed in this node.",
+            "multi_correction", "The fixed correction request was spoken on entry. Wait for the caller's answer. "
+            "Do not speak, suggest, restate, or confirm a payment date in this node; the code must validate it first. "
+            "Keep all other proposed terms. No tool call is allowed in this node.",
+            opening="Please tell me which product you want to change, its amount, and the exact day and month you want to pay.",
             extraction=[{"name": "multi_corrected_terms_json", "type": "string", "min_confidence": 0.55,
                          "description": "Return a JSON array string containing only corrected product_id, amount and RAW date words from the latest caller answer. Leave empty if none."},
                         _enum("multi_correction_action", ["transfer_restructuring", "transfer_support", "transfer_human", "continue"],
@@ -1535,16 +1559,24 @@ except Exception:
                          _eq("transfer_support", "multi_correction_action", "transfer_support"),
                          _eq("transfer_human", "multi_correction_action", "transfer_human"),
                          _always("multi_revise")],
-            max_turns=3, max_target="multi_revise")
+            max_turns=3, max_target="service_unavailable")
         nodes["multi_revise"] = _code_node("multi_revise", _MULTI_REVISE_CODE, "multi_correction")
         nodes["multi_revise"]["transitions"] = [
-            _eq("prepare_confirmation", "multi_next", "confirm"), _always("multi_correction"),
+            _eq("prepare_confirmation", "multi_next", "confirm"),
+            _eq("service_unavailable", "multi_next", "service_error"),
+            _always("multi_correction"),
         ]
 
     nodes["prepare_confirmation"] = _code_node(
         "prepare_confirmation", _PREPARE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
     nodes["prepare_confirmation"]["transitions"] = [
         _eq("confirmation", "proposal_validation_state", "ready"),
+        *([_to("service_unavailable", "Correction attempts exhausted without valid terms",
+               _when({"logic": "and", "conditions": [
+                   _check("product_count", "greater_than", 1),
+                   _check("proposal_validation_state", "equals", "invalid"),
+                   _check("multi_correction_attempts", "greater_than", 2),
+               ]}))] if multi_enabled else []),
         *([_to("multi_correction", "Correct the combined proposal",
                _when({"logic": "and", "conditions": [
                    _check("product_count", "greater_than", 1),

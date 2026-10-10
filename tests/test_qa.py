@@ -288,6 +288,41 @@ class ValidatorTests(unittest.TestCase):
         confirm_route["condition"] = {"operator": "always"}
         self.check_has(workflow, "combined confirmation is reachable before multi_next=confirm")
 
+    def test_correction_max_turn_route_must_escape_automatic_loop(self):
+        workflow = valid_workflow()
+        workflow["nodes"]["account"]["transitions"] = [transition("multi_correction")]
+        workflow["nodes"]["multi_correction"] = {
+            "name": "multi_correction", "node_type": "conversation",
+            "task_message": "Ask for corrected terms.",
+            "on_enter": {"type": "llm"},
+            "max_node_turns": 3, "max_turn_transition": "multi_revise",
+            "transitions": [transition("finish")],
+        }
+        workflow["nodes"]["multi_revise"] = {
+            "name": "multi_revise", "node_type": "code",
+            "on_enter": {"type": "silent"}, "passthrough": True,
+            "passthrough_default_transition": "multi_correction",
+            "pre_actions": [{"type": "function", "function": {
+                "name": "revise", "handler": "__function__:code_exec",
+                "parameters": {"type": "object", "properties": {
+                    "code": {"type": "string", "default": "vars['revised'] = False"}}}}}],
+            "transitions": [
+                transition("finish", {"variable": "revised", "operator": "equals", "operand": "true"}),
+                transition("multi_correction"),
+            ],
+        }
+        self.check_has(workflow, "max-turn correction route re-enters a correction turn")
+
+        workflow["nodes"]["multi_revise"]["transitions"][-1] = transition("finish")
+        workflow["nodes"]["multi_revise"]["passthrough_default_transition"] = "finish"
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+
+        # A corrected proposal can legitimately return to a correction turn;
+        # only the automatic max-turn fallback must leave the loop.
+        workflow["nodes"]["multi_revise"]["transitions"].insert(0, transition(
+            "multi_correction", {"variable": "revised", "operator": "equals", "operand": "true"}))
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+
     def test_unreachable_or_dead_end_node_is_reported(self):
         workflow = valid_workflow()
         workflow["nodes"]["orphan"] = {"name": "orphan", "node_type": "conversation",

@@ -506,6 +506,45 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         for name in reachable - can_end:
             errors.append(f"workflow.nodes.{name}: no route to an end_call node")
 
+        # A correction turn's max-turn route must actually leave the correction
+        # loop. Follow only automatic fallback paths, stopping at a fresh caller
+        # turn; conditional branches can depend on newly supplied valid terms.
+        def automatic_route_reenters_correction(start: str) -> bool:
+            pending, visited = [start], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                node = all_nodes.get(current)
+                if not isinstance(node, dict):
+                    continue
+                if node.get("node_type") == "conversation":
+                    if re.search(r"(?:^|_)correction(?:_|$)", current):
+                        return True
+                    if not node.get("passthrough"):
+                        continue
+                if node.get("node_type") == "end_call":
+                    continue
+                transitions = node.get("transitions", [])
+                if isinstance(transitions, list):
+                    pending.extend(transition.get("target_node") for transition in transitions
+                                   if isinstance(transition, dict) and
+                                   (not transition.get("condition") or
+                                    transition["condition"] == {"operator": "always"}))
+                if node.get("passthrough"):
+                    pending.append(node.get("passthrough_default_transition"))
+            return False
+
+        for name in reachable:
+            node = all_nodes.get(name)
+            if (not isinstance(node, dict) or node.get("node_type") != "conversation"
+                    or not re.search(r"(?:^|_)correction(?:_|$)", name)):
+                continue
+            max_target = node.get("max_turn_transition")
+            if isinstance(max_target, str) and automatic_route_reenters_correction(max_target):
+                errors.append(f"workflow.nodes.{name}.max_turn_transition: max-turn correction route re-enters a correction turn without a fresh non-correction conversation or end_call")
+
         # Some policies explicitly forbid notes once a transfer is made.
         # Check every graph path after the transfer, including passthrough
         # defaults, because a later note action would violate that rule.

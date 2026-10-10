@@ -294,6 +294,85 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                          if _matches_deterministic_condition(item["condition"], state)])
         self.assertEqual(["p1", "p2"], json.loads(state["recorded_ids"]))
 
+    def test_bank_b_pub13_spoken_ordinal_uses_each_deadline_in_one_readback(self) -> None:
+        case = next(item for item in json.loads((ROOT / "public-test-set.json").read_text(encoding="utf-8"))
+                    if item["id"] == "PUB-13")
+        workflow = self._build("brief-a.md", "brief-b.md")
+        account_products = [dict(item, product_id=f"p{index}")
+                            for index, item in enumerate(case["products"], start=1)]
+        products, state = _prepared_products(workflow, account_products, case["variables"]["now"])
+        spoken_date = "the thirtieth of October"
+        state.update({"all_today_status": "no", "multi_common_date_words": spoken_date,
+                      "proposed_terms_json": json.dumps([
+                          {"product_id": "p1", "amount": 300, "date": spoken_date},
+                          {"product_id": "p2", "amount": 900, "date": spoken_date},
+                      ]), "recorded_ids": "[]"})
+        advance = _code_node_writing(workflow, "multi_offer_stage")
+        preparer = _code_node_writing(workflow, "proposal_validation_state")
+        _run_code_node(workflow, advance, state)
+        self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual(preparer, _first_engine_route(workflow["nodes"][advance], state))
+        _run_code_node(workflow, preparer, state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        self.assertEqual([("p1", 300.0, "2026-10-30"), ("p2", 900.0, "2026-10-23")],
+                         [(item["product_id"], item["amount"], item["date"])
+                          for item in json.loads(state["readback_terms_json"])])
+        readback = state["confirmation_readback"]
+        self.assertEqual(1, readback.count("To confirm"))
+        self.assertIn("credit card ending 6604: 300.00 on 2026-10-30", readback)
+        self.assertIn("personal loan: 900.00 on 2026-10-23", readback)
+        self.assertIn("latest date", readback.lower())
+        self.assertNotIn("2026-10-22", readback)
+        self.assertNotIn("2026-10-21", readback)
+        self.assertEqual([], json.loads(state["recorded_ids"]))
+        self.assertEqual(_node_extracting(workflow, "confirmation_status"),
+                         _first_engine_route(workflow["nodes"][preparer], state))
+
+    def test_bank_b_invalid_multi_product_correction_stops_without_a_readback(self) -> None:
+        case = next(item for item in json.loads((ROOT / "public-test-set.json").read_text(encoding="utf-8"))
+                    if item["id"] == "PUB-13")
+        workflow = self._build("brief-a.md", "brief-b.md")
+        _, state = _prepared_products(
+            workflow,
+            [dict(item, product_id=f"p{index}") for index, item in enumerate(case["products"], start=1)],
+            case["variables"]["now"])
+        state.update({"all_today_status": "no", "recorded_ids": "[]",
+                      "proposed_terms_json": json.dumps([
+                          {"product_id": "p1", "amount": 300, "date": "sometime"},
+                          {"product_id": "p2", "amount": 900, "date": "sometime"},
+                      ])})
+        advance = _code_node_writing(workflow, "multi_offer_stage")
+        preparer = _code_node_writing(workflow, "proposal_validation_state")
+        _run_code_node(workflow, advance, state)
+        self.assertEqual("confirm", state["multi_next"])
+        _run_code_node(workflow, preparer, state)
+        self.assertEqual("invalid", state["proposal_validation_state"])
+        self.assertEqual("multi_correction", _first_engine_route(workflow["nodes"][preparer], state))
+        self.assertEqual([], json.loads(state["readback_terms_json"]))
+        self.assertFalse(state["confirmation_readback"])
+
+        correction = workflow["nodes"]["multi_correction"]
+        self.assertRegex(correction["task_message"].lower(), r"(?:do not|never)[^.]*\bdate\b")
+        self.assertNotRegex(str(correction.get("on_enter", {}).get("text", "")).lower(),
+                            r"\b(?:20\d{2}-\d{2}-\d{2}|january|february|march|april|may|june|july|"
+                            r"august|september|october|november|december)\b")
+
+        next_node = "multi_correction"
+        for raw in ("", '["300", "credit card"]', '["October twenty second"]', "", ""):
+            if next_node != "multi_correction":
+                break
+            state["multi_corrected_terms_json"] = raw
+            self.assertEqual("multi_revise", _first_engine_route(correction, state))
+            _run_code_node(workflow, "multi_revise", state)
+            next_node = _first_engine_route(workflow["nodes"]["multi_revise"], state)
+            self.assertNotIn(next_node, (preparer, "confirmation", "validate_confirmation",
+                                         "create_promise_call"))
+            self.assertEqual([], json.loads(state["readback_terms_json"]))
+            self.assertFalse(state["confirmation_readback"])
+            self.assertEqual([], json.loads(state["recorded_ids"]))
+        self.assertEqual("service_unavailable", next_node,
+                         "Malformed corrections must have a bounded exit without inventing dates")
+
     def test_bank_b_phone_retry_keeps_passed_dob(self) -> None:
         workflow = self._build("brief-a.md", "brief-b.md")
         dob = workflow["nodes"]["identity_dob"]

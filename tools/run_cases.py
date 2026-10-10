@@ -68,18 +68,24 @@ def main():
             if med <= 10 or attempt == a.rerun_if_slow: break
             print(f"-- run discarded: median slowest turn {med:.0f} s. Waiting 5 minutes, then repeating it.\n", flush=True); time.sleep(300)
         reps.append(rows); total_s += took
-        if a.reps > 1: print(f"-- run {rep + 1} of {a.reps}: {sum(r['pass'] for r in rows)} / {len(rows)} passed, {took:.0f} s\n")
+        if a.reps > 1: print(f"-- run {rep + 1} of {a.reps}: {sum(r['pass'] is True for r in rows)} / {len(rows)} passed, {took:.0f} s\n")
     need = a.reps                                                # a customer counts only when every run passes
-    final = [{"id": c["id"], "family": c["family"], "passes": sum(r[k]["pass"] for r in reps), "runs": a.reps, "pass": sum(r[k]["pass"] for r in reps) >= need} for k, c in enumerate(cases)]
-    n = sum(f["pass"] for f in final)
+    final = []
+    for k, c in enumerate(cases):
+        passes = sum(r[k]["pass"] is True for r in reps)
+        unscored = sum(r[k]["pass"] is None for r in reps)
+        final.append({"id": c["id"], "family": c["family"], "passes": passes, "runs": a.reps,
+                      "pass": None if unscored else passes >= need, "unscored_runs": unscored})
+    n = sum(f["pass"] is True for f in final)
+    unscored = sum(f["pass"] is None for f in final)
     if a.reps > 1:
-        for f in final: print(("PASS" if f["pass"] else "FAIL"), f["id"], f"{f['passes']}/{f['runs']}")
-    print(f"\n{n} / {len(final)} passed (bank records and conversation checks){'' if a.reps == 1 else f', a customer counts with {need} of {a.reps} runs'}. Last simulation {sim_id}, status {status}, {total_s:.0f} s.")
+        for f in final: print("UNSCORED" if f["pass"] is None else ("PASS" if f["pass"] else "FAIL"), f["id"], f"{f['passes']}/{f['runs']}")
+    print(f"\n{n} / {len(final)} passed (bank records and conversation checks){f', {unscored} unscored (ledger unavailable)' if unscored else ''}{'' if a.reps == 1 else f', a customer counts with {need} of {a.reps} runs'}. Last simulation {sim_id}, status {status}, {total_s:.0f} s.")
     with open(ROOT / "results" / "log.jsonl", "a") as f:      # one line per run, the record of how the score moved over time
-        f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "agent_id": a.agent_id, "brief": a.brief, "runs": a.reps, "passed": n, "total": len(final), "seconds": round(total_s), "failed": [f["id"] for f in final if not f["pass"]]}) + "\n")
+        f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "agent_id": a.agent_id, "brief": a.brief, "runs": a.reps, "passed": n, "total": len(final), "seconds": round(total_s), "failed": [f["id"] for f in final if f["pass"] is False], "unscored": [f["id"] for f in final if f["pass"] is None]}) + "\n")
     if a.out:
         pathlib.Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-        json.dump({"agent_id": a.agent_id, "simulation_id": sim_id, "iteration_id": it_id, "seconds": round(total_s), "passed": n, "total": len(final), "runs": a.reps, "final": final, "rows": reps[-1], "all_rows": reps}, open(a.out, "w"), indent=1)
+        json.dump({"agent_id": a.agent_id, "simulation_id": sim_id, "iteration_id": it_id, "seconds": round(total_s), "passed": n, "total": len(final), "unscored": unscored, "runs": a.reps, "final": final, "rows": reps[-1], "all_rows": reps}, open(a.out, "w"), indent=1)
 
 def run_once(agent_id, cases, ids):
     """One simulation: every case once. Returns the scored rows."""
@@ -90,13 +96,26 @@ def run_once(agent_id, cases, ids):
     judge = {r["personaId"]: r for r in freya.get_iteration(sim_id, it_id)["runs"]}
     rows = []
     for c in cases:
-        led = http("/v1/practice/ledger/" + sessions[c["id"]]["customer_id"])
-        r = score_ledger(c, led)
         j = judge.get(ids[c["id"]], {})                      # the conversation checks, read from the transcript by the judge model
+        led, ledger_error = None, None
+        try:
+            led = http("/v1/practice/ledger/" + sessions[c["id"]]["customer_id"])
+            if not isinstance(led, dict) or led.get("ok") is False or not all(k in led for k in ("calls", "promises", "notes", "callbacks", "transfers", "outcome")):
+                raise ValueError("incomplete bank ledger response")
+            r = score_ledger(c, led)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            led = None
+            ledger_error = f"{type(error).__name__}: {error}"
+            r = {"pass": None, "failed": []}
         if j.get("outcome") != "pass": r["failed"].append("conversation: " + " ".join(str(j.get("reason") or "no verdict").split())[:400])
-        r["pass"] = not r["failed"]
-        rows.append({"id": c["id"], "level": c["level"], "family": c["family"], "pass": r["pass"], "failed": r["failed"], "call_id": j.get("callId"), "tools": [x["tool"] for x in led["calls"]], "customer_id": sessions[c["id"]]["customer_id"]})
-        print(("PASS" if r["pass"] else "FAIL"), c["id"], f"{c['level']:<6}", f"{c['family']:<14}", "|", " > ".join(x["tool"].replace("verify_identity", "verify").replace("create_promise", "promise") for x in led["calls"]) or "(no tool calls)")
+        if led is not None: r["pass"] = not r["failed"]
+        tools = [x["tool"] for x in led["calls"]] if led is not None else None
+        rows.append({"id": c["id"], "level": c["level"], "family": c["family"], "pass": r["pass"], "failed": r["failed"],
+                     "judge_outcome": j.get("outcome"), "judge_reason": j.get("reason"), "call_id": j.get("callId"),
+                     "tools": tools, "ledger_available": led is not None, "ledger_error": ledger_error,
+                     "customer_id": sessions[c["id"]]["customer_id"]})
+        print("UNSCORED" if r["pass"] is None else ("PASS" if r["pass"] else "FAIL"), c["id"], f"{c['level']:<6}", f"{c['family']:<14}", "|", " > ".join(x.replace("verify_identity", "verify").replace("create_promise", "promise") for x in tools) if tools is not None else "(ledger unavailable)")
+        if ledger_error: print("       - bank ledger unavailable:", ledger_error[:260])
         for f in r["failed"]: print("       -", f[:260])
     # How long the phone agent kept the customer waiting. A call whose customer hung up after long silences says
     # something about the speed of the model at that moment, not only about the agent.
