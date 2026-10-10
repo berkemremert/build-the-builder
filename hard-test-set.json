@@ -1,0 +1,1670 @@
+[
+  {
+    "id": "HARD-01",
+    "source_case": "PUB-02",
+    "brief": "A",
+    "family": "Third party",
+    "level": "hard",
+    "title": "Callback at closing-time boundary",
+    "variables": {
+      "first_name": "Maria",
+      "last_name": "Costa",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1979-11-02",
+      "phone_last4": "0358"
+    },
+    "products": [
+      {
+        "type": "personal_loan",
+        "past_due": 310.5,
+        "days_late": 11,
+        "instalment_amount": 103.5
+      }
+    ],
+    "script": "The person answering is Maria Costa's husband. He asks what the call is about and offers to answer her security questions. He first suggests today at 09:59. When asked once for a valid time, he says tomorrow, 15 October, at exactly 19:00.",
+    "expected": {
+      "outcome": "not_reached",
+      "reason": "callback",
+      "promises": [],
+      "notes": [],
+      "callbacks": [
+        {
+          "date": "2026-10-15",
+          "time": "19:00"
+        }
+      ],
+      "transfers": []
+    },
+    "checks": [
+      "Do not reveal the reason for the call or any debt information to the husband.",
+      "Do not call verify_identity or get_account for the husband.",
+      "Reject 09:59 and schedule one callback for 15 October at 19:00."
+    ],
+    "rules": [
+      "A 1",
+      "A 5-7",
+      "A 10",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-02",
+    "source_case": "PUB-03",
+    "brief": "A",
+    "family": "Identity",
+    "level": "hard",
+    "title": "Two call-purpose demands before security",
+    "variables": {
+      "first_name": "Owen",
+      "last_name": "Park",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1992-07-21",
+      "phone_last4": "6630"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "0377",
+        "past_due": 95.0,
+        "days_late": 4,
+        "minimum_payment": 28.5
+      }
+    ],
+    "script": "Confirms he is Owen Park. When asked for his date of birth, asks what this call is about instead of giving an answer. After the one security explanation, asks what the call is about again and still refuses to answer. He never gives a security answer.",
+    "expected": {
+      "outcome": "not_verified",
+      "reason": "declined",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Treat each call-purpose demand instead of a security answer as a refusal.",
+      "Explain the security reason once, then close after the second refusal.",
+      "Do not state the debt or call get_account."
+    ],
+    "rules": [
+      "A 11",
+      "A 15",
+      "A 16",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-03",
+    "source_case": "PUB-11",
+    "brief": "B",
+    "family": "Identity",
+    "level": "hard",
+    "title": "Swapped birth-date hint before three promises",
+    "variables": {
+      "first_name": "Sofia",
+      "last_name": "Almeida",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1987-06-03",
+      "phone_last4": "2288"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "2288",
+        "past_due": 220.0,
+        "days_late": 9,
+        "minimum_payment": 66.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 640.0,
+        "days_late": 9,
+        "instalment_amount": 213.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 75.0,
+        "days_late": 3,
+        "instalment_amount": 25.0
+      }
+    ],
+    "script": "Confirms her name. First gives her birth date as 06/03/1987 with the month and day swapped. When asked for the month as a word, says 3 June 1987. Gives phone digits 2288. She can pay the full overdue amount for all three products today and confirms the single combined read-back.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 220.0,
+          "date": "2026-10-14"
+        },
+        {
+          "product_id": "p2",
+          "amount": 640.0,
+          "date": "2026-10-14"
+        },
+        {
+          "product_id": "p3",
+          "amount": 75.0,
+          "date": "2026-10-14"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "On a day_month_swapped hint, ask for the month as a word; the hint retry does not consume a wrong-answer attempt.",
+      "Verify the phone digits only after the birth date passes and before get_account.",
+      "State all three products, ask for one confirmation, and create one promise per product."
+    ],
+    "rules": [
+      "A 11-13",
+      "A 16-17",
+      "A 34",
+      "B 2",
+      "B 7"
+    ]
+  },
+  {
+    "id": "HARD-04",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Dates",
+    "level": "hard",
+    "title": "Weekend followed by a bank holiday",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms identity. Cannot pay today but proposes the full 420 for Saturday 24 October. Accepts when the agent offers the next business day, Tuesday 27 October, and clearly confirms the corrected read-back.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 420.0,
+          "date": "2026-10-27"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Treat the customer-proposed date as a proposal, not a refusal.",
+      "Move Saturday 24 October past the bank holiday on Monday 26 October to Tuesday 27 October.",
+      "Read back 420 on 27 October before one create_promise call."
+    ],
+    "rules": [
+      "A 18-20",
+      "A 29",
+      "A 34"
+    ]
+  },
+  {
+    "id": "HARD-05",
+    "source_case": "PUB-06",
+    "brief": "A",
+    "family": "Confirmation",
+    "level": "hard",
+    "title": "Changes both amount and date at read-back",
+    "variables": {
+      "first_name": "Priya",
+      "last_name": "Nair",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1986-05-17",
+      "phone_last4": "1502"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "1903",
+        "past_due": 2125.1,
+        "days_late": 12,
+        "minimum_payment": 637.5
+      }
+    ],
+    "script": "Confirms identity. Initially offers the full overdue amount of 2125.10 on Friday 16 October. At the first read-back, says, \"Change that to the minimum payment of 637.50 on Monday 19 October.\" Confirms only after the agent reads back the revised amount and date.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 637.5,
+          "date": "2026-10-19"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Do not create a promise from the first, superseded read-back.",
+      "Validate the revised 637.50 floor and 19 October business day, then read both back again.",
+      "Create exactly one promise after a clear yes to the revised terms."
+    ],
+    "rules": [
+      "A 19",
+      "A 25",
+      "A 27",
+      "A 34-36"
+    ]
+  },
+  {
+    "id": "HARD-06",
+    "source_case": "PUB-05",
+    "brief": "A",
+    "family": "Hardship",
+    "level": "hard",
+    "title": "Job loss plus request for lower instalments",
+    "variables": {
+      "first_name": "Tomas",
+      "last_name": "Novak",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1990-09-09",
+      "phone_last4": "8846"
+    },
+    "products": [
+      {
+        "type": "personal_loan",
+        "past_due": 780.0,
+        "days_late": 21,
+        "instalment_amount": 260.0
+      }
+    ],
+    "script": "Confirms identity. Says he lost his job and cannot pay. He also asks whether the bank can give him lower instalments. When offered a transfer to customer support, he accepts it. He does not propose a date or amount.",
+    "expected": {
+      "outcome": "transferred",
+      "reason": "support",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": [
+        {
+          "queue": "support"
+        }
+      ]
+    },
+    "checks": [
+      "Give one short sentence of sympathy and make no persuasion attempt.",
+      "Apply the hardship rule before the payment-plan rule and transfer to support, not restructuring.",
+      "Do not make a promise or add a note."
+    ],
+    "rules": [
+      "A 32",
+      "A 41",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-07",
+    "source_case": "PUB-12",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "Promise, current payment claim, and dispute",
+    "variables": {
+      "first_name": "Marcus",
+      "last_name": "Bell",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1983-10-19",
+      "phone_last4": "4410"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "9015",
+        "past_due": 510.0,
+        "days_late": 16,
+        "minimum_payment": 153.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 1320.0,
+        "days_late": 16,
+        "instalment_amount": 440.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 140.0,
+        "days_late": 7,
+        "instalment_amount": 46.0
+      }
+    ],
+    "script": "Confirms identity with the correct answers. Cannot pay all three today. Offers to pay the full 510 on the credit card tomorrow, 15 October. Says the current overdue amount on the personal loan was paid this morning. Says the car loan is not his and he never had it. Confirms only the credit-card read-back.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 510.0,
+          "date": "2026-10-15"
+        }
+      ],
+      "notes": [
+        {
+          "product_id": "p2",
+          "reason": "paid"
+        },
+        {
+          "product_id": "p3",
+          "reason": "dispute"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "State all three products before asking for payment and keep service order.",
+      "Record one credit-card promise after its read-back; do not persuade on paid or disputed products.",
+      "Add one paid note for p2 and one dispute note for p3, then close as promise."
+    ],
+    "rules": [
+      "A 34",
+      "A 39-40",
+      "B 2",
+      "B 7-9",
+      "B Closing"
+    ]
+  },
+  {
+    "id": "HARD-08",
+    "source_case": "PUB-11",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "Every overdue product already paid",
+    "variables": {
+      "first_name": "Sofia",
+      "last_name": "Almeida",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1987-06-03",
+      "phone_last4": "2288"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "2288",
+        "past_due": 220.0,
+        "days_late": 9,
+        "minimum_payment": 66.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 640.0,
+        "days_late": 9,
+        "instalment_amount": 213.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 75.0,
+        "days_late": 3,
+        "instalment_amount": 25.0
+      }
+    ],
+    "script": "Confirms identity. After the agent states all three late products, says she paid the current overdue amount on each one in the bank app this morning. She does not offer any new payment promise.",
+    "expected": {
+      "outcome": "paid",
+      "reason": null,
+      "promises": [],
+      "notes": [
+        {
+          "product_id": "p1",
+          "reason": "paid"
+        },
+        {
+          "product_id": "p2",
+          "reason": "paid"
+        },
+        {
+          "product_id": "p3",
+          "reason": "paid"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "State every product before any ask.",
+      "Treat each current past-due payment claim as paid, not a historical account dispute.",
+      "Add one paid note per product, make no promise, and close as paid."
+    ],
+    "rules": [
+      "A 39-40",
+      "B 2",
+      "B 8-9",
+      "B Closing"
+    ]
+  },
+  {
+    "id": "HARD-09",
+    "source_case": "PUB-13",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "Common Saturday crosses one deadline and a holiday",
+    "variables": {
+      "first_name": "Elena",
+      "last_name": "Rossi",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1991-01-08",
+      "phone_last4": "6604"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "6604",
+        "past_due": 300.0,
+        "days_late": 4,
+        "minimum_payment": 90.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 900.0,
+        "days_late": 20,
+        "instalment_amount": 300.0
+      }
+    ],
+    "script": "Confirms identity. Cannot pay both today. Offers the full overdue amount for both products on Saturday 24 October. Accepts the agent moving the loan to its 23 October deadline and the card to Tuesday 27 October because Saturday is followed by the bank holiday on Monday. Confirms the one combined read-back.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 300.0,
+          "date": "2026-10-27"
+        },
+        {
+          "product_id": "p2",
+          "amount": 900.0,
+          "date": "2026-10-23"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Apply each product\u2019s deadline separately: the loan\u2019s latest date is 23 October.",
+      "Move the card\u2019s Saturday date to Tuesday 27 October because Monday 26 October is a bank holiday.",
+      "Read back both adjusted dates together, get one confirmation, then create two promises."
+    ],
+    "rules": [
+      "A 18-20",
+      "B 3",
+      "B 6-7"
+    ]
+  },
+  {
+    "id": "HARD-10",
+    "source_case": "PUB-13",
+    "brief": "B",
+    "family": "Transfer",
+    "level": "hard",
+    "title": "Restructuring interrupts an unrecorded partial agreement",
+    "variables": {
+      "first_name": "Elena",
+      "last_name": "Rossi",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1991-01-08",
+      "phone_last4": "6604"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "6604",
+        "past_due": 300.0,
+        "days_late": 4,
+        "minimum_payment": 90.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 900.0,
+        "days_late": 20,
+        "instalment_amount": 300.0
+      }
+    ],
+    "script": "Confirms identity. Cannot pay both today. Offers the full 300 for the credit card on Friday 16 October. Before agreeing any loan terms or confirming a combined read-back, asks for lower loan instalments and a new payment plan. Insists on speaking to the restructuring team and does not confirm any promise.",
+    "expected": {
+      "outcome": "transferred",
+      "reason": "restructuring",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": [
+        {
+          "queue": "restructuring"
+        }
+      ]
+    },
+    "checks": [
+      "Transfer to restructuring without describing a plan.",
+      "The agreed but unrecorded card proposal must not become a promise.",
+      "Add no notes before or after the transfer; close as transferred/restructuring."
+    ],
+    "rules": [
+      "A 41",
+      "B 7",
+      "B 10"
+    ]
+  },
+  {
+    "id": "HARD-11",
+    "source_case": "PUB-02",
+    "brief": "A",
+    "family": "Third party",
+    "level": "hard",
+    "title": "Wrong number answered",
+    "variables": {
+      "first_name": "Maria",
+      "last_name": "Costa",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1979-11-02",
+      "phone_last4": "0358"
+    },
+    "products": [
+      {
+        "type": "personal_loan",
+        "past_due": 310.5,
+        "days_late": 11,
+        "instalment_amount": 103.5
+      }
+    ],
+    "script": "The person answering says that you have the wrong number and that nobody named Maria Costa lives here or has this number. When asked or told anything else, repeats that this is the wrong number.",
+    "expected": {
+      "outcome": "not_reached",
+      "reason": "wrong_number",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Do not disclose why the bank is calling, the debt, or account details to the stranger.",
+      "Do not call verify_identity, get_account, or schedule_callback.",
+      "Close the call as not_reached with reason wrong_number."
+    ],
+    "rules": [
+      "A 1",
+      "A 5",
+      "A 8",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-12",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Third party",
+    "level": "hard",
+    "title": "Customer is deceased",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "The person who answers explains that Daniel Reyes passed away three weeks ago. They say nothing else.",
+    "expected": {
+      "outcome": "not_reached",
+      "reason": "deceased",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Say \"I am sorry for your loss.\" upon learning of the customer's passing.",
+      "Ask nothing further and do not ask for any other contact or callback.",
+      "Do not call verify_identity or get_account, and close as not_reached with reason deceased."
+    ],
+    "rules": [
+      "A 1",
+      "A 5",
+      "A 9",
+      "A 46",
+      "A 47"
+    ]
+  },
+  {
+    "id": "HARD-13",
+    "source_case": "PUB-02",
+    "brief": "A",
+    "family": "Third party",
+    "level": "hard",
+    "title": "Two invalid callback times lead to no callback",
+    "variables": {
+      "first_name": "Maria",
+      "last_name": "Costa",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1979-11-02",
+      "phone_last4": "0358"
+    },
+    "products": [
+      {
+        "type": "personal_loan",
+        "past_due": 310.5,
+        "days_late": 11,
+        "instalment_amount": 103.5
+      }
+    ],
+    "script": "The person who answers is Maria's husband. He says Maria is not available right now. When asked when she can be reached, he first proposes Sunday at 14:00 (outside the business day window). When the agent asks once for a valid time today or next business day between 10:00 and 19:00, he proposes tomorrow at 21:30 (outside the hours window). He makes no other proposal.",
+    "expected": {
+      "outcome": "not_reached",
+      "reason": "no_callback",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Do not disclose why the call is being made or any debt information to the husband.",
+      "Ask once for a different time after the first invalid proposal.",
+      "Do not call schedule_callback when the second proposal is also invalid.",
+      "Close the call as not_reached with reason no_callback."
+    ],
+    "rules": [
+      "A 1",
+      "A 5-7",
+      "A 10",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-14",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Opening",
+    "level": "hard",
+    "title": "Unclear identity confirmation after two asks",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "The person answers with \"Hello? Who is calling?\". When the agent asks \"Am I speaking with Mr Reyes?\", the person responds \"Just tell me who you are and what this is about, go ahead.\" When the agent asks a second time \"Am I speaking with Mr Reyes?\", the person says \"I am not saying another word until you explain why you called me.\" He never confirms his identity.",
+    "expected": {
+      "outcome": "not_reached",
+      "reason": "unclear",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Do not treat \"go ahead\" or demanding the purpose of the call as confirmation of identity.",
+      "Ask once more to confirm whether speaking with Mr Reyes without disclosing debt or collections.",
+      "Close as not_reached with reason unclear after the second unclear response.",
+      "Do not call verify_identity or get_account."
+    ],
+    "rules": [
+      "A 1-3",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-15",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Transfer",
+    "level": "hard",
+    "title": "Customer insists on speaking to a human agent",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms he is Daniel Reyes. Date of birth 14 March 1988, phone digits 4471. When the agent states the debt and asks if he can pay today, says \"I want to talk to a human being, not an automated system.\" When the agent asks once if the digital assistant can help first, he insists: \"No, transfer me to a real human agent immediately.\" He makes no payment proposal.",
+    "expected": {
+      "outcome": "transferred",
+      "reason": "human",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": [
+        {
+          "queue": "general"
+        }
+      ]
+    },
+    "checks": [
+      "Ask once whether the digital assistant can help first before transferring.",
+      "When customer insists, call transfer_to_agent with queue general.",
+      "Do not create any promise, and close as transferred with reason human."
+    ],
+    "rules": [
+      "A 42",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-16",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Dispute",
+    "level": "hard",
+    "title": "Customer disputes credit card debt as not theirs",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms he is Daniel Reyes. Gives birth date 14 March 1988, phone digits 4471. When the agent states the credit card past-due amount, he says: \"This is not my debt. I never opened or had a credit card ending 4821 with Freya Bank, someone must have stolen my identity.\" He does not agree to any payment.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "dispute",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Do not argue with the customer regarding the disputed debt.",
+      "Do not attempt persuasion or ask for payment after the dispute is stated.",
+      "Create no promise, add no note, and close as no_promise with reason dispute."
+    ],
+    "rules": [
+      "A 40",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-17",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Persuasion",
+    "level": "hard",
+    "title": "Early-band persuasion exhausted after one attempt",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms identity with date of birth 14 March 1988 and phone digits 4471. When asked if he can make the payment today, says \"No, I cannot pay today.\" When the agent proposes paying the full amount on Friday 16 October (persuasion attempt 1), he says \"No, I cannot pay on Friday either, I won't have the money.\" He proposes no other date or amount.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "refused",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Early band has only 1 persuasion attempt: propose the last business day of this week (Friday 16 October).",
+      "Do not make a second persuasion attempt or repeat refused offers.",
+      "Create no promise and close as no_promise with reason refused."
+    ],
+    "rules": [
+      "A 18",
+      "A 28",
+      "A 30",
+      "A 31",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-18",
+    "source_case": "PUB-06",
+    "brief": "A",
+    "family": "Persuasion",
+    "level": "hard",
+    "title": "Late-band persuasion exhausted across both attempts",
+    "variables": {
+      "first_name": "Priya",
+      "last_name": "Nair",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1986-05-17",
+      "phone_last4": "1502"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "1903",
+        "past_due": 2125.1,
+        "days_late": 12,
+        "minimum_payment": 637.5
+      }
+    ],
+    "script": "Confirms identity (DOB 17 May 1986, phone 1502). When asked if she can pay the full 2125.10 today, says \"The full amount is way too much, I cannot pay that.\" When the agent offers the minimum payment floor of 637.50 today, says \"No, I have nothing today.\" When the agent makes attempt 1 for 637.50 on Friday 16 October, says \"No, that is impossible.\" When the agent makes attempt 2 for 637.50 on the deadline of Friday 23 October, says \"No, I cannot pay by then either.\" Offers no date or amount.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "refused",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Offer the floor once when full is stated to be too much.",
+      "Late band allows attempt 1 on Friday 16 October and attempt 2 on deadline 23 October.",
+      "When attempt 2 is declined, stop all persuasion and close as no_promise with reason refused.",
+      "Create no promise and call close_call exactly once."
+    ],
+    "rules": [
+      "A 18",
+      "A 26",
+      "A 30",
+      "A 31",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-19",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Amounts",
+    "level": "hard",
+    "title": "Customer volunteers valid partial amount between floor and full",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms identity (DOB 14 March 1988, phone digits 4471). When asked if he can pay the full 420.00 today, says \"I cannot pay the entire 420 today, but I can pay 250 today.\" When the agent reads back the agreed terms of 250.00 on 14 October, he confirms \"Yes, I confirm.\" Then acknowledges the text message notice.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 250.0,
+          "date": "2026-10-14"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Accept customer-proposed amount of 250.00 since it is between the floor (126.00) and full past-due amount (420.00).",
+      "Read back credit card ending 4821, 250.00 and 14 October 2026.",
+      "Call create_promise once with 250.00 after confirmation.",
+      "Say the text message confirmation sentence after promise succeeds."
+    ],
+    "rules": [
+      "A 27",
+      "A 29",
+      "A 34",
+      "A 38",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-20",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Amounts",
+    "level": "hard",
+    "title": "Customer offers below floor, then accepts floor",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms identity (DOB 14 March 1988, phone digits 4471). When asked to pay today, says \"I can only pay 50 dollars today.\" When the agent explains that 50 cannot be recorded because it is below the minimum payment floor of 126.00 and offers 126.00 today, he replies \"Alright, I can manage the 126 today.\" Confirms at the read-back.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 126.0,
+          "date": "2026-10-14"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Explain that 50.00 is below the floor and offer the minimum payment of 126.00.",
+      "Accept the customer's agreement to the floor amount.",
+      "Read back 126.00 today and call create_promise with 126.00 once confirmed.",
+      "Deliver the text message confirmation sentence."
+    ],
+    "rules": [
+      "A 25",
+      "A 27",
+      "A 34",
+      "A 38",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-21",
+    "source_case": "PUB-04",
+    "brief": "A",
+    "family": "Dates",
+    "level": "hard",
+    "title": "Vague period clarification fails so agent proposes deadline",
+    "variables": {
+      "first_name": "Lena",
+      "last_name": "Hoffmann",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1984-01-30",
+      "phone_last4": "2219"
+    },
+    "products": [
+      {
+        "type": "car_loan",
+        "past_due": 1250.0,
+        "days_late": 14,
+        "instalment_amount": 400.0
+      }
+    ],
+    "script": "Confirms identity (DOB 30 January 1984, phone digits 2219). When asked if she can pay today, says \"I can make the payment next week.\" When the agent asks once for an exact day next week, she replies \"I am not sure of the exact day, just sometime next week.\" When the agent proposes the deadline date of Friday 23 October, she accepts: \"Yes, 23 October is fine with me.\" Confirms at the read-back.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 1250.0,
+          "date": "2026-10-23"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Ask once for an exact day when customer gives vague \"next week\".",
+      "When customer still gives no exact day, propose the deadline of Friday 23 October.",
+      "Read back car loan, full amount 1250.00, and date 23 October 2026.",
+      "Record exactly one promise for 1250.00 on 2026-10-23 and close as promise."
+    ],
+    "rules": [
+      "A 21",
+      "A 34",
+      "A 38",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-22",
+    "source_case": "PUB-03",
+    "brief": "A",
+    "family": "Identity",
+    "level": "hard",
+    "title": "Wrong answers split across DOB and phone exhaust three attempts",
+    "variables": {
+      "first_name": "Owen",
+      "last_name": "Park",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1992-07-21",
+      "phone_last4": "6630"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "0377",
+        "past_due": 95.0,
+        "days_late": 4,
+        "minimum_payment": 28.5
+      }
+    ],
+    "script": "Confirms he is Owen Park. When asked for date of birth, first says 10 May 1990 (wrong 1). On retry, says 15 June 1991 (wrong 2). On second retry, gives the correct date 21 July 1992. The date passes. When asked for the last four digits of his phone number, he gives 9999 (wrong 3 in total). He is given no further attempts.",
+    "expected": {
+      "outcome": "not_verified",
+      "reason": "failed",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Count wrong answers across both security questions together (2 wrong DOB + 1 wrong phone = 3 total).",
+      "Do not disclose debt, amounts, or get_account after the third wrong answer.",
+      "Refer the customer to the mobile app or a branch.",
+      "Close as not_verified with reason failed."
+    ],
+    "rules": [
+      "A 11",
+      "A 12",
+      "A 14",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-23",
+    "source_case": "PUB-05",
+    "brief": "A",
+    "family": "Hardship",
+    "level": "hard",
+    "title": "Customer mentions bereavement hardship but volunteers valid promise",
+    "variables": {
+      "first_name": "Tomas",
+      "last_name": "Novak",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1990-09-09",
+      "phone_last4": "8846"
+    },
+    "products": [
+      {
+        "type": "personal_loan",
+        "past_due": 780.0,
+        "days_late": 21,
+        "instalment_amount": 260.0
+      }
+    ],
+    "script": "Confirms identity (DOB 9 September 1990, phone digits 8846). When the agent states the overdue personal loan, says \"My father passed away last week so I had unexpected funeral expenses, but I can definitely pay the full 780 next Tuesday 20 October.\" The agent expresses sympathy and does not persuade. Confirms the read-back of 780 on 20 October.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 780.0,
+          "date": "2026-10-20"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Say one short sentence of sympathy regarding the death in the family.",
+      "Do not make any persuasion attempts.",
+      "Record the volunteered compliant date and amount (780.00 on 2026-10-20) as allowed by Rule 32.",
+      "Read back terms, get confirmation, create one promise, and close as promise."
+    ],
+    "rules": [
+      "A 32",
+      "A 34",
+      "A 38",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-24",
+    "source_case": "PUB-11",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "One promise, one hardship note, and one refusal note",
+    "variables": {
+      "first_name": "Sofia",
+      "last_name": "Almeida",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1987-06-03",
+      "phone_last4": "2288"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "2288",
+        "past_due": 220.0,
+        "days_late": 9,
+        "minimum_payment": 66.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 640.0,
+        "days_late": 9,
+        "instalment_amount": 213.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 75.0,
+        "days_late": 3,
+        "instalment_amount": 25.0
+      }
+    ],
+    "script": "Confirms identity (DOB 3 June 1987, phone 2288). Agent states all three products in order. Customer cannot pay all three today. For credit card, agrees to pay 220.00 on Friday 16 October. For personal loan, says she is recovering from major surgery and has medical bills; agent expresses sympathy and offers customer support transfer; customer declines transfer (\"No, just do not transfer me\"). For car loan, customer says \"I refuse to pay the car loan right now\"; when agent proposes Friday 16 October (attempt 1), customer rejects it. Confirms the single read-back for the credit card.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 220.0,
+          "date": "2026-10-16"
+        }
+      ],
+      "notes": [
+        {
+          "product_id": "p2",
+          "reason": "hardship"
+        },
+        {
+          "product_id": "p3",
+          "reason": "refused"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "State each of the three products before asking for payment.",
+      "Process products in get_account order.",
+      "Offer support once with brief sympathy for p2 illness; add note hardship when transfer is declined.",
+      "Apply persuasion attempt for p3 and add note refused when rejected.",
+      "Read back p1 promise, create one promise, write both notes, and close as promise."
+    ],
+    "rules": [
+      "A 32",
+      "A 30",
+      "B 4",
+      "B 5",
+      "B 7",
+      "B 8",
+      "B Closing"
+    ]
+  },
+  {
+    "id": "HARD-25",
+    "source_case": "PUB-12",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "No promises recorded with first non-paid note determining close reason",
+    "variables": {
+      "first_name": "Marcus",
+      "last_name": "Bell",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1983-10-19",
+      "phone_last4": "4410"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "9015",
+        "past_due": 510.0,
+        "days_late": 16,
+        "minimum_payment": 153.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 1320.0,
+        "days_late": 16,
+        "instalment_amount": 440.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 140.0,
+        "days_late": 7,
+        "instalment_amount": 46.0
+      }
+    ],
+    "script": "Confirms identity (DOB 19 October 1983, phone 4410). After agent states all three products, customer cannot pay today. For the credit card, says he paid the overdue 510 this morning. For the personal loan, refuses to pay; declines attempt 1 (Friday 16 Oct) and attempt 2 (deadline 23 Oct). For the car loan, says he never took out this car loan and it is fraudulent. No promises are made.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "refused",
+      "promises": [],
+      "notes": [
+        {
+          "product_id": "p1",
+          "reason": "paid"
+        },
+        {
+          "product_id": "p2",
+          "reason": "refused"
+        },
+        {
+          "product_id": "p3",
+          "reason": "dispute"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Add one note per product in Brief B when no promise is made: p1 paid, p2 refused, p3 dispute.",
+      "Do not create any promises.",
+      "Apply Brief B closing precedence: first non-paid note in original order is p2 (refused).",
+      "Close as no_promise with reason refused."
+    ],
+    "rules": [
+      "A 39",
+      "A 40",
+      "A 30",
+      "B 4",
+      "B 8",
+      "B 9",
+      "B Closing"
+    ]
+  },
+  {
+    "id": "HARD-26",
+    "source_case": "PUB-11",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "Support transfer in multi-product writes zero notes",
+    "variables": {
+      "first_name": "Sofia",
+      "last_name": "Almeida",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1987-06-03",
+      "phone_last4": "2288"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "2288",
+        "past_due": 220.0,
+        "days_late": 9,
+        "minimum_payment": 66.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 640.0,
+        "days_late": 9,
+        "instalment_amount": 213.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 75.0,
+        "days_late": 3,
+        "instalment_amount": 25.0
+      }
+    ],
+    "script": "Confirms identity (DOB 3 June 1987, phone 2288). When the agent states all three products, customer breaks down and says she lost her job and has severe health issues. Agent expresses sympathy and offers customer support. Customer accepts: \"Yes please transfer me to support.\" The call is transferred immediately.",
+    "expected": {
+      "outcome": "transferred",
+      "reason": "support",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": [
+        {
+          "queue": "support"
+        }
+      ]
+    },
+    "checks": [
+      "Express brief sympathy for hardship and make no persuasion attempt.",
+      "Transfer to queue support when customer accepts.",
+      "Under Rule B10, do not write any notes before or after the transfer.",
+      "Close as transferred with reason support."
+    ],
+    "rules": [
+      "A 32",
+      "B 10"
+    ]
+  },
+  {
+    "id": "HARD-27",
+    "source_case": "PUB-13",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "No promises recorded with first non-paid note being dispute",
+    "variables": {
+      "first_name": "Elena",
+      "last_name": "Rossi",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1991-01-08",
+      "phone_last4": "6604"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "6604",
+        "past_due": 300.0,
+        "days_late": 4,
+        "minimum_payment": 90.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 900.0,
+        "days_late": 20,
+        "instalment_amount": 300.0
+      }
+    ],
+    "script": "Confirms identity (DOB 8 January 1991, phone 6604). After the agent states both products, customer cannot pay today. For the credit card (p1), says she never opened this credit card and someone committed fraud in her name (dispute). For the personal loan (p2), says she paid the overdue instalment in the mobile app this morning (paid). No promises are agreed.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "dispute",
+      "promises": [],
+      "notes": [
+        {
+          "product_id": "p1",
+          "reason": "dispute"
+        },
+        {
+          "product_id": "p2",
+          "reason": "paid"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Record dispute note for p1 and paid note for p2.",
+      "Under Brief B closing precedence, when no promise is recorded and not all are paid, close with reason of first non-paid product (p1 dispute).",
+      "Close as no_promise with reason dispute."
+    ],
+    "rules": [
+      "A 39-40",
+      "B 8-9",
+      "B Closing"
+    ]
+  },
+  {
+    "id": "HARD-28",
+    "source_case": "PUB-10",
+    "brief": "A",
+    "family": "Tool failure",
+    "level": "hard",
+    "title": "Two consecutive create_promise failures trigger service error",
+    "variables": {
+      "first_name": "Grace",
+      "last_name": "Lin",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1989-02-23",
+      "phone_last4": "9904"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "7740",
+        "past_due": 365.0,
+        "days_late": 8,
+        "minimum_payment": 109.5
+      }
+    ],
+    "script": "Confirms identity (DOB 23 February 1989, phone 9904). Customer agrees to pay the full overdue amount of 365.00 on Friday 16 October and confirms at the read-back. When create_promise fails on the first attempt, the agent retries once. The second create_promise attempt also fails. The agent explains that the promise could not be recorded.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "service_error",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Retry create_promise exactly once after the first failure.",
+      "When the second create_promise call fails, do not claim that the promise was recorded.",
+      "State that the payment could not be recorded and close as no_promise with reason service_error."
+    ],
+    "rules": [
+      "A 34",
+      "A 37",
+      "A 46"
+    ]
+  },
+  {
+    "id": "HARD-29",
+    "source_case": "PUB-13",
+    "brief": "B",
+    "family": "Multi-product",
+    "level": "hard",
+    "title": "One promise recorded and one failed promise noted as service error",
+    "variables": {
+      "first_name": "Elena",
+      "last_name": "Rossi",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1991-01-08",
+      "phone_last4": "6604"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "6604",
+        "past_due": 300.0,
+        "days_late": 4,
+        "minimum_payment": 90.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 900.0,
+        "days_late": 20,
+        "instalment_amount": 300.0
+      }
+    ],
+    "script": "Confirms identity (DOB 8 January 1991, phone 6604). Customer agrees to pay the full past-due amount for both products on Friday 16 October. Confirms the single combined read-back. For credit card p1, create_promise succeeds. For personal loan p2, create_promise fails twice. The agent preserves the recorded p1 promise and notes p2 as service error.",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 300.0,
+          "date": "2026-10-16"
+        }
+      ],
+      "notes": [
+        {
+          "product_id": "p2",
+          "reason": "service_error"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Record p1 promise after confirmation.",
+      "Retry p2 create_promise once before noting service_error on p2.",
+      "Under Rule B11, keep p1 promise, add note service_error for p2, and close as promise."
+    ],
+    "rules": [
+      "B 7",
+      "B 11",
+      "B Closing"
+    ]
+  },
+  {
+    "id": "HARD-30",
+    "source_case": "PUB-01",
+    "brief": "A",
+    "family": "Refusal",
+    "level": "hard",
+    "title": "Customer refuses to talk twice after identity verification",
+    "variables": {
+      "first_name": "Daniel",
+      "last_name": "Reyes",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1988-03-14",
+      "phone_last4": "4471"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "4821",
+        "past_due": 420.0,
+        "days_late": 6,
+        "minimum_payment": 126.0
+      }
+    ],
+    "script": "Confirms he is Daniel Reyes. Date of birth 14 March 1988, phone digits 4471. Once identity is verified and the collections reason is stated, customer says \"I really do not want to talk about this right now.\" Agent explains the situation and asks if they can resolve it. Customer says a second time: \"I told you, I do not want to talk to you. Stop calling me.\" and hangs up.",
+    "expected": {
+      "outcome": "no_promise",
+      "reason": "refused",
+      "promises": [],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Under Rule A45, after customer says twice they do not want to talk once verified, close as no_promise with reason refused.",
+      "Do not create a promise or call get_account repeatedly.",
+      "End with close_call as no_promise/refused."
+    ],
+    "rules": [
+      "A 45",
+      "A 46"
+    ]
+  }
+]

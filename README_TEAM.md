@@ -54,11 +54,17 @@ source env.sh
 
 `FREYA_API_KEY` is the workspace credential. `FREYA_BANK_TEAM_KEY` isolates the
 practice bank ledger. `FREYA_API_URL` normally uses the kit's staging default.
-The builder uses an available `claude` or `codex` CLI to compile the policy.
-Install and authenticate one of them locally before a scored build; configure
-its model choice through the builder's environment options. Without an available
-model the CLI uses a source-only policy fallback, which is useful for offline
-verification but may miss unusual policy wording.
+`OPENAI_API_KEY` is required for the production builder to compile a policy.
+The builder sends the supplied briefs and complete OpenAPI file directly to
+OpenAI's `gpt-6-sol` Responses API, then validates the returned policy with
+`compile_policy`. The request uses medium reasoning, JSON object output,
+`store=false`, and a 25,000-token output allowance. It has a 900-second request
+timeout within the 30-minute total build limit. The command does not require a
+Claude or Codex CLI login.
+The trace records both the requested and serving model IDs.
+If the key is missing, the model response is incomplete, or the policy fails
+validation, the build fails and records the reason in its trace; it does not
+publish a source-only fallback.
 Never paste a key into a brief, prompt, workflow export,
 trace, screenshot, commit, or submission. Inspect generated artifacts for secrets
 before committing. Keep local state such as `.freya-agents.json`, persona caches,

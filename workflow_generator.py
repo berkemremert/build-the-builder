@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from api_bindings import promise_request_fields
+
 
 def _check(variable: str, operator: str, operand: Any = "") -> dict:
     item = {"variable": variable, "operator": operator}
@@ -218,29 +220,40 @@ def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
 
 
 def _holiday_dates(policy: dict) -> list[str]:
-    """Read only dates explicitly identified as bank holidays in the input."""
+    """Apply holiday statements in source order, including later revocations."""
+    source = str(policy.get("raw_brief") or "")
+    if not source:
+        source = "\n".join(str(policy.get(key) or "") for key in
+                           ("global_rules", "verified_call", "opening"))
     dates: set[str] = set()
-    constraints = policy.get("constraints") or {}
-    if isinstance(constraints, dict):
-        for key, value in constraints.items():
-            if "holiday" in str(key).lower():
-                dates.update(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", str(value)))
-    for key in ("raw_brief", "global_rules", "verified_call", "opening"):
-        source = str(policy.get(key) or "")
-        for line in source.splitlines():
-            if "holiday" in line.lower():
-                dates.update(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", line))
+    for match in re.finditer(r"\b20\d{2}-\d{2}-\d{2}\b", source):
+        start = max(source.rfind(mark, 0, match.start()) for mark in (";", ".", "\n")) + 1
+        ends = [source.find(mark, match.end()) for mark in (";", ".", "\n")]
+        end = min((point for point in ends if point >= 0), default=len(source))
+        clause = source[start:end].lower()
+        if "holiday" not in clause:
+            continue
+        if re.search(r"\b(?:no longer|not|removed|revoked|cancelled|canceled)\b", clause):
+            dates.discard(match.group())
+        else:
+            dates.add(match.group())
     return sorted(dates)
 
 
-def _queue_for(openapi: dict, role: str) -> str:
+def _queue_for(openapi: dict, role: str, policy: dict) -> str:
     schema = _api_spec(openapi, "transfer_to_agent")[2]
     queue_spec = (schema.get("properties") or {}).get("queue") or {}
     values = [str(value) for value in queue_spec.get("enum") or []]
     if not values:
         return role
+    source = str(policy.get("raw_brief") or "") or str(policy.get("global_rules") or "")
+    for match in re.finditer(r"\b(support|human|restructuring)\s*=\s*([A-Za-z0-9_-]+)", source, re.I):
+        if match.group(1).lower() == role and match.group(2) in values:
+            explicit = match.group(2)
+    if "explicit" in locals():
+        return explicit
     hints = {
-        "restructuring": ("restructur", "repayment", "payment_plan", "workout", "arrangement"),
+        "restructuring": ("restructur", "repayment", "payment_plan", "workout", "arrangement", "specialist"),
         "support": ("support", "care", "hardship", "assist"),
         "human": ("general", "human", "agent", "service"),
     }
@@ -251,12 +264,26 @@ def _queue_for(openapi: dict, role: str) -> str:
     return values[0]
 
 
-def _identity_fields(openapi: dict) -> list[str]:
+def _identity_fields(openapi: dict, policy: dict) -> list[str]:
     schema = _api_spec(openapi, "verify_identity")[2]
     field = (schema.get("properties") or {}).get("field") or {}
     values = [str(value) for value in field.get("enum") or []]
     if len(values) < 2:
         raise ValueError("verify_identity.field must offer at least two fields")
+    source = "\n".join(str(policy.get(key) or "") for key in ("identity", "raw_brief"))
+    aliases = {
+        "date_of_birth": ("date of birth", "birth date", "dob"),
+        "phone_last4": ("last four digits of the phone", "last 4 digits of the phone", "phone number"),
+        "birth_year": ("birth year",),
+    }
+    positions = {}
+    for value in values:
+        names = aliases.get(value, (value.replace("_", " "),))
+        hits = [match.start() for name in names for match in re.finditer(re.escape(name), source, re.I)]
+        if hits:
+            positions[value] = min(hits)
+    if len(positions) >= 2:
+        return sorted(positions, key=positions.get)[:2]
     return values[:2]
 
 
@@ -276,6 +303,10 @@ def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
     policy_keys = list(policy_outcomes) if isinstance(policy_outcomes, dict) else []
     source = str((policy or {}).get("raw_brief") or "")
     for role, hints in aliases.items():
+        explicit = policy_outcomes.get(role) if isinstance(policy_outcomes, dict) else None
+        if isinstance(explicit, str) and explicit in values:
+            result[role] = explicit
+            continue
         replacements = re.findall(r"replace\s+(?:outcome\s+)?" + re.escape(role) +
                                   r"\s+with\s+([a-z_]+)", source, flags=re.IGNORECASE)
         if replacements and replacements[-1] in values:
@@ -285,7 +316,9 @@ def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
         else:
             candidates = [value for value in values if value in policy_keys]
             result[role] = next((value for hint in hints for value in candidates + values
-                                 if hint in value.lower() and not (role == "promise" and value.lower().startswith("no_"))), values[0])
+                                 if hint in value.lower() and not (role == "promise" and value.lower().startswith("no_"))), None)
+            if result[role] is None:
+                raise ValueError(f"Cannot map {role} outcome to OpenAPI enum {values!r}")
     return result
 
 
@@ -372,39 +405,38 @@ def _opening_line(policy: dict, bank_name: str) -> str:
 
 
 def _deadline_bands(policy: dict) -> list[dict]:
-    source = "\n".join(str(policy.get(key) or "") for key in ("raw_brief", "verified_call", "global_rules"))
-    bands = []
+    source = str(policy.get("raw_brief") or "")
+    if not source:
+        source = "\n".join(str(policy.get(key) or "") for key in ("verified_call", "global_rules"))
+    found = []
     pattern = re.compile(
         r"\|\s*(\d+)\s+to\s+(\d+)\s*\|\s*([^|]+)\|\s*the\s+(\d+)(?:st|nd|rd|th)\s+business day[^|]*\|\s*(\d+)\s*\|",
         re.IGNORECASE,
     )
-    for low, high, label, days, attempts in pattern.findall(source):
-        bands.append({"low": int(low), "high": int(high), "label": label.strip(),
-                      "business_days": int(days), "attempts": int(attempts)})
-    if not bands:
-        words = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+    for match in pattern.finditer(source):
+        low, high, label, days, attempts = match.groups()
+        found.append((match.start(), {"low": int(low), "high": int(high), "label": label.strip(),
+                     "business_days": int(days), "attempts": int(attempts)}))
+    words = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
                  "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
                  "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
                  "fifteenth": 15}
-        cardinal = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    cardinal = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
                     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-        sentence = re.compile(
+    sentence = re.compile(
             r"(\d+)\s*(?:to|[-–])\s*(\d+)\s+days?\s+late[^.]*?deadline\s+is\s+(?:the\s+)?"
             r"([a-z]+|\d+(?:st|nd|rd|th)?)\s+business\s+day[^.]*?with\s+"
             r"([a-z]+|\d+)\s+(?:persuasion\s+)?attempt",
             re.IGNORECASE,
         )
-        for low, high, ordinal, attempt in sentence.findall(source):
-            days = words.get(ordinal.lower()) or int(re.match(r"\d+", ordinal).group()) if re.match(r"\d+", ordinal) else words.get(ordinal.lower())
-            count = cardinal.get(attempt.lower()) or int(attempt) if attempt.isdigit() else cardinal.get(attempt.lower())
-            if days and count:
-                bands.append({"low": int(low), "high": int(high), "label": "",
-                              "business_days": days, "attempts": count})
-    if not bands:
-        words = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
-                 "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
-                 "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
-                 "fifteenth": 15}
+    for match in sentence.finditer(source):
+        low, high, ordinal, attempt = match.groups()
+        days = int(re.match(r"\d+", ordinal).group()) if re.match(r"\d+", ordinal) else words.get(ordinal.lower())
+        count = int(attempt) if attempt.isdigit() else cardinal.get(attempt.lower())
+        if days and count:
+            found.append((match.start(), {"low": int(low), "high": int(high), "label": "",
+                          "business_days": days, "attempts": count}))
+    if not found:
         prose = re.compile(
             r"(\d+)\s*(?:to|[-–])\s*(\d+)(?:\s+days?\s+late)?\s*(?:=|:|is|gets?|means?)\s*(?:the\s+)?(\d+)(?:st|nd|rd|th)?|"
             r"(\d+)\s*(?:to|[-–])\s*(\d+)(?:\s+days?\s+late)?\s*(?:=|:|is|gets?|means?)\s*(?:the\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth)\s+business day",
@@ -419,9 +451,9 @@ def _deadline_bands(policy: dict) -> list[dict]:
                 days = int(ordinal)
             else:
                 days = words[ordinal.lower()]
-            bands.append({"low": int(low), "high": int(high), "label": "",
-                          "business_days": days, "attempts": 0})
-    return bands
+            found.append((match.start(), {"low": int(low), "high": int(high), "label": "",
+                          "business_days": days, "attempts": 0}))
+    return [band for _, band in sorted(found, key=lambda item: item[0])]
 
 
 def _success_sentence(policy: dict) -> str:
@@ -608,7 +640,7 @@ try:
         days = int(float(item.get({days_field!r}) or 0))
         floors = [float(item.get(field) or 0) for field in {floor_fields!r}]
         floor = next((value for value in floors if value > 0), amount)
-        band = next((rule for rule in {bands!r} if rule['low'] <= days <= rule['high']), None)
+        band = next((rule for rule in reversed({bands!r}) if rule['low'] <= days <= rule['high']), None)
         deadline = nth(today, band['business_days']) if band else None
         entry = dict(product_id=str(item.get('product_id') or ''), label=label,
                      past_due=amount, floor=floor, days_late=days,
@@ -627,6 +659,7 @@ try:
                          ('; final business day offer: ' + friday.isoformat() if {offer_last_business_day!r} else '') +
                          '; bank holidays: ' + ', '.join(sorted(holidays)))
     vars['last_business_day_offer'] = friday.isoformat() if {offer_last_business_day!r} else ''
+    vars['single_floor_stage'] = '0'
     vars['recorded_ids'] = '[]'
     vars['recorded_count'] = '0'
     vars['note_reasons'] = '{{}}'
@@ -843,6 +876,8 @@ try:
     vars['readback_terms_json'] = json.dumps(ordered)
     vars['confirmation_readback'] = ' '.join(adjustments) + (' ' if adjustments else '') + 'To confirm, you will pay ' + '; '.join(lines) + '.'
     vars['proposal_validation_state'] = 'ready'
+    if len(products) == 1:
+        vars['single_revision_base_json'] = json.dumps(ordered)
     vars['multi_correction_attempts'] = '0'
     vars['proposed_terms_json'] = ''
     vars['proposed_date_words'] = ''
@@ -916,6 +951,178 @@ _CLEAR_CONFIRMATION_CODE = """try:
     vars['confirmation_readback'] = ''
 except Exception:
     pass
+"""
+
+
+_SINGLE_REVISE_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    if len(products) != 1:
+        raise ValueError('Expected one product')
+    product = products[0]
+    pid = str(product.get('product_id') or '')
+    base = json.loads(str(vars.get('single_revision_base_json') or vars.get('readback_terms_json') or '[]'))
+    previous = base[0] if isinstance(base, list) and len(base) == 1 else dict(product_id=pid, amount=product.get('past_due'), date='')
+    raw = vars.get('single_corrected_terms_json') or ''
+    raw = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+    raw = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+    if not isinstance(raw, dict) or str(raw.get('product_id') or pid) != pid:
+        raise ValueError('No corrected terms')
+    amount = raw.get('amount')
+    date = str(raw.get('date_phrase') or raw.get('date_words') or raw.get('raw_date') or raw.get('date') or '').strip()
+    if amount is None and not date:
+        raise ValueError('No changed amount or day')
+    merged = dict(product_id=pid, amount=amount if amount is not None else previous.get('amount'),
+                  date=date or previous.get('date') or '')
+    if merged['amount'] is None or not merged['date']:
+        raise ValueError('Incomplete corrected terms')
+    vars['proposed_terms_json'] = json.dumps([merged])
+    vars['single_revision_state'] = 'ready'
+except Exception:
+    vars['proposed_terms_json'] = ''
+    vars['single_revision_state'] = 'clarify'
+finally:
+    vars['single_corrected_terms_json'] = ''
+    vars['confirmation_status'] = 'changed'
+    vars['validation_state'] = 'invalid'
+    vars['proposal_validation_state'] = 'invalid'
+    vars['pending_promises_json'] = '[]'
+    vars['readback_terms_json'] = '[]'
+    vars['confirmation_readback'] = ''
+"""
+
+
+_SINGLE_DATE_CAPTURE_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    if len(products) != 1:
+        raise ValueError('Expected one product')
+    product = products[0]
+    date = str(vars.get('single_exact_date_words') or '').strip() or str(product.get('deadline') or '')
+    if not date:
+        raise ValueError('No exact day or deadline')
+    amount = vars.get('single_date_amount')
+    vars['proposed_terms_json'] = json.dumps([dict(product_id=product.get('product_id'),
+                                               amount=amount if amount is not None else product.get('past_due'),
+                                               date=date)])
+    vars['single_date_state'] = 'ready'
+except Exception:
+    vars['single_date_state'] = 'invalid'
+    vars['proposed_terms_json'] = ''
+finally:
+    vars['single_exact_date_words'] = ''
+    vars['single_date_amount'] = None
+"""
+
+
+_SINGLE_CLOSE_CODE = """try:
+    vars['single_product_reason'] = __REASON__
+    vars['proposed_terms_json'] = ''
+    vars['pending_promises_json'] = '[]'
+    vars['validation_state'] = 'invalid'
+    vars['confirmation_status'] = 'declined'
+except Exception:
+    pass
+"""
+
+
+_SINGLE_ROBOT_ROUTE_CODE = """try:
+    action = str(vars.get('discussion_action') or '')
+    terms = str(vars.get('proposed_terms_json') or '').strip()
+    amount_intent = str(vars.get('single_amount_intent') or '')
+    vars['single_robot_next'] = ('prepare_confirmation' if action == 'proposal_ready' and terms else
+                                 'single_floor_prepare' if amount_intent == 'full_too_much' and str(vars.get('single_floor_stage') or '0') == '0' else
+                                 'single_exact_date' if action == 'vague_date' else
+                                 'prepare_notes' if action == 'done_no_promise' else 'account_discussion')
+    vars['single_robot_question'] = 'no'
+except Exception:
+    vars['single_robot_next'] = 'account_discussion'
+    vars['single_robot_question'] = 'no'
+"""
+
+
+_SINGLE_FLOOR_PREPARE_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    if len(products) != 1:
+        raise ValueError('Expected one product')
+    product = products[0]
+    date = str(vars.get('last_business_day_offer') or '')
+    amount = float(product.get('floor') or 0)
+    if not date or amount <= 0:
+        raise ValueError('No fixed floor offer')
+    vars['single_floor_offer_terms_json'] = json.dumps([dict(product_id=product.get('product_id'), amount=amount, date=date)])
+    vars['single_floor_offer_text'] = ('The minimum payment for ' + str(product.get('label') or 'this product') +
+                                       ' is ' + format(amount, '.2f') + ' on ' + date +
+                                       '. The rest stays overdue. Can you make that payment?')
+    vars['single_floor_stage'] = '1'
+    vars['single_floor_action'] = 'unclear'
+    vars['single_amount_intent'] = 'none'
+    vars['single_floor_state'] = 'ready'
+except Exception:
+    vars['single_floor_state'] = 'invalid'
+"""
+
+
+_SINGLE_FLOOR_CAPTURE_CODE = """import json
+try:
+    vars['proposed_terms_json'] = ''
+    offered = json.loads(str(vars.get('single_floor_offer_terms_json') or '[]'))
+    if not isinstance(offered, list) or len(offered) != 1:
+        raise ValueError('No fixed offer')
+    term = offered[0]
+    action = str(vars.get('single_floor_action') or '')
+    if action == 'accepted':
+        chosen = term
+    elif action in ('proposal', 'date_needed'):
+        raw = vars.get('single_floor_reply_terms_json') or ''
+        raw = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+        raw = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
+        raw = raw if isinstance(raw, dict) else dict()
+        pid = str(raw.get('product_id') or term.get('product_id') or '')
+        if pid != str(term.get('product_id') or ''):
+            raise ValueError('Wrong product')
+        amount = raw.get('amount') if raw.get('amount') is not None else term.get('amount')
+        date = str(raw.get('date_phrase') or raw.get('date_words') or raw.get('raw_date') or raw.get('date') or '').strip()
+        if not date:
+            vars['single_date_amount'] = amount
+            vars['single_floor_capture_state'] = 'needs_date'
+        else:
+            chosen = dict(product_id=pid, amount=amount, date=date)
+    else:
+        raise ValueError('No accepted terms')
+    if action == 'accepted' or (action in ('proposal', 'date_needed') and date):
+        vars['proposed_terms_json'] = json.dumps([chosen])
+        vars['single_floor_capture_state'] = 'ready'
+except Exception:
+    vars['single_floor_capture_state'] = 'needs_date'
+finally:
+    vars['single_floor_reply_terms_json'] = ''
+"""
+
+
+_SINGLE_FLOOR_NEXT_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    if len(products) != 1:
+        raise ValueError('Expected one product')
+    product = products[0]
+    stage = int(vars.get('single_floor_stage') or 1)
+    limit = int(product.get('attempts') or 1)
+    if stage < limit and product.get('deadline'):
+        amount = float(product.get('floor') or 0)
+        date = str(product.get('deadline'))
+        vars['single_floor_offer_terms_json'] = json.dumps([dict(product_id=product.get('product_id'), amount=amount, date=date)])
+        vars['single_floor_offer_text'] = ('For ' + str(product.get('label') or 'this product') + ', can you pay ' +
+                                           format(amount, '.2f') + ' on ' + date + '?')
+        vars['single_floor_stage'] = str(stage + 1)
+        vars['single_floor_action'] = 'unclear'
+        vars['single_floor_state'] = 'ready'
+    else:
+        vars['single_product_reason'] = __REFUSAL_REASON__
+        vars['single_floor_state'] = 'close'
+except Exception:
+    vars['single_floor_state'] = 'invalid'
 """
 
 
@@ -1052,12 +1259,85 @@ except Exception:
 
 
 _MULTI_ADVANCE_CODE = """import json
+import re
 try:
     products = json.loads(str(vars.get('product_json') or '[]'))
     product_by_id = dict((str(item.get('product_id') or ''), item) for item in products)
     terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
     notes = json.loads(str(vars.get('multi_notes_json') or '{}'))
     floor_first = set(json.loads(str(vars.get('multi_floor_first_json') or '[]')))
+    def resolve_pid(value, fallback=''):
+        name = re.sub(r'\\s+', ' ', str(value or '').lower().replace('_', ' ')).strip()
+        if not name:
+            return fallback if fallback in product_by_id else ''
+        if name in product_by_id:
+            return name
+        matches = []
+        for known_pid, product in product_by_id.items():
+            label = re.sub(r'\\s+', ' ', str(product.get('label') or '').lower().replace('_', ' ')).strip()
+            suffix_match = re.search(r'\\bending (\\d{4})\\b', label)
+            aliases = {label, label.split(' ending ')[0]}
+            if suffix_match:
+                suffix = suffix_match.group(1)
+                aliases.update((suffix, 'ending ' + suffix, 'card ' + suffix,
+                                'card ending ' + suffix, 'credit card ' + suffix))
+            if name in aliases:
+                matches.append(known_pid)
+        return matches[0] if len(matches) == 1 else ''
+    def spoken_number(value):
+        words = re.findall(r'[a-z]+', value.lower().replace('-', ' '))
+        ones = dict(zero=0, one=1, two=2, three=3, four=4, five=5, six=6,
+                    seven=7, eight=8, nine=9, ten=10, eleven=11, twelve=12,
+                    thirteen=13, fourteen=14, fifteen=15, sixteen=16,
+                    seventeen=17, eighteen=18, nineteen=19)
+        tens = dict(twenty=20, thirty=30, forty=40, fifty=50, sixty=60,
+                    seventy=70, eighty=80, ninety=90)
+        total = current = 0
+        meaningful = False
+        for word in words:
+            if word in ('and', 'pounds', 'pound', 'dollars', 'dollar', 'full', 'amount'):
+                continue
+            if word in ones:
+                current += ones[word]
+            elif word in tens:
+                current += tens[word]
+            elif word == 'hundred':
+                current = max(current, 1) * 100
+            elif word == 'thousand':
+                total += max(current, 1) * 1000
+                current = 0
+            else:
+                return None
+            meaningful = True
+        return total + current if meaningful else None
+    def resolve_amount(value, product):
+        due = float(product.get('past_due') or 0)
+        floor = float(product.get('floor') or 0)
+        if value is None:
+            return due
+        if isinstance(value, str):
+            words = value.lower().strip()
+            if words in ('full', 'full amount', 'past due', 'past_due'):
+                return due
+            if words in ('floor', 'minimum', 'minimum payment', 'instalment', 'installment'):
+                return floor
+            try:
+                number = float(words.replace(',', '').replace('£', '').replace('$', ''))
+            except ValueError:
+                number = spoken_number(words)
+            if number is None or ('full' in words.split() and abs(number - due) > 0.005):
+                return None
+        else:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+        return number if floor <= number <= due else None
+    def note_reason(value):
+        reason = str(value or '').strip().lower().replace(' ', '_')
+        if reason in ('paid', 'already_paid', 'previously_paid', 'paid_already'):
+            reason = __PAID_REASON__
+        return reason if reason in __NOTE_CODES__ else ''
     def parsed(value):
         if isinstance(value, str):
             value = json.loads(value) if value.strip() else []
@@ -1069,15 +1349,15 @@ try:
         for item in parsed(value):
             if not isinstance(item, dict):
                 continue
-            pid = str(item.get('product_id') or fallback_pid)
-            if pid not in product_by_id:
+            pid = resolve_pid(item.get('product_id'), fallback_pid)
+            if pid not in product_by_id or pid in notes:
                 continue
             date = str(item.get('date_phrase') or item.get('date_words') or item.get('raw_date') or item.get('date') or '').strip()
             if not date:
                 continue
-            amount = item.get('amount')
+            amount = resolve_amount(item.get('amount'), product_by_id[pid])
             if amount is None:
-                amount = product_by_id[pid].get('past_due')
+                continue
             terms[pid] = dict(product_id=pid, amount=amount, date=date)
             notes.pop(pid, None)
             added = True
@@ -1085,37 +1365,58 @@ try:
     phase = str(vars.get('multi_phase') or 'initial')
     next_step = ''
     if phase == 'initial':
+        raw_notes = vars.get('pending_note_reasons_json') or '{}'
+        raw_notes = json.loads(raw_notes) if isinstance(raw_notes, str) else raw_notes
+        if isinstance(raw_notes, dict):
+            for raw_pid, raw_reason in raw_notes.items():
+                claim_pid = resolve_pid(raw_pid)
+                reason = note_reason(raw_reason)
+                if claim_pid and reason and reason != __REFUSAL_REASON__:
+                    notes[claim_pid] = reason
+                    terms.pop(claim_pid, None)
         if str(vars.get('all_today_status') or '') == 'yes':
             today = str(vars.get('now') or '')[:10]
             for pid, item in product_by_id.items():
-                terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=today)
+                if pid not in notes:
+                    terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=today)
         else:
             common = str(vars.get('multi_common_date_words') or '').strip()
             if common:
                 for pid, item in product_by_id.items():
-                    terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=common)
+                    if pid not in notes:
+                        terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=common)
             add_terms(vars.get('proposed_terms_json') or '')
-            raw_notes = vars.get('pending_note_reasons_json') or '{}'
-            raw_notes = json.loads(raw_notes) if isinstance(raw_notes, str) else raw_notes
-            if isinstance(raw_notes, dict):
-                for pid, reason in raw_notes.items():
-                    pid = str(pid)
-                    if pid in product_by_id and pid not in terms and str(reason) in __NOTE_CODES__ and str(reason) != __REFUSAL_REASON__:
-                        notes[pid] = str(reason)
             for pid in parsed(vars.get('multi_full_too_much_ids_json') or '[]'):
-                if str(pid) in product_by_id:
-                    floor_first.add(str(pid))
+                resolved = resolve_pid(pid)
+                if resolved:
+                    floor_first.add(resolved)
         vars['multi_offer_stage'] = '1'
     else:
         pid = str(vars.get('multi_focus_product_id') or '')
         action = str(vars.get('multi_offer_action') or 'unclear')
-        if phase == 'support':
+        if phase == 'identify':
+            target = resolve_pid(vars.get('multi_reply_product_id'))
+            claim = str(vars.get('multi_claim_action') or '')
+            if target and claim in ('paid', 'dispute'):
+                terms.pop(target, None)
+                notes[target] = __PAID_REASON__ if claim == 'paid' else __DISPUTE_REASON__
+                vars['multi_claim_action'] = ''
+                vars['multi_claim_attempts'] = '0'
+                if target != pid and pid not in terms and pid not in notes:
+                    next_step = 'clarify'
+            else:
+                attempts = int(vars.get('multi_claim_attempts') or 0) + 1
+                vars['multi_claim_attempts'] = str(attempts)
+                next_step = 'identify' if attempts < 2 else 'service_error'
+        elif phase == 'support':
             if action == 'proposal':
                 add_terms(vars.get('multi_reply_terms_json') or '', pid)
-            if pid not in terms:
+            if pid not in terms and pid not in notes:
                 notes[pid] = __HARDSHIP_REASON__
         elif action == 'accepted' and phase == 'offer':
-            if str(vars.get('multi_fixed_offer') or '') == 'yes':
+            if pid in notes:
+                pass
+            elif str(vars.get('multi_fixed_offer') or '') == 'yes':
                 terms[pid] = dict(product_id=pid, amount=vars.get('multi_offer_amount'), date=str(vars.get('multi_offer_date') or ''))
                 notes.pop(pid, None)
             elif not add_terms(vars.get('multi_reply_terms_json') or '', pid):
@@ -1128,12 +1429,19 @@ try:
                     if other not in terms and other not in notes:
                         terms[other] = dict(product_id=other, amount=item.get('past_due'), date=common)
             add_terms(vars.get('multi_reply_terms_json') or '', pid)
-            if pid not in terms:
+            if pid not in terms and pid not in notes:
                 next_step = 'clarify'
-        elif action == 'paid':
-            notes[pid] = __PAID_REASON__
-        elif action == 'dispute':
-            notes[pid] = __DISPUTE_REASON__
+        elif action in ('paid', 'dispute'):
+            target = resolve_pid(vars.get('multi_reply_product_id'))
+            if target:
+                terms.pop(target, None)
+                notes[target] = __PAID_REASON__ if action == 'paid' else __DISPUTE_REASON__
+                if target != pid and pid not in terms and pid not in notes:
+                    next_step = 'clarify'
+            else:
+                vars['multi_claim_action'] = action
+                vars['multi_claim_attempts'] = '0'
+                next_step = 'identify'
         elif action == 'hardship':
             next_step = 'support'
         elif action == 'full_too_much' and pid not in floor_first:
@@ -1157,9 +1465,12 @@ try:
                 notes[pid] = __REFUSAL_REASON__
         vars['multi_reply_terms_json'] = ''
         vars['multi_reply_common_date_words'] = ''
+        vars['multi_reply_product_id'] = ''
     unresolved = [(index, str(item.get('product_id') or '')) for index, item in enumerate(products)
                   if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
-    if next_step in ('support', 'clarify'):
+    if next_step == 'service_error':
+        vars['multi_next'] = 'service_error'
+    elif next_step in ('support', 'clarify', 'identify'):
         vars['multi_phase'] = next_step
         vars['multi_next'] = next_step
         vars['multi_offer_action'] = 'unclear'
@@ -1268,10 +1579,14 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     item_fields = response_schema.get("properties", {}).get("products", {}).get("items", {}).get("properties", {})
     holidays = _holiday_dates(policy)
     bands = _deadline_bands(policy)
-    identity_fields = _identity_fields(openapi)
+    identity_fields = _identity_fields(openapi, policy)
     outcomes = _outcome_names(openapi, policy)
     reason_names, close_reason_names, note_codes, close_codes = _reason_names(openapi, policy)
     promise_success_codes, promise_result_flag, promise_false_codes, promise_no_write_codes = _promise_response_contract(openapi)
+    promise_fields = promise_request_fields(_api_spec(openapi, "create_promise")[2])
+    promise_bindings = {promise_fields["product"]: "{{pending_product_id}}",
+                        promise_fields["amount"]: "{{pending_amount}}",
+                        promise_fields["date"]: "{{pending_date}}"}
     promise_hook = (_PROMISE_HOOK
                     .replace("__SUCCESS_CODES__", repr(promise_success_codes))
                     .replace("__RESULT_FLAG__", repr(promise_result_flag))
@@ -1282,6 +1597,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     source_policy = "\n".join(str(policy.get(key) or "") for key in
                               ("global_rules", "opening", "identity", "verified_call", "outcomes", "tool_policy", "constraints", "raw_brief"))
     offer_last_business_day = "last business day of this week" in source_policy.lower()
+    fixed_single_floor_offer = offer_last_business_day and bool(re.search(r"offer the floor,? once", source_policy, re.I))
     multi_constraints = policy.get("constraints") or {}
     product_limits = str(multi_constraints.get("product_limits") or "") if isinstance(multi_constraints, dict) else ""
     multi_enabled = bool(re.search(
@@ -1305,10 +1621,10 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     promise["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
-        vars['pending_promise_product_id'] = str(body.get('product_id') or '')
+        vars['pending_promise_product_id'] = str(body.get(__PRODUCT_FIELD__) or '')
 except Exception:
     pass
-"""
+""".replace("__PRODUCT_FIELD__", repr(promise_fields["product"]))
     note["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
@@ -1374,44 +1690,54 @@ except Exception:
                                   "Format answers exactly as required by the supplied API and policy. "
                                   "Call verify_identity for each answer. Follow any service hint and remaining-attempt count exactly. "
                                   "If an answer fails, ask this same question again. On final failure follow the policy's escalation guidance. "
-                                  "If they decline or ask why before answering, explain once that security protects their account, then close if they decline again. "
+                                  "A first refusal or question about the call purpose routes to the one-time security explanation. A second refusal or call-purpose question closes through the workflow. Never print tool-call syntax or claim the call is already closed. "
                                   "Do not reveal the account. After tool result, speak or call the next tool.")
     phone_prompt = identity_base + (f"The first security answer passed. Ask only for the customer's {identity_fields[1].replace('_', ' ')}. "
                                     f"Call verify_identity with each answer. Do not ask {identity_fields[0].replace('_', ' ')} again. "
                                     "Use the service's remaining-attempt count and the policy's failure rule. "
-                                    "A refusal or demand to know the call purpose gets one explanation that this protects their account, then a second refusal ends the call. "
+                                    "A first refusal or call-purpose question routes to the one-time security explanation. A second refusal or call-purpose question closes through the workflow. Never print tool-call syntax or claim the call is already closed. "
                                     "After tool result, speak or call the next tool.")
     identity_transitions = lambda success: [
         _bool("load_account" if success else "identity_phone", "verify_identity_response.data.all_verified" if success else "verify_identity_response.data.verified", "Security answer passed"),
         _to("finish_identity_failed", "Three wrong answers", _when(_check("verify_identity_response.data.wrong_answers_left", "equals", "0"))),
+        _eq("identity_decline", "identity_purpose_question", "yes"),
         _eq("identity_decline", "identity_intent", "declined"),
     ]
     nodes["identity_dob"] = _conversation("identity_dob", dob_prompt, tools=[verify_dob],
                                            extraction=[_enum("identity_intent", ["declined", "answered", "other"],
-                                                             f"Latest caller answer: declined if refusing security under the source policy; answered for {identity_fields[0].replace('_', ' ')}; other otherwise.")],
+                                                             f"Classify ONLY the latest caller answer. declined if the caller refuses the security question OR asks what the call is about, why you are calling, or why security is needed before answering—even if they do not say no. answered only if they give {identity_fields[0].replace('_', ' ')}; other otherwise. A call-purpose question must not be other."),
+                                                       _enum("identity_purpose_question", ["yes", "no"],
+                                                             "yes if the latest caller answer asks what this call is about, why you are calling, or demands the purpose before giving security details. no otherwise. Treat this independently of whether identity_intent is declined or other.")],
                                            transitions=identity_transitions(False), max_turns=8, max_target="finish_identity_failed")
     nodes["identity_phone"] = _conversation("identity_phone", phone_prompt, tools=[verify_phone],
                                              extraction=[_enum("identity_intent", ["declined", "answered", "other"],
-                                                               f"Latest caller answer: declined if refusing security under the source policy; answered for {identity_fields[1].replace('_', ' ')}; other otherwise.")],
+                                                               f"Classify ONLY the latest caller answer. declined if the caller refuses the security question OR asks what the call is about, why you are calling, or why security is needed before answering—even if they do not say no. answered only if they give {identity_fields[1].replace('_', ' ')}; other otherwise. A call-purpose question must not be other."),
+                                                         _enum("identity_purpose_question", ["yes", "no"],
+                                                               "yes if the latest caller answer asks what this call is about, why you are calling, or demands the purpose before giving security details. no otherwise. Treat this independently of whether identity_intent is declined or other.")],
                                              transitions=identity_transitions(True), max_turns=8, max_target="finish_identity_failed")
     nodes["identity_decline"] = _conversation(
         "identity_decline", identity_base +
-        "Explain once that the two security questions protect the customer's account, then ask for the currently pending security answer. "
-        "If they decline or ask what the call is about again, say you cannot continue and close. "
-        "If they answer, return to the pending question. No tool call is allowed in this turn.",
+        f"The one-time security explanation and request for {identity_fields[0].replace('_', ' ')} were spoken on entry. Wait for the answer. "
+        "A further refusal or call-purpose question must route to finish_identity_declined so the engine closes the call. "
+        "If they answer, return to the pending security question. Never print tool-call syntax or claim the call has already closed.",
+        opening=f"The security questions protect your account, so I cannot discuss the call before verifying you. Could you please tell me your {identity_fields[0].replace('_', ' ')}?",
         extraction=[_enum("decline_followup", ["declined", "answer", "other"],
-                          f"Latest answer: declined if refusal under the source policy; answer for {identity_fields[0].replace('_', ' ')}; other otherwise.")],
+                          f"Latest answer: declined for any further refusal OR question about the call purpose before security, including 'what is this call about?'; answer only if the caller gives {identity_fields[0].replace('_', ' ')}; other otherwise.")],
         transitions=[_eq("finish_identity_declined", "decline_followup", "declined"),
                      _eq("identity_dob", "decline_followup", "answer")],
         max_turns=2, max_target="finish_identity_declined")
     # A verified DOB is never reasked just because the caller declined the phone question.
     nodes["identity_phone"]["transitions"][2]["target_node"] = "phone_decline"
+    nodes["identity_phone"]["transitions"][3]["target_node"] = "phone_decline"
     nodes["phone_decline"] = _conversation(
         "phone_decline", identity_base +
-        f"Explain the security reason under the policy and ask only for {identity_fields[1].replace('_', ' ')}. "
-        "A second refusal or call-purpose question ends the call. No tool call is allowed in this turn.",
+        f"The one-time security explanation and request for {identity_fields[1].replace('_', ' ')} were spoken on entry. Wait for the answer. "
+        "A second refusal or call-purpose question must route to finish_identity_declined for an engine close. Never print tool-call syntax.",
+        opening=("The security questions protect your account, so I cannot discuss the call before verifying you. "
+                 + ("Could you please tell me the last four digits of your phone number?" if identity_fields[1] == "phone_last4"
+                    else f"Could you please tell me your {identity_fields[1].replace('_', ' ')}?")),
         extraction=[_enum("phone_decline_followup", ["declined", "answer", "other"],
-                          f"Latest answer: declined for a further refusal under the policy; answer for {identity_fields[1].replace('_', ' ')}; other otherwise.")],
+                          f"Latest answer: declined for a further refusal OR question about the call purpose before security; answer only if the caller gives {identity_fields[1].replace('_', ' ')}; other otherwise.")],
         transitions=[_eq("finish_identity_declined", "phone_decline_followup", "declined"),
                      _eq("identity_phone", "phone_decline_followup", "answer")],
         max_turns=2, max_target="finish_identity_declined")
@@ -1442,11 +1768,28 @@ except Exception:
         "For a flat refusal, paid claim, dispute, or hardship with no promise, finish the discussion under the source policy. "
         "Do not say goodbye while a payment proposal remains unconfirmed. No tool call is allowed in this node."
     )
+    single_intent = lambda intent: _when({"logic": "and", "conditions": [
+        _check("product_count", "equals", "1"), _check("single_sensitive_intent", "equals", intent),
+    ]})
     transitions = [
+        _eq("transfer_human", "discussion_action", "transfer_human"),
+        _to("single_hardship", "Hardship takes priority over restructuring", single_intent("hardship")),
+        _to("single_paid_notice", "Current past-due amount was paid", single_intent("paid_current_due")),
         _eq("transfer_restructuring", "discussion_action", "transfer_restructuring"),
         _eq("transfer_support", "discussion_action", "transfer_support"),
-        _eq("transfer_human", "discussion_action", "transfer_human"),
+        _to("single_robot_route", "Answer a one-product robot question before continuing",
+            _when({"logic": "and", "conditions": [
+                _check("product_count", "equals", "1"),
+                _check("single_robot_question", "equals", "yes"),
+            ]})),
     ]
+    if fixed_single_floor_offer:
+        transitions.append(_to("single_floor_prepare", "Offer the one-product floor on the first policy date",
+                               _when({"logic": "and", "conditions": [
+                                   _check("product_count", "equals", "1"),
+                                   _check("single_amount_intent", "equals", "full_too_much"),
+                                   _check("single_floor_stage", "equals", "0"),
+                               ]})))
     if multi_enabled:
         transitions.append(_to("multi_advance", "Begin ordered product discussion after the all-today answer",
                                _when(_check("product_count", "greater_than", 1))))
@@ -1454,18 +1797,26 @@ except Exception:
             _check("product_count", "equals", "1"), _check("discussion_action", "equals", action),
         ]})
         transitions.extend([
+            _to("single_exact_date", "Ask once for a precise single-product payment day", single("vague_date")),
             _to("prepare_confirmation", "Single product proposal", single("proposal_ready")),
             _to("prepare_notes", "Single product final answer", single("done_no_promise")),
         ])
     else:
         transitions.extend([
+            _eq("single_exact_date", "discussion_action", "vague_date"),
             _eq("prepare_confirmation", "discussion_action", "proposal_ready"),
             _eq("prepare_notes", "discussion_action", "done_no_promise"),
         ])
     nodes["account_discussion"] = _conversation("account_discussion", account_prompt, transitions=transitions,
                                                  extraction=[
-                                                     _enum("discussion_action", ["proposal_ready", "done_no_promise", "transfer_restructuring", "transfer_support", "transfer_human", "continue"],
-                                                           "Classify ONLY the latest caller answer using the source policy. proposal_ready only when this answer proposes or accepts specific payment terms with a fresh date phrase, including today or a weekday. A bare yes/I confirm to an earlier read-back in this node is continue, never proposal_ready. done_no_promise only when all products have final paid/dispute/hardship/refused reasons and no transfer is wanted. A no to today without another date is continue while persuasion remains. Transfer actions take priority."),
+                                                     _enum("discussion_action", ["proposal_ready", "vague_date", "done_no_promise", "transfer_restructuring", "transfer_support", "transfer_human", "continue"],
+                                                           "Classify ONLY the latest caller answer using the source policy. proposal_ready when the caller gives a specific payment day, including today or a weekday; for a one-product account use its full past-due amount when the caller names only a date. vague_date when a one-product caller intends to pay but gives only a vague period such as 'the week after next'; ask for an exact day. A bare yes/I confirm to an earlier read-back in this node is continue, never proposal_ready. done_no_promise only when all products have final paid/dispute/hardship/refused reasons and no transfer is wanted. A no to today without another date is continue while persuasion remains. Transfer actions take priority except hardship takes priority over restructuring."),
+                                                     _enum("single_sensitive_intent", ["hardship", "paid_current_due", "none"],
+                                                           "For a one-product account classify ONLY the latest caller answer. hardship if the caller mentions illness, a death in the family, or job loss, even alongside a request for lower instalments. paid_current_due only if they say this current past-due amount was already paid; a product closed or paid off in the past is a dispute, not this intent. none otherwise. Hardship takes priority over restructuring."),
+                                                     _enum("single_robot_question", ["yes", "no"],
+                                                           "For a one-product account, yes if the LATEST caller answer asks whether they are speaking to a robot, AI, automated agent, or digital assistant. Keep yes even if the same answer also proposes a payment date or amount. no otherwise."),
+                                                     _enum("single_amount_intent", ["full_too_much", "none"],
+                                                           "For a one-product account, full_too_much only if the LATEST caller answer says the full past-due amount is too high or unaffordable. Do not classify a specific date or amount proposal as this intent. none otherwise."),
                                                      {"name": "proposed_terms_json", "type": "string", "min_confidence": 0.55,
                                                       "description": "Only when the latest caller answer proposes or accepts payment terms with a date, return a JSON array string with objects product_id, amount, date. Preserve the caller's raw date words verbatim in date, such as 'today', 'this Friday', 'next Friday', '30 October', or an ISO date; NEVER convert a relative date to a year or use the system clock. Code will resolve it from call now {{now}}. Use account facts {{account_facts}} for product ID and numeric full amount. For multiple products include each agreed product with its own raw date phrase. Leave empty for a bare yes/I confirm, no date, or no terms."},
                                                      {"name": "proposed_date_words", "type": "string", "min_confidence": 0.55,
@@ -1486,6 +1837,94 @@ except Exception:
                                                  max_target="multi_advance" if multi_enabled else "prepare_notes")
     nodes["account_discussion"]["on_enter_first_entry_only"] = True
 
+    nodes["single_robot_route"] = _code_node("single_robot_route", _SINGLE_ROBOT_ROUTE_CODE, "single_robot_answer")
+    nodes["single_robot_answer"] = _conversation(
+        "single_robot_answer", "The truthful digital-assistant disclosure was spoken on entry. Continue to the preserved payment proposal without asking the caller to repeat it.",
+        opening=f"Yes, I am {bank_name}'s digital assistant.",
+        transitions=[_eq("prepare_confirmation", "single_robot_next", "prepare_confirmation"),
+                     _eq("single_floor_prepare", "single_robot_next", "single_floor_prepare"),
+                     _eq("single_exact_date", "single_robot_next", "single_exact_date"),
+                     _eq("prepare_notes", "single_robot_next", "prepare_notes"),
+                     _always("account_discussion")],
+        max_turns=1, max_target="account_discussion")
+    nodes["single_robot_answer"]["passthrough"] = True
+    nodes["single_robot_answer"]["passthrough_default_transition"] = "account_discussion"
+
+    nodes["single_floor_prepare"] = _code_node("single_floor_prepare", _SINGLE_FLOOR_PREPARE_CODE, "service_unavailable")
+    nodes["single_floor_prepare"]["transitions"] = [
+        _eq("single_floor_offer", "single_floor_state", "ready"), _always("service_unavailable")]
+    nodes["single_floor_offer"] = _conversation(
+        "single_floor_offer",
+        "The fixed amount, date, and rest-overdue statement were spoken on entry. Wait for the caller's answer. Do not repeat the floor offer or ask how much they can pay. A clear yes accepts the exact stated offer. A changed date or amount needs a validated read-back. Refusal or non-answer advances the bounded policy attempt counter. No tool call is allowed.",
+        opening="{{single_floor_offer_text}}",
+        extraction=[_enum("single_floor_action", ["accepted", "proposal", "date_needed", "refused", "hardship", "paid_current_due", "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
+                          "Classify ONLY the latest answer. accepted means a clear yes to the exact fixed amount and date. proposal means they give a new exact amount or day themselves. date_needed means they accept the floor amount but request a different day without naming it. refused includes 'I cannot do that' and a flat no. hardship and current-due paid claim take priority; transfer requests follow the source policy. unclear is a non-answer. Do not count a caller's own proposed date as refusal."),
+                    {"name": "single_floor_reply_terms_json", "type": "string", "min_confidence": 0.55,
+                     "description": "For proposal only, return one JSON object containing any amount and exact RAW date words the caller gave in the latest answer. Omit unchanged amount; leave empty when no exact terms were given. Do not use the system clock."}],
+        transitions=[_eq("single_hardship", "single_floor_action", "hardship"),
+                     _eq("single_paid_notice", "single_floor_action", "paid_current_due"),
+                     _eq("transfer_human", "single_floor_action", "transfer_human"),
+                     _eq("transfer_support", "single_floor_action", "transfer_support"),
+                     _eq("transfer_restructuring", "single_floor_action", "transfer_restructuring"),
+                     _eq("single_floor_capture", "single_floor_action", "accepted"),
+                     _eq("single_floor_capture", "single_floor_action", "proposal"),
+                     _eq("single_floor_capture", "single_floor_action", "date_needed"),
+                     _eq("single_floor_next", "single_floor_action", "refused"),
+                     _eq("single_floor_next", "single_floor_action", "unclear")],
+        max_turns=2, max_target="single_floor_next")
+    nodes["single_floor_capture"] = _code_node("single_floor_capture", _SINGLE_FLOOR_CAPTURE_CODE, "single_exact_date")
+    nodes["single_floor_capture"]["transitions"] = [
+        _eq("prepare_confirmation", "single_floor_capture_state", "ready"),
+        _always("single_exact_date")]
+    nodes["single_floor_next"] = _code_node(
+        "single_floor_next",
+        _SINGLE_FLOOR_NEXT_CODE.replace("__REFUSAL_REASON__", repr(reason_names.get("refused") or "refused")),
+        "service_unavailable")
+    nodes["single_floor_next"]["transitions"] = [
+        _eq("single_floor_offer", "single_floor_state", "ready"),
+        _eq("prepare_notes", "single_floor_state", "close"),
+        _always("service_unavailable")]
+
+    nodes["single_exact_date"] = _conversation(
+        "single_exact_date",
+        "The caller gave a vague payment period. Ask for one exact day within the permitted window, then wait. Do not claim a promise was recorded. No tool call is allowed.",
+        opening="What exact day would you be able to pay?",
+        extraction=[{"name": "single_exact_date_words", "type": "string", "min_confidence": 0.55,
+                     "description": "Copy only the exact day phrase in the latest answer, verbatim, such as 'Monday the 26th of October'. Leave empty if the reply remains vague or gives no day. Do not convert the date or use the system clock."}],
+        transitions=[_always("single_date_capture")], max_turns=2, max_target="single_date_capture")
+    nodes["single_date_capture"] = _code_node("single_date_capture", _SINGLE_DATE_CAPTURE_CODE, "service_unavailable")
+    nodes["single_date_capture"]["transitions"] = [
+        _eq("prepare_confirmation", "single_date_state", "ready"), _always("service_unavailable")]
+
+    nodes["single_hardship"] = _conversation(
+        "single_hardship",
+        "The caller disclosed hardship. The one short sympathy sentence and support offer were spoken on entry. Wait for the latest answer. Do not persuade, repeat the sympathy sentence, or describe a restructuring plan. If they decline support, close as hardship. If they themselves propose an exact payment day or amount with a day, validate that proposal. No tool call is allowed here.",
+        opening="I'm sorry to hear that. Would you like me to connect you with our customer support team?",
+        extraction=[_enum("single_support_action", ["accepted", "declined", "proposal", "transfer_human", "unclear"],
+                          "Classify the latest answer to the support offer. accepted if they want support; declined if they refuse support or do not want to continue; proposal only if they themselves propose payment with an exact day; transfer_human if they explicitly request a human without accepting support; unclear otherwise. Never turn hardship plus a lower-instalment request into restructuring."),
+                    {"name": "proposed_terms_json", "type": "string", "min_confidence": 0.55,
+                     "description": "Only if the latest caller answer independently proposes a payment with an exact day, return a one-element JSON array with product_id, amount, and raw date words. Use full past-due amount if only the day is stated. Leave empty otherwise."}],
+        transitions=[_eq("transfer_support", "single_support_action", "accepted"),
+                     _eq("transfer_human", "single_support_action", "transfer_human"),
+                     _eq("prepare_confirmation", "single_support_action", "proposal"),
+                     _eq("single_hardship_declined", "single_support_action", "declined")],
+        max_turns=2, max_target="single_hardship_declined")
+    nodes["single_hardship_declined"] = _code_node(
+        "single_hardship_declined",
+        _SINGLE_CLOSE_CODE.replace("__REASON__", repr(reason_names.get("hardship") or "hardship")), "prepare_notes")
+    paid_notice = ("Payments can take one business day to appear."
+                   if "payments can take one business day to appear" in source_policy.lower()
+                   else "Thank you for letting me know.")
+    nodes["single_paid_notice"] = _conversation(
+        "single_paid_notice", "Acknowledge the caller's payment and close. Do not seek a promise or persuade. No tool call is allowed.",
+        opening=paid_notice, transitions=[_always("single_paid_mark")],
+        max_turns=1, max_target="single_paid_mark")
+    nodes["single_paid_notice"]["passthrough"] = True
+    nodes["single_paid_notice"]["passthrough_default_transition"] = "single_paid_mark"
+    nodes["single_paid_mark"] = _code_node(
+        "single_paid_mark", _SINGLE_CLOSE_CODE.replace("__REASON__", repr(reason_names.get("paid") or "paid")),
+        "prepare_notes")
+
     if multi_enabled:
         multi_advance_code = (_MULTI_ADVANCE_CODE
                               .replace("__NOTE_CODES__", repr(note_codes))
@@ -1500,6 +1939,7 @@ except Exception:
             _eq("multi_select_offer", "multi_next", "offer"),
             _eq("multi_support", "multi_next", "support"),
             _eq("multi_clarify", "multi_next", "clarify"),
+            _eq("multi_identify", "multi_next", "identify"),
             _always("service_unavailable"),
         ]
         nodes["multi_select_offer"] = _code_node(
@@ -1512,10 +1952,12 @@ except Exception:
             _enum("multi_offer_action", ["accepted", "proposal", "refused", "full_too_much", "paid", "dispute", "hardship",
                                          "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
                   "Classify only the latest answer about the current product. accepted means yes to the exact fixed offer just spoken. proposal means the caller gave a new exact amount or date. refused includes a flat no or non-answer. full_too_much means the full amount is explicitly too high. Paid, dispute, hardship and transfer requests take priority."),
-            {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.55,
+            {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.45,
              "description": "On a fresh proposal, return a JSON array string of product_id, amount, and the caller's RAW date words. Include every product the caller explicitly covered; leave empty otherwise. For an accepted model-generated offer, repeat the exact offered terms."},
             {"name": "multi_reply_common_date_words", "type": "string", "min_confidence": 0.55,
              "description": "Copy a date phrase only when the latest answer explicitly applies that ONE date to all remaining products. Otherwise leave empty."},
+            {"name": "multi_reply_product_id", "type": "string", "min_confidence": 0.55,
+             "description": "For a paid or dispute claim, identify the product the LATEST caller answer refers to using bank facts {{account_facts}}. Return its exact product ID; a known card suffix or exact product label is also accepted. If the caller says only 'that' or 'this' and names no other product, use current focus {{multi_focus_product_id}}. If the target is ambiguous, leave empty. Never assign a named different product's claim to the current focus."},
         ]
         transfer_routes = [
             _eq("transfer_restructuring", "multi_offer_action", "transfer_restructuring"),
@@ -1544,6 +1986,16 @@ except Exception:
             "multi_clarify", "Ask for one exact amount and day for {{multi_focus_label}} under the source policy. "
             "Do not repeat the previous offer or claim a promise is recorded. No tool call is allowed in this node.",
             extraction=multi_reply_extraction,
+            transitions=transfer_routes + [_always("multi_advance")],
+            max_turns=2, max_target="multi_advance")
+        nodes["multi_identify"] = _conversation(
+            "multi_identify", "The question was spoken on entry. Wait for the caller to identify the product for their paid or dispute claim. "
+            "Do not make an offer or assume it concerns {{multi_focus_label}}. No tool call is allowed in this node.",
+            opening="Which product do you mean?",
+            extraction=[_enum("multi_offer_action", ["transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
+                              "Transfer requests take priority; otherwise classify as unclear."),
+                        {"name": "multi_reply_product_id", "type": "string", "min_confidence": 0.55,
+                         "description": "The caller is identifying the product for the paid or dispute claim made immediately before this question. Map their latest answer to the exact product ID in {{account_facts}}. A known card suffix or exact product label is also accepted. Leave empty if the answer does not identify one product."}],
             transitions=transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_correction"] = _conversation(
@@ -1582,6 +2034,11 @@ except Exception:
                    _check("product_count", "greater_than", 1),
                    _check("proposal_validation_state", "equals", "invalid"),
                ]}))] if multi_enabled else []),
+        _to("single_clarify", "Clarify an invalid single-product proposal",
+            _when({"logic": "and", "conditions": [
+                _check("product_count", "equals", "1"),
+                _check("proposal_validation_state", "equals", "invalid"),
+            ]})),
         _eq("account_discussion", "proposal_validation_state", "invalid"),
         _always("service_unavailable")]
     nodes["confirmation"] = _conversation(
@@ -1591,12 +2048,19 @@ except Exception:
         extraction=[
             _enum("confirmation_status", ["confirmed", "changed", "declined", "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
                   "Classify ONLY the latest answer to the immediately preceding read-back. confirmed requires a clear yes to all stated product, amount and date terms. changed if any amount or date is corrected. declined if caller rejects the read-back. Transfer requests take priority over confirmation. An earlier yes elsewhere in the conversation is not confirmation."),
+            {"name": "single_corrected_terms_json", "type": "string", "min_confidence": 0.55,
+             "description": "For a one-product read-back correction only, return one JSON object with the changed amount and/or the changed date as the caller's raw words in date. Omit any unchanged field; do not infer consent to the prior amount/date. Examples: {\"date\":\"Monday the 19th of October\"}, {\"amount\":\"minimum payment\",\"date\":\"Monday the 19th of October\"}. Leave empty for a bare yes, decline, or transfer request."},
         ],
         transitions=[
             _eq("transfer_restructuring", "confirmation_status", "transfer_restructuring"),
             _eq("transfer_support", "confirmation_status", "transfer_support"),
             _eq("transfer_human", "confirmation_status", "transfer_human"),
             _eq("validate_confirmation", "confirmation_status", "confirmed"),
+            _to("single_revise", "Validate the corrected one-product terms",
+                _when({"logic": "and", "conditions": [
+                    _check("product_count", "equals", "1"),
+                    _check("confirmation_status", "equals", "changed"),
+                ]})),
             _eq("clear_confirmation", "confirmation_status", "changed"),
             *([_to("multi_correction", "Correct declined combined read-back",
                    _when({"logic": "and", "conditions": [
@@ -1606,6 +2070,18 @@ except Exception:
             _eq("prepare_notes", "confirmation_status", "declined"),
         ],
         max_turns=3, max_target="account_discussion")
+    nodes["single_revise"] = _code_node("single_revise", _SINGLE_REVISE_CODE, "single_clarify")
+    nodes["single_revise"]["transitions"] = [
+        _eq("prepare_confirmation", "single_revision_state", "ready"),
+        _always("single_clarify"),
+    ]
+    nodes["single_clarify"] = _conversation(
+        "single_clarify",
+        "The old confirmation is invalid. Ask for the exact corrected amount or day, then wait. Never treat a bare yes as confirmation; another validated read-back must occur. No tool call is allowed.",
+        opening="Please tell me the exact amount or day you want to change.",
+        extraction=[{"name": "single_corrected_terms_json", "type": "string", "min_confidence": 0.55,
+                     "description": "Return one JSON object with the exact new amount and/or raw date phrase from the latest answer. Omit unchanged fields. Leave empty for a bare yes or an unclear answer."}],
+        transitions=[_always("single_revise")], max_turns=3, max_target="service_unavailable")
     nodes["clear_confirmation"] = _code_node("clear_confirmation", _CLEAR_CONFIRMATION_CODE, "account_discussion")
     if multi_enabled:
         nodes["clear_confirmation"]["transitions"] = [
@@ -1638,8 +2114,7 @@ except Exception:
         _eq("account_discussion", "write_state", "invalid"),
         _always("prepare_notes"),
     ]
-    promise_engine = _api_tool(openapi, "create_promise", fixed={
-        "product_id": "{{pending_product_id}}", "amount": "{{pending_amount}}", "date": "{{pending_date}}"},
+    promise_engine = _api_tool(openapi, "create_promise", fixed=promise_bindings,
         description="Record the explicitly confirmed and validated current product promise.", post_code=promise_hook)
     promise_engine["config"]["maxRetries"] = 0
     promise_engine["function"]["parameters"]["properties"]["connect_retries"] = {
@@ -1652,10 +2127,10 @@ except Exception:
     vars['pending_promise_product_id'] = ''
     body = config.get('body')
     if isinstance(body, dict):
-        vars['pending_promise_product_id'] = str(body.get('product_id') or '')
+        vars['pending_promise_product_id'] = str(body.get(__PRODUCT_FIELD__) or '')
 except Exception:
     pass
-""".replace("__RESULT_FLAG__", promise_result_flag)
+""".replace("__RESULT_FLAG__", promise_result_flag).replace("__PRODUCT_FIELD__", repr(promise_fields["product"]))
     for node_name, negative_target in (
         ("create_promise_call", "prepare_promise_retry"),
         ("retry_promise_call", "mark_promise_error"),
@@ -1726,7 +2201,7 @@ except Exception:
     nodes["advance_note"] = _code_node("advance_note", _ADVANCE_NOTE_CODE, "select_note")
     nodes["note_write_failed"] = _code_node("note_write_failed", _SKIP_NOTE_CODE, "select_note")
     for suffix in ("restructuring", "support", "human"):
-        queue = _queue_for(openapi, suffix)
+        queue = _queue_for(openapi, suffix, policy)
         t = _api_tool(openapi, "transfer_to_agent", fixed={"queue": queue},
                       description=f"Transfer to {queue} now; no notes on any transfer.", post_code=_TRANSFER_HOOK)
         t["pre_process_code"] = (

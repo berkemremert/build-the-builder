@@ -20,7 +20,7 @@ RULES:
 - Answer what you are asked. Do not volunteer information nobody asked for.
 - When you give a number or a date, say all of it in one turn. Never stop halfway through.
 - Do not invent dates, amounts or facts that are not written above. If asked something that is not covered, give a short neutral answer.
-- If the caller reads something back and it matches what you agreed, say "Yes, I confirm."
+- If the caller reads something back and it matches what you agreed, say "Yes, I confirm," unless the call script says to revise it or not to confirm.
 - When the caller says goodbye, say "Thank you, goodbye." and say nothing more."""
 
 # How a customer talks. The facts of the case stay the same, only the way of saying them changes.
@@ -89,7 +89,9 @@ def main():
 
 def run_once(agent_id, cases, ids):
     """One simulation: every case once. Returns the scored rows."""
-    sessions = {c["id"]: http("/v1/practice/sessions", {"case": c["id"]})["variables"] for c in cases}
+    # A custom persona can reuse a published bank account while keeping its
+    # own case ID and expectations for conversation and ledger scoring.
+    sessions = {c["id"]: http("/v1/practice/sessions", {"case": c.get("source_case", c["id"])})["variables"] for c in cases}
     t0 = time.time()
     sim_id, it_id, status = freya.run_simulation(agent_id, f"cases {time.strftime('%H:%M:%S')}", {ids[c["id"]]: sessions[c["id"]] for c in cases})
     took = time.time() - t0
@@ -110,7 +112,8 @@ def run_once(agent_id, cases, ids):
         if j.get("outcome") != "pass": r["failed"].append("conversation: " + " ".join(str(j.get("reason") or "no verdict").split())[:400])
         if led is not None: r["pass"] = not r["failed"]
         tools = [x["tool"] for x in led["calls"]] if led is not None else None
-        rows.append({"id": c["id"], "level": c["level"], "family": c["family"], "pass": r["pass"], "failed": r["failed"],
+        rows.append({"id": c["id"], "source_case": c.get("source_case", c["id"]),
+                     "level": c["level"], "family": c["family"], "pass": r["pass"], "failed": r["failed"],
                      "judge_outcome": j.get("outcome"), "judge_reason": j.get("reason"), "call_id": j.get("callId"),
                      "tools": tools, "ledger_available": led is not None, "ledger_error": ledger_error,
                      "customer_id": sessions[c["id"]]["customer_id"]})

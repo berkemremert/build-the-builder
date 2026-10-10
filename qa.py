@@ -15,6 +15,8 @@ from collections import deque
 from itertools import product
 from pathlib import Path
 
+from api_bindings import promise_request_fields
+
 
 ROOT = Path(__file__).resolve().parent
 _BANK_TOOLS = frozenset({
@@ -369,6 +371,18 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"{where}: const does not send a value; use default or let the model fill it")
             if field == "customer_id" and spec.get("default") != "{{customer_id}}":
                 errors.append(f"{where}: set default to {{{{customer_id}}}} from call variables")
+        if name == "create_promise" and placement == "pre_action":
+            try:
+                semantic_fields = promise_request_fields(schema)
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                for role, variable in (("product", "pending_product_id"),
+                                       ("amount", "pending_amount"), ("date", "pending_date")):
+                    field = semantic_fields[role]
+                    default = (body_props.get(field) or {}).get("default")
+                    if default != "{{" + variable + "}}":
+                        errors.append(f"{location}.body.properties.{field}.default: bind {role} to {{{{{variable}}}}}")
 
     edges: dict[str, list[tuple[str, bool, bool]]] = {}
     for name, node in all_nodes.items():

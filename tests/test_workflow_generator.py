@@ -419,6 +419,199 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertLess(state["account_facts"].index("product ID p2"),
                         state["account_facts"].index("product ID p3"))
 
+    def test_bank_b_hard08_already_paid_overrides_all_today_yes(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "2288", "past_due": 220,
+             "minimum_payment": 66, "days_late": 9},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 640,
+             "instalment_amount": 213, "days_late": 9},
+            {"product_id": "p3", "type": "car_loan", "past_due": 75,
+             "instalment_amount": 25, "days_late": 3},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "all_today_status": "yes",
+                      "pending_note_reasons_json": '{"p1":"already_paid","p2":"already_paid","p3":"already_paid"}'})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("notes", state["multi_next"])
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertEqual({"p1": "paid", "p2": "paid", "p3": "paid"}, json.loads(state["multi_notes_json"]))
+        self.assertEqual("prepare_notes", _first_engine_route(workflow["nodes"]["multi_advance"], state))
+        _run_code_node(workflow, "prepare_notes", state)
+        self.assertEqual([("p1", "paid"), ("p2", "paid"), ("p3", "paid")],
+                         [(item["product_id"], item["reason"])
+                          for item in json.loads(state["pending_notes_json"])])
+        self.assertEqual([], json.loads(state["recorded_ids"]))
+
+    def test_bank_b_hard07_card_suffix_spoken_amount_and_other_product_dispute(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "9015", "past_due": 510,
+             "minimum_payment": 153, "days_late": 16},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 1320,
+             "instalment_amount": 440, "days_late": 16},
+            {"product_id": "p3", "type": "car_loan", "past_due": 140,
+             "instalment_amount": 46, "days_late": 7},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "all_today_status": "no",
+                      "pending_note_reasons_json": '{"p2":"already_paid"}'})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("p1", state["multi_focus_product_id"])
+        self.assertEqual({"p2": "paid"}, json.loads(state["multi_notes_json"]))
+
+        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([
+            {"product_id": "9015", "amount": "five hundred and ten",
+             "date_words": "tomorrow, the fifteenth of October"},
+        ])})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("p3", state["multi_focus_product_id"])
+        self.assertEqual(510.0, json.loads(state["multi_terms_json"])["p1"]["amount"])
+        self.assertEqual({"p2": "paid"}, json.loads(state["multi_notes_json"]))
+
+        state.update({"multi_offer_action": "dispute", "multi_reply_product_id": "car loan"})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual(["p1"], [item["product_id"] for item in json.loads(state["proposed_terms_json"])])
+        self.assertEqual({"p2": "paid", "p3": "dispute"}, json.loads(state["multi_notes_json"]))
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        self.assertEqual([{"product_id": "p1", "amount": 510.0, "date": "2026-10-15"}],
+                         json.loads(state["readback_terms_json"]))
+
+    def test_bank_b_hard07_low_confidence_proposal_requires_validated_confirmation(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        for node_name in ("multi_offer", "multi_clarify", "multi_support"):
+            field = next(item for item in workflow["nodes"][node_name]["extraction_schema"]
+                         if item["name"] == "multi_reply_terms_json")
+            self.assertEqual(0.45, field["min_confidence"])
+
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "9015", "past_due": 510,
+             "minimum_payment": 153, "days_late": 16},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 1320,
+             "instalment_amount": 440, "days_late": 16},
+            {"product_id": "p3", "type": "car_loan", "past_due": 140,
+             "instalment_amount": 46, "days_late": 7},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "all_today_status": "no",
+                      "pending_note_reasons_json": '{"p2":"already_paid"}'})
+        _run_code_node(workflow, "multi_advance", state)
+        # Freya v5 produced this exact valid value at confidence 0.4989695.
+        state.update({"multi_offer_action": "proposal", "multi_reply_product_id": "p1",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"five hundred and ten",'
+                                                '"date":"tomorrow, the fifteenth of October"}]'})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual({"p1": {"product_id": "p1", "amount": 510,
+                                 "date": "tomorrow, the fifteenth of October"}},
+                         json.loads(state["multi_terms_json"]))
+        self.assertEqual("p3", state["multi_focus_product_id"])
+        state.update({"multi_offer_action": "dispute", "multi_reply_product_id": "p3"})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("confirm", state["multi_next"])
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        self.assertEqual([{"product_id": "p1", "amount": 510.0, "date": "2026-10-15"}],
+                         json.loads(state["readback_terms_json"]))
+        state["confirmation_status"] = "unclear"
+        _run_code_node(workflow, "validate_confirmation", state)
+        self.assertEqual("invalid", state["validation_state"])
+        self.assertEqual([], json.loads(state["pending_promises_json"]))
+        state["confirmation_status"] = "confirmed"
+        _run_code_node(workflow, "validate_confirmation", state)
+        self.assertEqual("ready", state["validation_state"])
+        self.assertEqual([{"product_id": "p1", "amount": 510.0, "date": "2026-10-15"}],
+                         json.loads(state["pending_promises_json"]))
+
+    def test_bank_b_low_confidence_terms_still_reject_invalid_or_bare_yes(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        products, base = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "9015", "past_due": 510,
+             "minimum_payment": 153, "days_late": 16},
+            {"product_id": "p2", "type": "car_loan", "past_due": 140,
+             "instalment_amount": 46, "days_late": 7},
+        ], "2026-10-14T11:00")
+        for bad_terms in (
+            [{"product_id": "unknown", "amount": 510, "date": "tomorrow"}],
+            [{"product_id": "p1", "amount": 20, "date": "tomorrow"}],
+            [{"product_id": "p1", "amount": 510}],
+        ):
+            with self.subTest(terms=bad_terms):
+                state = dict(base, product_json=json.dumps(products), all_today_status="no")
+                _run_code_node(workflow, "multi_advance", state)
+                state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps(bad_terms)})
+                _run_code_node(workflow, "multi_advance", state)
+                self.assertEqual("clarify", state["multi_next"])
+                self.assertEqual({}, json.loads(state["multi_terms_json"]))
+
+        state = dict(base, product_json=json.dumps(products), all_today_status="no")
+        _run_code_node(workflow, "multi_advance", state)
+        state.update({"multi_phase": "clarify", "multi_offer_action": "accepted",
+                      # Freya v5 produced this value on a bare "Yes, I confirm".
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"510.00",'
+                                                '"date_words":"2026-10-15"}]'})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertNotEqual("confirm", state["multi_next"])
+
+    def test_bank_b_ambiguous_claim_identifies_product_before_note(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "9015", "past_due": 510,
+             "minimum_payment": 153, "days_late": 16},
+            {"product_id": "p2", "type": "car_loan", "past_due": 140,
+             "instalment_amount": 46, "days_late": 7},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "all_today_status": "no"})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("p1", state["multi_focus_product_id"])
+        state.update({"multi_offer_action": "dispute", "multi_reply_product_id": ""})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("identify", state["multi_next"])
+        self.assertEqual({}, json.loads(state["multi_notes_json"]))
+        self.assertEqual("multi_identify", _first_engine_route(workflow["nodes"]["multi_advance"], state))
+        state.update({"multi_offer_action": "unclear", "multi_reply_product_id": "car loan"})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual({"p2": "dispute"}, json.loads(state["multi_notes_json"]))
+        self.assertNotIn("p1", json.loads(state["multi_notes_json"]))
+        self.assertEqual("p1", state["multi_focus_product_id"])
+        self.assertEqual("clarify", state["multi_next"])
+
+    def test_bank_b_spoken_floor_uses_current_account_fact(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "9015", "past_due": 510,
+             "minimum_payment": 153, "days_late": 16},
+            {"product_id": "p2", "type": "car_loan", "past_due": 140,
+             "instalment_amount": 46, "days_late": 7},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "all_today_status": "no"})
+        _run_code_node(workflow, "multi_advance", state)
+        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([
+            {"product_id": "card ending 9015", "amount": "one hundred and fifty three", "date": "tomorrow"},
+        ])})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual(153.0, json.loads(state["multi_terms_json"])["p1"]["amount"])
+        self.assertEqual("p2", state["multi_focus_product_id"])
+
+    def test_bank_b_unidentified_dispute_exits_without_writing_a_note(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "9015", "past_due": 510,
+             "minimum_payment": 153, "days_late": 16},
+            {"product_id": "p2", "type": "car_loan", "past_due": 140,
+             "instalment_amount": 46, "days_late": 7},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "all_today_status": "no"})
+        _run_code_node(workflow, "multi_advance", state)
+        state.update({"multi_offer_action": "dispute", "multi_reply_product_id": ""})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("identify", state["multi_next"])
+        for expected in ("identify", "service_error"):
+            state.update({"multi_offer_action": "unclear", "multi_reply_product_id": ""})
+            _run_code_node(workflow, "multi_advance", state)
+            self.assertEqual(expected, state["multi_next"])
+        self.assertEqual({}, json.loads(state["multi_notes_json"]))
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+
     def test_bank_b_pub12_refusals_advance_only_the_current_product(self) -> None:
         case = next(item for item in json.loads((ROOT / "public-test-set.json").read_text(encoding="utf-8"))
                     if item["id"] == "PUB-12")
@@ -918,6 +1111,164 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         _run_code_node(workflow, validator_name, state)
         self.assertEqual("ready", state["validation_state"])
         self.assertEqual(200.0, json.loads(state["pending_promises_json"])[0]["amount"])
+
+    def test_single_changed_readback_revalidates_before_one_write(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, _ = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 420,
+             "minimum_payment": 126, "days_late": 6},
+        ], "2026-10-14T11:00")
+        state = {"now": "2026-10-14T11:00", "product_json": json.dumps(products),
+                 "product_count": "1", "write_index": "0", "recorded_ids": "[]",
+                 "proposed_terms_json": '[{"product_id":"p1","amount":420,"date":"2026-10-16"}]'}
+        _run_code_node(workflow, "prepare_confirmation", state)
+        state.update(confirmation_status="changed", single_corrected_terms_json=json.dumps(
+            {"amount": "minimum payment", "date": "Monday the 19th of October"}))
+        self.assertEqual("single_revise", _first_engine_route(workflow["nodes"]["confirmation"], state))
+        _run_code_node(workflow, "single_revise", state)
+        self.assertEqual("invalid", state["validation_state"])
+        self.assertEqual("[]", state["pending_promises_json"])
+        self.assertEqual("", state["confirmation_readback"])
+        self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"]["single_revise"], state))
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        self.assertIn("126.00 on 2026-10-19", state["confirmation_readback"])
+        self.assertEqual("confirmation", _first_engine_route(workflow["nodes"]["prepare_confirmation"], state))
+        self.assertEqual("unclear", state["confirmation_status"])
+        self.assertNotEqual("create_promise_call", _first_engine_route(workflow["nodes"]["confirmation"], state))
+        state["confirmation_status"] = "confirmed"  # Fresh yes to corrected read-back.
+        self.assertEqual("validate_confirmation", _first_engine_route(workflow["nodes"]["confirmation"], state))
+        _run_code_node(workflow, "validate_confirmation", state)
+        self.assertEqual("create_promise_call", _first_engine_route(workflow["nodes"]["validate_confirmation"], state))
+        self.assertEqual(("p1", 126.0, "2026-10-19"),
+                         (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+        self.assertEqual("promise", state["write_state"])
+
+    def test_single_vague_then_exact_holiday_date_needs_confirmation(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, _ = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 420,
+             "minimum_payment": 126, "days_late": 9},
+        ], "2026-10-23T11:00")
+        state = {"now": "2026-10-23T11:00", "product_json": json.dumps(products),
+                 "product_count": "1", "discussion_action": "vague_date"}
+        self.assertEqual("single_exact_date", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        state["single_exact_date_words"] = "Monday the 26th of October"
+        _run_code_node(workflow, "single_date_capture", state)
+        self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"]["single_date_capture"], state))
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("2026-10-27", json.loads(state["readback_terms_json"])[0]["date"])
+        self.assertIn("next business day", state["confirmation_readback"].lower())
+        self.assertEqual("unclear", state["confirmation_status"])
+        _run_code_node(workflow, "validate_confirmation", state)
+        self.assertEqual("invalid", state["validation_state"])
+        self.assertNotEqual("create_promise_call", _first_engine_route(workflow["nodes"]["validate_confirmation"], state))
+
+    def test_single_hardship_precedes_restructuring_and_paid_closes_paid(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, _ = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 420,
+             "minimum_payment": 126, "days_late": 6},
+        ], "2026-10-14T11:00")
+        state = {"product_json": json.dumps(products), "product_count": "1",
+                 "discussion_action": "transfer_restructuring", "single_sensitive_intent": "hardship",
+                 "recorded_ids": "[]"}
+        self.assertEqual("single_hardship", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        self.assertIn("sorry", workflow["nodes"]["single_hardship"]["on_enter"]["text"].lower())
+        state["single_support_action"] = "accepted"
+        self.assertEqual("transfer_support", _first_engine_route(workflow["nodes"]["single_hardship"], state))
+        state["single_support_action"] = "declined"
+        self.assertEqual("single_hardship_declined", _first_engine_route(workflow["nodes"]["single_hardship"], state))
+        _run_code_node(workflow, "single_hardship_declined", state)
+        _run_code_node(workflow, "prepare_notes", state)
+        _run_code_node(workflow, "finalize", state)
+        self.assertEqual(("no_promise", "hardship"), (state["close_outcome"], state["close_reason"]))
+        paid_state = {"product_json": json.dumps(products), "product_count": "1",
+                      "discussion_action": "done_no_promise", "single_sensitive_intent": "paid_current_due",
+                      "recorded_ids": "[]"}
+        self.assertEqual("single_paid_notice", _first_engine_route(workflow["nodes"]["account_discussion"], paid_state))
+        self.assertIn("one business day", workflow["nodes"]["single_paid_notice"]["on_enter"]["text"].lower())
+        self.assertTrue(workflow["nodes"]["single_paid_notice"]["passthrough"])
+        _run_code_node(workflow, "single_paid_mark", paid_state)
+        _run_code_node(workflow, "prepare_notes", paid_state)
+        _run_code_node(workflow, "finalize", paid_state)
+        self.assertEqual("paid", paid_state["close_outcome"])
+        self.assertEqual("", paid_state["close_reason"])
+
+    def test_two_call_purpose_demands_route_to_engine_declined_close(self) -> None:
+        workflow = self._build("brief-a.md")
+        first = workflow["nodes"]["identity_dob"]
+        first_rule = next(item for item in first["extraction_schema"] if item["name"] == "identity_intent")
+        self.assertIn("call-purpose question must not be other", first_rule["description"].lower())
+        self.assertEqual("identity_decline", _first_engine_route(first, {
+            "identity_intent": "other", "identity_purpose_question": "yes"}))
+        self.assertEqual("identity_decline", _first_engine_route(first, {"identity_intent": "declined"}))
+        second = workflow["nodes"]["identity_decline"]
+        self.assertEqual("tts", second["on_enter"]["type"])
+        self.assertIn("protect your account", second["on_enter"]["text"].lower())
+        self.assertEqual("finish_identity_declined", _first_engine_route(second, {"decline_followup": "declined"}))
+        state = {}
+        _run_code_node(workflow, "finish_identity_declined", state)
+        self.assertEqual(("not_verified", "declined"), (state["close_outcome"], state["close_reason"]))
+        self.assertEqual("farewell_identity_declined", _first_engine_route(workflow["nodes"]["finish_identity_declined"], state))
+        self.assertEqual("close_call", _first_engine_route(workflow["nodes"]["farewell_identity_declined"], state))
+        close_actions = workflow["nodes"]["close_call"]["pre_actions"]
+        self.assertTrue(any(action["function"]["name"] == "close_call" for action in close_actions))
+
+    def test_robot_question_with_late_proposal_discloses_then_validates(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "car_loan", "past_due": 1250,
+             "instalment_amount": 250, "days_late": 14},
+        ], "2026-10-14T11:00")
+        state = {"now": "2026-10-14T11:00", "product_count": "1", "product_json": json.dumps(products),
+                 "single_floor_stage": prepared["single_floor_stage"], "discussion_action": "proposal_ready",
+                 "single_robot_question": "yes", "single_amount_intent": "none",
+                 "proposed_terms_json": '[{"product_id":"p1","amount":1250,"date":"6 November"}]'}
+        self.assertEqual("single_robot_route", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        _run_code_node(workflow, "single_robot_route", state)
+        self.assertEqual("no", state["single_robot_question"])
+        self.assertEqual("prepare_confirmation", state["single_robot_next"])
+        answer = workflow["nodes"]["single_robot_answer"]
+        self.assertTrue(answer["passthrough"])
+        self.assertIn("digital assistant", answer["on_enter"]["text"].lower())
+        self.assertEqual("prepare_confirmation", _first_engine_route(answer, state))
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        self.assertEqual(products[0]["deadline"], json.loads(state["readback_terms_json"])[0]["date"])
+        self.assertEqual("unclear", state["confirmation_status"])
+
+    def test_full_too_much_gets_one_dated_floor_offer_and_bounded_attempts(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 2125.10,
+             "minimum_payment": 637.50, "days_late": 12},
+        ], "2026-10-14T11:00")
+        state = {"now": "2026-10-14T11:00", "product_count": "1", "product_json": json.dumps(products),
+                 "last_business_day_offer": prepared["last_business_day_offer"],
+                 "single_floor_stage": prepared["single_floor_stage"],
+                 "single_amount_intent": "full_too_much", "discussion_action": "continue"}
+        self.assertEqual("single_floor_prepare", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        _run_code_node(workflow, "single_floor_prepare", state)
+        self.assertEqual("single_floor_offer", _first_engine_route(workflow["nodes"]["single_floor_prepare"], state))
+        self.assertEqual("1", state["single_floor_stage"])
+        self.assertIn("637.50 on 2026-10-16", state["single_floor_offer_text"])
+        self.assertIn("rest stays overdue", state["single_floor_offer_text"].lower())
+        state["single_floor_action"] = "accepted"
+        self.assertEqual("single_floor_capture", _first_engine_route(workflow["nodes"]["single_floor_offer"], state))
+        _run_code_node(workflow, "single_floor_capture", state)
+        self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"]["single_floor_capture"], state))
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual((637.50, "2026-10-16"),
+                         tuple(json.loads(state["readback_terms_json"])[0][key] for key in ("amount", "date")))
+        self.assertEqual("unclear", state["confirmation_status"])
+        refused = {"product_json": json.dumps(products), "single_floor_stage": "1"}
+        _run_code_node(workflow, "single_floor_next", refused)
+        self.assertEqual("2", refused["single_floor_stage"])
+        self.assertIn(products[0]["deadline"], refused["single_floor_offer_text"])
+        _run_code_node(workflow, "single_floor_next", refused)
+        self.assertEqual("prepare_notes", _first_engine_route(workflow["nodes"]["single_floor_next"], refused))
+        self.assertEqual("refused", refused["single_product_reason"])
 
     def test_strict_promise_retry_requires_current_explicit_bank_result(self) -> None:
         workflow = self._build("brief-a.md")

@@ -21,27 +21,30 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from typing import Any
+import urllib.error
+import urllib.request
 
 from policy_compiler import compile_policy
 
 
 MAX_BUILD_SECONDS = 30 * 60
-MODEL_TIMEOUT_SECONDS = 4 * 60
+MODEL_TIMEOUT_SECONDS = 900
+OPENAI_URL = "https://api.openai.com/v1/responses"
+OPENAI_MODEL = "gpt-6-sol"
+OPENAI_MAX_OUTPUT_TOKENS = 25_000
 KIT = Path(__file__).resolve().parent
 _SECRET_PATTERN = re.compile(r"(?:\bfak_[A-Za-z0-9_-]+\b|\bsk-[A-Za-z0-9_-]+\b|\bBearer\s+[A-Za-z0-9._~+/-]+)", re.I)
 
 
 def redact(value: Any) -> Any:
     if isinstance(value, str):
-        for key in ("FREYA_API_KEY", "FREYA_BANK_TEAM_KEY", "ANTHROPIC_API_KEY"):
+        for key in ("FREYA_API_KEY", "FREYA_BANK_TEAM_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
             secret = os.environ.get(key)
             if secret:
                 value = value.replace(secret, "[REDACTED]")
@@ -130,117 +133,115 @@ def _new_slot_published_version(freya: Any, workflow_id: str) -> tuple[int, str]
     return number, version_id
 
 
-def _model_caller(trace: Trace, started: float):
-    claude_executable = shutil.which("claude")
-    codex_executable = shutil.which("codex")
-    if not claude_executable and not codex_executable:
-        trace.write("model_unavailable", reason="Neither Claude nor Codex CLI is installed")
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
         return None
-    claude_model = os.environ.get("BUILDER_MODEL", "sonnet")
-    codex_model = os.environ.get("BUILDER_CODEX_MODEL", "gpt-6-sol")
-    schema = {
-        "type": "object",
-        "properties": {
-            "global_rules": {"type": "string"},
-            "opening": {"type": "string"},
-            "identity": {"type": "string"},
-            "verified_call": {"type": "string"},
-            "outcomes": {"type": "object"},
-            "tool_policy": {"type": "object"},
-            "raw_brief": {"type": "string"},
-            "constraints": {"type": "object"},
+
+
+def _openai_response(payload: dict[str, Any], key: str, timeout: float) -> dict[str, Any]:
+    request = urllib.request.Request(
+        OPENAI_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "User-Agent": "build-the-builder/1.0",
         },
-        "required": ["global_rules", "opening", "identity", "verified_call", "outcomes", "tool_policy", "raw_brief", "constraints"],
-        "additionalProperties": False,
-    }
+        method="POST",
+    )
+    with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+        return json.load(response)
 
-    def call_claude(prompt: str, purpose: str) -> dict[str, Any] | str:
-        begun = time.monotonic()
-        trace.write("model_call_start", model=claude_model, provider="claude_cli", purpose=purpose)
-        command = [
-            claude_executable, "--print", "--output-format", "json", "--json-schema", json.dumps(schema),
-            "--model", claude_model, "--tools", "", "--no-session-persistence",
-            "--system-prompt", "Return only source-grounded structured JSON. Do not use tools or external information.",
-        ]
-        try:
-            result = subprocess.run(
-                command, input=prompt, text=True, capture_output=True,
-                cwd=KIT, timeout=min(MODEL_TIMEOUT_SECONDS, _remaining(started)), check=False,
-            )
-        except subprocess.TimeoutExpired as error:
-            trace.write("model_call_end", model=claude_model, provider="claude_cli", purpose=purpose, status="timeout", seconds=round(time.monotonic() - begun, 3))
-            raise RuntimeError("Claude CLI timed out") from error
-        if result.returncode:
-            trace.write("model_call_end", model=claude_model, provider="claude_cli", purpose=purpose, status="failed", exit_code=result.returncode, seconds=round(time.monotonic() - begun, 3))
-            # Claude's stderr may contain a credential or private brief passage.
-            raise RuntimeError(f"Claude CLI exited with status {result.returncode}")
-        try:
-            envelope = json.loads(result.stdout)
-        except json.JSONDecodeError as error:
-            trace.write("model_call_end", model=claude_model, provider="claude_cli", purpose=purpose, status="invalid_json", seconds=round(time.monotonic() - begun, 3))
-            raise RuntimeError("Claude CLI did not return a JSON envelope") from error
-        trace.write(
-            "model_call_end", model=claude_model, provider="claude_cli", purpose=purpose, status="ok",
-            seconds=round(time.monotonic() - begun, 3),
-            input_tokens=(envelope.get("usage") or {}).get("input_tokens"),
-            output_tokens=(envelope.get("usage") or {}).get("output_tokens"),
-        )
-        return envelope.get("structured_output") or envelope.get("result") or envelope
 
-    def call_codex(prompt: str, purpose: str) -> dict[str, Any] | str:
+class _ModelResponseError(RuntimeError):
+    def __init__(self, status: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def _model_caller(trace: Trace, started: float):
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not key:
+        trace.write("model_unavailable", provider="openai", reason="OPENAI_API_KEY is missing")
+        raise RuntimeError("OPENAI_API_KEY is required for policy extraction")
+
+    def call(prompt: str, *, purpose: str) -> str:
         begun = time.monotonic()
-        trace.write("model_call_start", model=codex_model, provider="codex_cli", purpose=purpose)
-        with tempfile.TemporaryDirectory(prefix="btb-model-") as directory:
-            schema_path = Path(directory) / "schema.json"
-            answer_path = Path(directory) / "answer.json"
-            # Codex structured output requires fixed properties for every JSON
-            # object. Policy subobjects have brief-specific keys, so carry the
-            # source-derived policy JSON as a string in a fixed envelope.
-            codex_schema = {
-                "type": "object",
-                "properties": {"policy_json": {"type": "string"}},
-                "required": ["policy_json"],
-                "additionalProperties": False,
+        trace.write("model_call_start", model=OPENAI_MODEL, requested_model=OPENAI_MODEL,
+                    provider="openai", purpose=purpose, max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+                    reasoning_effort="medium")
+        actual_model = None
+        response_id = None
+        response_status = None
+        incomplete_reason = None
+        usage: dict[str, Any] = {}
+        status = "failed"
+        http_status = None
+        try:
+            payload = {
+                "model": OPENAI_MODEL,
+                "input": [{"role": "user", "content": prompt}],
+                "text": {"format": {"type": "json_object"}},
+                "reasoning": {"effort": "medium"},
+                "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+                "store": False,
+                "stream": False,
             }
-            schema_path.write_text(json.dumps(codex_schema), encoding="utf-8")
-            command = [
-                codex_executable, "exec", "-s", "read-only", "--skip-git-repo-check",
-                "--ephemeral", "--ignore-rules", "-m", codex_model,
-                "--output-schema", str(schema_path), "--output-last-message", str(answer_path), "-",
-            ]
-            try:
-                result = subprocess.run(
-                    command, input=prompt + "\nDo not use tools. Return a JSON object with one key, policy_json, whose string value is the serialized source-grounded policy JSON object requested above.",
-                    text=True, capture_output=True, cwd=KIT,
-                    timeout=min(MODEL_TIMEOUT_SECONDS, _remaining(started)), check=False,
-                )
-            except subprocess.TimeoutExpired as error:
-                trace.write("model_call_end", model=codex_model, provider="codex_cli", purpose=purpose, status="timeout", seconds=round(time.monotonic() - begun, 3))
-                raise RuntimeError("Codex CLI timed out") from error
-            if result.returncode:
-                trace.write("model_call_end", model=codex_model, provider="codex_cli", purpose=purpose, status="failed", exit_code=result.returncode, seconds=round(time.monotonic() - begun, 3))
-                raise RuntimeError(f"Codex CLI exited with status {result.returncode}")
-            answer = answer_path.read_text(encoding="utf-8") if answer_path.exists() else result.stdout
-            if not answer.strip():
-                trace.write("model_call_end", model=codex_model, provider="codex_cli", purpose=purpose, status="empty", seconds=round(time.monotonic() - begun, 3))
-                raise RuntimeError("Codex CLI returned an empty response")
-            try:
-                policy_json = json.loads(answer)["policy_json"]
-            except (ValueError, KeyError, TypeError) as error:
-                trace.write("model_call_end", model=codex_model, provider="codex_cli", purpose=purpose, status="invalid_json", seconds=round(time.monotonic() - begun, 3))
-                raise RuntimeError("Codex CLI returned an invalid policy envelope") from error
-            trace.write("model_call_end", model=codex_model, provider="codex_cli", purpose=purpose, status="ok", seconds=round(time.monotonic() - begun, 3))
-            return policy_json
-
-    def call(prompt: str, *, purpose: str) -> dict[str, Any] | str:
-        if claude_executable:
-            try:
-                return call_claude(prompt, purpose)
-            except RuntimeError as error:
-                trace.write("model_backend_fallback", from_provider="claude_cli", reason=str(error)[:200])
-        if codex_executable:
-            return call_codex(prompt, purpose)
-        raise RuntimeError("No working model backend")
+            response = _openai_response(payload, key, min(MODEL_TIMEOUT_SECONDS, _remaining(started)))
+            if not isinstance(response, dict) or response.get("error"):
+                raise _ModelResponseError("invalid_response", "OpenAI returned an error or invalid response")
+            response_id = response.get("id") if isinstance(response.get("id"), str) else None
+            actual_model = response.get("model")
+            if not isinstance(actual_model, str) or not actual_model:
+                raise _ModelResponseError("invalid_response", "OpenAI did not identify the model")
+            usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+            response_status = response.get("status")
+            details = response.get("incomplete_details")
+            if isinstance(details, dict):
+                incomplete_reason = details.get("reason")
+            if response_status != "completed":
+                raise _ModelResponseError("incomplete", f"OpenAI policy response did not complete ({response_status or 'unknown'}; {incomplete_reason or 'no reason'})")
+            output = response.get("output")
+            if not isinstance(output, list):
+                raise _ModelResponseError("invalid_response", "OpenAI returned no output items")
+            parts = []
+            for item in output:
+                if not isinstance(item, dict) or item.get("type") != "message":
+                    continue
+                for content in item.get("content") or []:
+                    if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                        parts.append(content["text"])
+            text = "".join(parts)
+            if not text.strip():
+                raise _ModelResponseError("empty", "OpenAI returned no policy text")
+            status = "ok"
+            return text
+        except _ModelResponseError as error:
+            status = error.status
+            raise
+        except urllib.error.HTTPError as error:
+            status = "http_error"
+            http_status = error.code
+            error.close()
+            raise RuntimeError(f"OpenAI HTTP {error.code} during policy extraction") from error
+        except (TimeoutError, ConnectionError) as error:
+            status = "timeout" if isinstance(error, TimeoutError) else "network_error"
+            raise RuntimeError(f"OpenAI policy request {status}") from error
+        except urllib.error.URLError as error:
+            status = "network_error"
+            raise RuntimeError("OpenAI policy request failed on the network") from error
+        except (ValueError, TypeError) as error:
+            status = "invalid_response"
+            raise RuntimeError("OpenAI returned malformed response JSON") from error
+        finally:
+            output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
+            trace.write("model_call_end", model=OPENAI_MODEL, requested_model=OPENAI_MODEL,
+                        actual_model=actual_model, provider="openai", purpose=purpose, status=status,
+                        seconds=round(time.monotonic() - begun, 3), response_id=response_id,
+                        response_status=response_status, incomplete_reason=incomplete_reason,
+                        http_status=http_status, input_tokens=usage.get("input_tokens"),
+                        output_tokens=usage.get("output_tokens"),
+                        reasoning_tokens=output_details.get("reasoning_tokens"))
 
     return call
 
@@ -310,11 +311,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         try:
             policy = compile_policy([str(path) for path in briefs], str(openapi_path), model_call)
         except (RuntimeError, ValueError) as error:
-            # Keep a complete, source-grounded artifact even when a model account
-            # is unavailable or returns invalid structured output.
-            trace.write("policy_model_fallback", error_type=type(error).__name__, reason=str(error)[:200])
-            policy = compile_policy([str(path) for path in briefs], str(openapi_path), None)
-            model_degraded = True
+            trace.write("policy_compile_failed", error_type=type(error).__name__, reason=str(error)[:200])
+            raise
+        trace.write("policy_validation_passed", key_count=len(policy),
+                    tool_count=len(policy["tool_policy"]))
         policy_path = out / f"{args.slot}.policy.json"
         policy_path.write_text(json.dumps(policy, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         trace.write("policy_written", path=str(policy_path), tool_count=len(policy["tool_policy"]), extraction_status=policy.get("constraints", {}).get("extraction_status", "model"))

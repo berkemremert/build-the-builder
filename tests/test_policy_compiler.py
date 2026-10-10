@@ -37,10 +37,11 @@ class PolicyCompilerReadinessTests(unittest.TestCase):
                 self.assertIn('"X-Bank-Key"', prompt)
                 self.assertIn('"$ref": "#/components/schemas/Result"', prompt)
                 self.assertIn('"url": "https://example.invalid/v2"', prompt)
-                return {"global_rules": "Verify", "opening": "Ask", "identity": "Verify",
-                        "verified_call": "Continue", "outcomes": {},
-                        "tool_policy": {"verify_identity": "Use the required path and query parameters."},
-                        "raw_brief": "", "constraints": {}}
+                policy = {"global_rules": "Verify", "opening": "Ask", "identity": "Verify",
+                          "verified_call": "Continue", "outcomes": {},
+                          "tool_policy": {"verify_identity": "Use the required path and query parameters."},
+                          "raw_brief": "", "constraints": {}}
+                return "```json\n" + json.dumps(policy) + "\n```"
 
             policy = compile_policy([str(brief)], str(spec), model)
             self.assertEqual("Verify the customer.", policy["raw_brief"].splitlines()[-1])

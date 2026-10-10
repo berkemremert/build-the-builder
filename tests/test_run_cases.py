@@ -4,12 +4,61 @@ import contextlib
 import io
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tools import run_cases
+from tools.score import score_ledger
 
 
 class LedgerFailureTests(unittest.TestCase):
+    def test_hard_cases_reuse_published_account_facts(self):
+        root = Path(run_cases.__file__).resolve().parents[1]
+        public = {case["id"]: case for case in json.loads((root / "public-test-set.json").read_text())}
+        hard = json.loads((root / "hard-test-set.json").read_text())
+        self.assertEqual(30, len(hard))
+        self.assertEqual(len(hard), len({case["id"] for case in hard}))
+        for case in hard:
+            with self.subTest(case=case["id"]):
+                self.assertNotIn(case["id"], public)
+                self.assertIn(case["source_case"], public)
+                seed = public[case["source_case"]]
+                for field in ("variables", "identity", "products"):
+                    self.assertEqual(seed[field], case[field])
+                known_ids = {f"p{index}" for index in range(1, len(seed["products"]) + 1)}
+                for field in ("promises", "notes"):
+                    self.assertTrue(all(item["product_id"] in known_ids for item in case["expected"][field]))
+                self.assertTrue(case["checks"] and case["rules"])
+                persona = run_cases.persona_for(case, {"identity": case["identity"]})
+                self.assertIn(case["id"], persona["name"])
+                self.assertIn(case["script"], persona["prompt"])
+
+    def test_source_case_seeds_bank_but_custom_case_is_scored(self):
+        case = {"id": "HARD-01", "source_case": "PUB-01", "level": "hard",
+                "family": "Dates", "expected": {"outcome": "promise", "reason": None,
+                "promises": [{"product_id": "p1", "amount": 420, "date": "2026-10-27"}],
+                "notes": [], "callbacks": [], "transfers": []}}
+        ledger = {"outcome": "promise", "reason": None,
+                  "promises": [{"product_id": "p1", "amount": 420, "date": "2026-10-27"}],
+                  "notes": [], "callbacks": [], "transfers": [],
+                  "calls": [{"tool": "close_call", "result": {"ok": True}}]}
+        judge = {"runs": [{"personaId": "persona-hard", "callId": "call-hard",
+                           "outcome": "pass", "reason": ""}]}
+        with mock.patch.object(run_cases, "http", side_effect=[{"variables": {"customer_id": "c_seed"}}, ledger]) as bank, \
+             mock.patch.object(run_cases.freya, "run_simulation", return_value=("sim-1", "iteration-1", "completed")) as simulate, \
+             mock.patch.object(run_cases.freya, "get_iteration", return_value=judge), \
+             mock.patch.object(run_cases.freya, "get_call", return_value={"messages": [], "endedReason": "assistant-ended-call"}), \
+             mock.patch.object(run_cases, "score_ledger", wraps=score_ledger) as score, \
+             contextlib.redirect_stdout(io.StringIO()):
+            rows, *_ = run_cases.run_once("agent-1", [case], {"HARD-01": "persona-hard"})
+
+        bank.assert_any_call("/v1/practice/sessions", {"case": "PUB-01"})
+        simulate.assert_called_once()
+        self.assertEqual({"persona-hard": {"customer_id": "c_seed"}}, simulate.call_args.args[2])
+        score.assert_called_once_with(case, ledger)
+        self.assertEqual((rows[0]["id"], rows[0]["pass"]), ("HARD-01", True))
+        self.assertEqual(rows[0]["source_case"], "PUB-01")
+
     def test_failed_ledger_keeps_judge_and_call_result_unscored(self):
         case = {"id": "PUB-13", "level": "hard", "family": "Multi-product"}
         judge = {"runs": [{"personaId": "persona-1", "callId": "call-1",
