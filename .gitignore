@@ -1,0 +1,19 @@
+# Local credentials and workspace state
+env.sh
+.env
+.env.*
+!.env.example
+.freya-agents.json
+.personas.json
+
+# Python caches and local test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+results/
+
+# Builder scratch output; chosen final traces/exports should be copied to
+# deliberate submission paths before committing.
+traces/
+out/
