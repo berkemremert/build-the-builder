@@ -1,6 +1,7 @@
 # Team runbook
 
-This runbook supplements the official [kit README](README.md). The brief and its
+This runbook supplements the [builder reproduction guide](README.md). The original
+version 3 [kit README and rules](docs/kit-readme-v3.md) remain available. The brief and its
 matching OpenAPI file are the source of truth for each run. The builder must read
 both files and create the Freya phone agent without a manual workflow edit.
 
