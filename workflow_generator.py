@@ -182,7 +182,7 @@ def _identity_fields(openapi: dict) -> list[str]:
     return values[:2]
 
 
-def _outcome_names(openapi: dict) -> dict[str, str]:
+def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
     schema = _api_spec(openapi, "close_call")[2]
     values = [str(value) for value in ((schema.get("properties") or {}).get("outcome") or {}).get("enum") or []]
     if not values:
@@ -194,13 +194,61 @@ def _outcome_names(openapi: dict) -> dict[str, str]:
         "not_reached": ("not_reached", "unreached", "contact_fail"),
     }
     result = {}
+    policy_outcomes = (policy or {}).get("outcomes") or {}
+    policy_keys = list(policy_outcomes) if isinstance(policy_outcomes, dict) else []
+    source = str((policy or {}).get("raw_brief") or "")
     for role, hints in aliases.items():
-        if role in values:
+        replacements = re.findall(r"replace\s+(?:outcome\s+)?" + re.escape(role) +
+                                  r"\s+with\s+([a-z_]+)", source, flags=re.IGNORECASE)
+        if replacements and replacements[-1] in values:
+            result[role] = replacements[-1]
+        elif role in values:
             result[role] = role
         else:
-            result[role] = next((value for hint in hints for value in values
+            candidates = [value for value in values if value in policy_keys]
+            result[role] = next((value for hint in hints for value in candidates + values
                                  if hint in value.lower() and not (role == "promise" and value.lower().startswith("no_"))), values[0])
     return result
+
+
+def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str, str], list[str], list[str]]:
+    close_schema = _api_spec(openapi, "close_call")[2]
+    close_enum = [str(value) for value in ((close_schema.get("properties") or {}).get("reason") or {}).get("enum") or []]
+    note_schema = _api_spec(openapi, "add_note")[2]
+    note_enum = [str(value) for value in ((note_schema.get("properties") or {}).get("reason") or {}).get("enum") or []]
+    source = str(policy.get("raw_brief") or "") + "\n" + str(policy.get("tool_policy") or "")
+    aliases = {
+        "refused": ("refused", "declined", "refusal"),
+        "hardship": ("hardship", "vulnerable", "difficulty"),
+        "dispute": ("dispute", "contested", "challenge"),
+        "paid": ("paid", "settled", "cleared"),
+        "service_error": ("service_error", "write_failed", "system_error", "failed_write"),
+        "human": ("human", "general", "agent"),
+        "support": ("support", "care", "assistance"),
+        "restructuring": ("restructuring", "repayment", "payment_plan", "workout"),
+        "failed": ("failed", "identity_failed"),
+        "declined": ("declined", "refused"),
+        "callback": ("callback", "booked"),
+        "no_callback": ("no_callback", "unbooked"),
+        "wrong_number": ("wrong_number", "incorrect_number"),
+        "deceased": ("deceased", "died"),
+        "unclear": ("unclear", "unconfirmed"),
+    }
+    result = {}
+    close_result = {}
+    for role, hints in aliases.items():
+        replacements = re.findall(r"replace\s+(?:the\s+)?(?:refusal\s+code\s+)?" + re.escape(role) +
+                                  r"\s+with\s+([a-z_]+)", source, flags=re.IGNORECASE)
+        for allowed, target in ((note_enum, result), (close_enum, close_result)):
+            if not allowed:
+                target[role] = role
+            elif replacements and replacements[-1] in allowed:
+                target[role] = replacements[-1]
+            elif role in allowed:
+                target[role] = role
+            else:
+                target[role] = next((value for hint in hints for value in allowed if hint in value.lower()), "")
+    return result, close_result, note_enum, close_enum
 
 
 def _bank_name(policy: dict) -> str:
@@ -266,6 +314,18 @@ def _deadline_bands(policy: dict) -> list[dict]:
             bands.append({"low": int(low), "high": int(high), "label": "",
                           "business_days": days, "attempts": 0})
     return bands
+
+
+def _success_sentence(policy: dict) -> str:
+    source = str(policy.get("raw_brief") or "")
+    matches = re.findall(r"(?:after a recorded promise|promise is recorded)[^\n]{0,100}(?:say this sentence|say exactly)\s*:\s*[\"“]([^\"”]+)[\"”]", source, flags=re.IGNORECASE)
+    return matches[-1] if matches else "You will receive a text message confirming this promise."
+
+
+def _confirmation_question(policy: dict) -> str:
+    source = str(policy.get("raw_brief") or "")
+    matches = re.findall(r"read[^\n]{0,100}back[^\n]{0,100}ask\s+[\"“]([^\"”]+\?)[\"”]", source, flags=re.IGNORECASE)
+    return matches[-1] if matches else "Do you confirm?"
 
 
 def _finish_node(name: str, outcome: str, reason: str = "") -> dict:
@@ -392,19 +452,19 @@ def _prepare_code(holidays: list[str], item_fields: dict, bands: list[dict], off
     return f"""import json
 import datetime
 try:
-    raw = vars.get('account_products') or vars.get('get_account_response.data.products') or []
+    raw = vars.get('account_products') or vars.get('load_account_response.data.products') or vars.get('get_account_response.data.products') or []
     if isinstance(raw, str):
         raw = json.loads(raw)
     if not isinstance(raw, list):
         raw = []
     if not raw:
         groups = dict()
-        prefix = 'get_account_response.data.products.'
-        for key, value in vars.items():
-            if str(key).startswith(prefix):
-                tail = str(key)[len(prefix):].split('.', 1)
-                if len(tail) == 2 and tail[0].isdigit():
-                    groups.setdefault(int(tail[0]), dict())[tail[1]] = value
+        for prefix in ('load_account_response.data.products.', 'get_account_response.data.products.'):
+            for key, value in vars.items():
+                if str(key).startswith(prefix):
+                    tail = str(key)[len(prefix):].split('.', 1)
+                    if len(tail) == 2 and tail[0].isdigit():
+                        groups.setdefault(int(tail[0]), dict())[tail[1]] = value
         raw = [groups[i] for i in sorted(groups)]
     now = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00'))
     today = now.date()
@@ -473,23 +533,37 @@ except Exception:
 
 _FINAL_CODE = """import json
 try:
+    outcome_map = __OUTCOME_MAP__
+    reason_map = __REASON_MAP__
+    close_reason_map = __CLOSE_REASON_MAP__
+    note_codes = __NOTE_CODES__
+    close_codes = __CLOSE_CODES__
+    transfer_first = __TRANSFER_FIRST__
     transfer = str(vars.get('transfer_reason') or '')
-    if transfer:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    recorded = json.loads(str(vars.get('recorded_ids') or '[]'))
+    notes = json.loads(str(vars.get('note_reasons') or '{}'))
+    pending_overrides = json.loads(str(vars.get('pending_note_overrides') or '{}'))
+    attempts = json.loads(str(vars.get('promise_attempts') or '{}'))
+    if transfer and (transfer_first or not recorded):
         vars['close_outcome'] = 'transferred'
         vars['close_reason'] = transfer
         vars['processing_complete'] = 'yes'
     else:
-        products = json.loads(str(vars.get('product_json') or '[]'))
-        recorded = json.loads(str(vars.get('recorded_ids') or '[]'))
-        notes = json.loads(str(vars.get('note_reasons') or '{}'))
-        attempts = json.loads(str(vars.get('promise_attempts') or '{}'))
         if len(products) == 1 and not recorded:
             pid = str(products[0].get('product_id'))
-            if int(attempts.get(pid, 0)) >= 2:
-                notes[pid] = 'service_error'
+            if pid in pending_overrides:
+                notes[pid] = pending_overrides[pid]
+            elif int(attempts.get(pid, 0)) >= 2:
+                notes[pid] = reason_map.get('service_error') or 'service_error'
             elif pid not in notes:
-                candidate = str(vars.get('single_product_reason') or 'refused')
-                notes[pid] = candidate if candidate in ('paid', 'dispute', 'hardship', 'refused', 'service_error') else 'refused'
+                candidate = str(vars.get('single_product_reason') or '')
+                if candidate in note_codes:
+                    notes[pid] = candidate
+                elif candidate in reason_map and reason_map[candidate] in note_codes:
+                    notes[pid] = reason_map[candidate]
+                else:
+                    notes[pid] = reason_map.get('refused') or 'refused'
         missing = [str(item.get('product_id')) for item in products
                    if str(item.get('product_id')) not in recorded and
                    str(item.get('product_id')) not in notes]
@@ -498,22 +572,349 @@ try:
         if recorded:
             vars['close_outcome'] = 'promise'
             vars['close_reason'] = ''
-        elif products and all(notes.get(str(item.get('product_id'))) == 'paid' for item in products):
+        elif products and all(notes.get(str(item.get('product_id'))) == reason_map.get('paid', 'paid') for item in products):
             vars['close_outcome'] = 'paid'
             vars['close_reason'] = ''
         else:
-            reason = 'refused'
+            reason = reason_map.get('refused') or 'refused'
             for item in products:
                 candidate = notes.get(str(item.get('product_id')))
-                if candidate and candidate != 'paid':
+                if candidate and candidate != reason_map.get('paid', 'paid'):
                     reason = candidate
                     break
             vars['close_outcome'] = 'no_promise'
             vars['close_reason'] = reason
+    role = str(vars.get('close_outcome') or '')
+    vars['close_outcome'] = outcome_map.get(role, role)
+    reason = str(vars.get('close_reason') or '')
+    if reason:
+        if not close_codes or reason in close_codes:
+            vars['close_reason'] = reason
+        else:
+            canonical = next((role for role, code in reason_map.items() if code == reason), reason)
+            vars['close_reason'] = close_reason_map.get(canonical, '')
 except Exception:
-    vars['close_outcome'] = 'no_promise'
-    vars['close_reason'] = 'service_error'
+    vars['close_outcome'] = __ERROR_OUTCOME__
+    vars['close_reason'] = __ERROR_REASON__
     vars['processing_complete'] = 'yes'
+"""
+
+
+_PREPARE_CONFIRMATION_CODE = """import json
+import datetime
+import re
+try:
+    vars['proposal_validation_state'] = 'invalid'
+    vars['validation_state'] = 'invalid'
+    vars['confirmation_status'] = 'unclear'
+    vars['discussion_action'] = 'continue'
+    vars['proposal_error'] = ''
+    vars['readback_terms_json'] = '[]'
+    vars['confirmation_readback'] = ''
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    raw = vars.get('proposed_terms_json') or ''
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if isinstance(raw, dict):
+        raw = raw.get('promises') or raw.get('products') or [raw]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('No proposed terms')
+    now = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00'))
+    today = now.date()
+    holidays = set(__HOLIDAYS__)
+    def business(day):
+        return day.weekday() < 5 and day.isoformat() not in holidays
+    seen = set()
+    confirmed = []
+    adjustments = []
+    for term in raw:
+        if not isinstance(term, dict):
+            raise ValueError('Malformed terms')
+        pid = str(term.get('product_id') or '')
+        if not pid and len(products) == 1:
+            pid = str(products[0].get('product_id') or '')
+        product = next((item for item in products if str(item.get('product_id')) == pid), None)
+        if product is None or pid in seen:
+            raise ValueError('Unknown or repeated product')
+        seen.add(pid)
+        amount_raw = term.get('amount')
+        if isinstance(amount_raw, str) and amount_raw.lower().strip() in ('full', 'full amount', 'past due', 'past_due'):
+            amount = float(product.get('past_due') or 0)
+        elif isinstance(amount_raw, str) and amount_raw.lower().strip() in ('floor', 'minimum', 'minimum payment', 'instalment'):
+            amount = float(product.get('floor') or 0)
+        elif amount_raw is None:
+            amount = float(product.get('past_due') or 0)
+        else:
+            amount = float(str(amount_raw).replace(',', ''))
+        minimum = float(product.get('floor') or 0)
+        maximum = float(product.get('past_due') or 0)
+        if amount < minimum or amount > maximum:
+            raise ValueError('Amount outside approved range')
+        date_words = term.get('date_phrase') or term.get('date_words') or term.get('raw_date')
+        date_raw = str(date_words or term.get('date') or '').strip().lower()
+        if len(raw) == 1 and not date_words:
+            spoken = str(vars.get('proposed_date_words') or '').strip().lower()
+            iso = re.search(r'\\d{4}-\\d{2}-\\d{2}', date_raw)
+            if spoken and (not date_raw or (iso and datetime.date.fromisoformat(iso.group()) < today)):
+                date_raw = spoken
+        if not date_raw:
+            raise ValueError('Payment date missing')
+        if date_raw in ('today', 'now'):
+            day = today
+        elif date_raw == 'tomorrow':
+            day = today + datetime.timedelta(days=1)
+        else:
+            match = re.search(r'\\d{4}-\\d{2}-\\d{2}', date_raw)
+            if match:
+                day = datetime.date.fromisoformat(match.group())
+            else:
+                months = ('january','february','march','april','may','june','july','august','september','october','november','december')
+                month = next((index + 1 for index, word in enumerate(months) if word in date_raw), None)
+                number = re.search(r'(?<!\\d)([0-3]?\\d)(?:st|nd|rd|th)?(?!\\d)', date_raw)
+                weekdays = ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')
+                weekday = next((index for index, word in enumerate(weekdays) if word in date_raw), None)
+                if number and (month or weekday is not None):
+                    day_number = int(number.group(1))
+                    chosen_month = month or today.month
+                    chosen_year = today.year
+                    day = datetime.date(chosen_year, chosen_month, day_number)
+                    if day < today and not month:
+                        chosen_month = 1 if today.month == 12 else today.month + 1
+                        chosen_year += 1 if today.month == 12 else 0
+                        day = datetime.date(chosen_year, chosen_month, day_number)
+                    if weekday is not None and day.weekday() != weekday:
+                        raise ValueError('Day and weekday disagree')
+                elif weekday is not None:
+                    if date_raw.startswith('next '):
+                        day = today + datetime.timedelta(days=(7 - today.weekday()) + weekday)
+                    elif date_raw.startswith('this '):
+                        day = today + datetime.timedelta(days=weekday - today.weekday())
+                    else:
+                        day = today + datetime.timedelta(days=(weekday - today.weekday()) % 7)
+                else:
+                    raise ValueError('Payment date missing')
+        deadline_raw = str(product.get('deadline') or '')
+        if day < today:
+            raise ValueError('Date outside approved range')
+        if deadline_raw and day > datetime.date.fromisoformat(deadline_raw):
+            day = datetime.date.fromisoformat(deadline_raw)
+            adjustments.append('The latest date I can record for ' + str(product.get('label') or pid) + ' is ' + day.isoformat() + '.')
+        original_day = day
+        while not business(day):
+            day += datetime.timedelta(days=1)
+        if deadline_raw and day > datetime.date.fromisoformat(deadline_raw):
+            raise ValueError('No valid business day before deadline')
+        if day != original_day:
+            adjustments.append('The next business day for ' + str(product.get('label') or pid) + ' is ' + day.isoformat() + '.')
+        confirmed.append(dict(product_id=pid, amount=amount, date=day.isoformat()))
+    ordered = sorted(confirmed, key=lambda term: next(index for index, item in enumerate(products) if str(item.get('product_id')) == term['product_id']))
+    lines = []
+    for term in ordered:
+        product = next(item for item in products if str(item.get('product_id')) == term['product_id'])
+        lines.append(str(product.get('label') or term['product_id']) + ': ' + format(term['amount'], '.2f') + ' on ' + term['date'])
+    vars['readback_terms_json'] = json.dumps(ordered)
+    vars['confirmation_readback'] = ' '.join(adjustments) + (' ' if adjustments else '') + 'To confirm, you will pay ' + '; '.join(lines) + '.'
+    vars['proposal_validation_state'] = 'ready'
+    vars['proposed_terms_json'] = ''
+    vars['proposed_date_words'] = ''
+except Exception as error:
+    vars['proposal_validation_state'] = 'invalid'
+    vars['readback_terms_json'] = '[]'
+    vars['confirmation_readback'] = ''
+    vars['proposed_terms_json'] = ''
+    vars['proposed_date_words'] = ''
+    vars['discussion_action'] = 'continue'
+    vars['proposal_error'] = str(error)
+"""
+
+
+_VALIDATE_CONFIRMATION_CODE = """import json
+import datetime
+try:
+    vars['validation_state'] = 'invalid'
+    vars['pending_promises_json'] = '[]'
+    if str(vars.get('confirmation_status') or '') != 'confirmed':
+        raise ValueError('No explicit confirmation')
+    readback = vars.get('readback_terms_json')
+    if readback:
+        if str(vars.get('proposal_validation_state') or '') != 'ready' or not str(vars.get('confirmation_readback') or ''):
+            raise ValueError('No validated read-back')
+        raw = readback
+    else:
+        raw = vars.get('confirmed_terms_json') or ''
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('No confirmed terms')
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    now = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00'))
+    today = now.date()
+    holidays = set(__HOLIDAYS__)
+    confirmed = []
+    seen = set()
+    for term in raw:
+        if not isinstance(term, dict):
+            raise ValueError('Malformed term')
+        pid = str(term.get('product_id') or '')
+        product = next((item for item in products if str(item.get('product_id')) == pid), None)
+        if product is None or pid in seen:
+            raise ValueError('Unknown product')
+        seen.add(pid)
+        amount = float(term.get('amount'))
+        if not float(product.get('floor') or 0) <= amount <= float(product.get('past_due') or 0):
+            raise ValueError('Invalid amount')
+        day = datetime.date.fromisoformat(str(term.get('date') or ''))
+        deadline = str(product.get('deadline') or '')
+        if day < today or day.weekday() >= 5 or day.isoformat() in holidays or (deadline and day > datetime.date.fromisoformat(deadline)):
+            raise ValueError('Invalid date')
+        confirmed.append(dict(product_id=pid, amount=amount, date=day.isoformat()))
+    vars['pending_promises_json'] = json.dumps(confirmed)
+    vars['validation_state'] = 'ready'
+except Exception:
+    vars['validation_state'] = 'invalid'
+    vars['pending_promises_json'] = '[]'
+"""
+
+
+_CLEAR_CONFIRMATION_CODE = """try:
+    vars['confirmation_status'] = 'changed'
+    vars['validation_state'] = 'invalid'
+    vars['proposal_validation_state'] = 'invalid'
+    vars['confirmed_terms_json'] = ''
+    vars['pending_promises_json'] = '[]'
+    vars['readback_terms_json'] = '[]'
+    vars['proposed_terms_json'] = ''
+    vars['confirmation_readback'] = ''
+except Exception:
+    pass
+"""
+
+
+_SELECT_PROMISE_CODE = """import json
+try:
+    vars['write_state'] = 'done'
+    if str(vars.get('confirmation_status') or '') != 'confirmed' or str(vars.get('validation_state') or '') != 'ready':
+        vars['write_state'] = 'invalid'
+    else:
+        promises = json.loads(str(vars.get('pending_promises_json') or '[]'))
+        index = int(vars.get('write_index') or 0)
+        if index < len(promises):
+            item = promises[index]
+            vars['pending_product_id'] = str(item['product_id'])
+            vars['pending_amount'] = item['amount']
+            vars['pending_date'] = str(item['date'])
+            vars['write_state'] = 'promise'
+except Exception:
+    vars['write_state'] = 'invalid'
+"""
+
+
+_ADVANCE_PROMISE_CODE = """try:
+    import json
+    recorded = json.loads(str(vars.get('recorded_ids') or '[]'))
+    pid = str(vars.get('pending_product_id') or '')
+    if pid and pid not in recorded:
+        recorded.append(pid)
+    vars['recorded_ids'] = json.dumps(recorded)
+    vars['recorded_count'] = str(len(recorded))
+    vars['write_index'] = str(int(vars.get('write_index') or 0) + 1)
+except Exception:
+    vars['write_index'] = '1'
+"""
+
+
+_MARK_PROMISE_ERROR_CODE = """import json
+try:
+    notes = json.loads(str(vars.get('pending_note_overrides') or '{}'))
+    pid = str(vars.get('pending_product_id') or '')
+    if pid:
+        notes[pid] = __SERVICE_ERROR_REASON__
+    vars['pending_note_overrides'] = json.dumps(notes)
+    vars['write_index'] = str(int(vars.get('write_index') or 0) + 1)
+except Exception:
+    vars['write_index'] = str(int(vars.get('write_index') or 0) + 1)
+"""
+
+
+_PREPARE_NOTES_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    recorded = set(json.loads(str(vars.get('recorded_ids') or '[]')))
+    known = json.loads(str(vars.get('note_reasons') or '{}'))
+    overrides = json.loads(str(vars.get('pending_note_overrides') or '{}'))
+    known.update(overrides)
+    raw = vars.get('pending_note_reasons_json') or ''
+    if isinstance(raw, str) and raw.strip():
+        raw = json.loads(raw)
+    if isinstance(raw, dict):
+        for pid, reason in raw.items():
+            if str(reason) in __NOTE_CODES__:
+                known[str(pid)] = str(reason)
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                pid = str(item.get('product_id') or '')
+                reason = str(item.get('reason') or '')
+                if pid and reason in __NOTE_CODES__:
+                    known[pid] = reason
+    if len(products) == 1:
+        pid = str(products[0].get('product_id') or '')
+        if pid not in recorded and pid not in known:
+            reason = str(vars.get('single_product_reason') or '')
+            known[pid] = reason if reason in __NOTE_CODES__ else __REFUSAL_REASON__
+        vars['note_reasons'] = json.dumps(known)
+    else:
+        for item in products:
+            pid = str(item.get('product_id') or '')
+            if pid not in recorded and pid not in known:
+                known[pid] = __REFUSAL_REASON__
+    items = [dict(product_id=str(item.get('product_id') or ''), reason=known.get(str(item.get('product_id') or '')))
+             for item in products if str(item.get('product_id') or '') not in recorded and len(products) > 1]
+    vars['pending_notes_json'] = json.dumps(items)
+    vars['note_index'] = '0'
+    vars['note_write_state'] = 'notes' if items else 'done'
+except Exception:
+    vars['pending_notes_json'] = '[]'
+    vars['note_write_state'] = 'done'
+"""
+
+
+_SELECT_NOTE_CODE = """import json
+try:
+    notes = json.loads(str(vars.get('pending_notes_json') or '[]'))
+    index = int(vars.get('note_index') or 0)
+    if index < len(notes):
+        item = notes[index]
+        vars['pending_note_product_id'] = str(item['product_id'])
+        vars['pending_note_reason'] = str(item['reason'])
+        vars['note_write_state'] = 'notes'
+    else:
+        vars['note_write_state'] = 'done'
+except Exception:
+    vars['note_write_state'] = 'done'
+"""
+
+
+_ADVANCE_NOTE_CODE = """try:
+    import json
+    notes = json.loads(str(vars.get('note_reasons') or '{}'))
+    pid = str(vars.get('pending_note_product_id') or '')
+    reason = str(vars.get('pending_note_reason') or '')
+    if pid and reason:
+        notes[pid] = reason
+    vars['note_reasons'] = json.dumps(notes)
+    vars['note_index'] = str(int(vars.get('note_index') or 0) + 1)
+except Exception:
+    vars['note_index'] = '1'
+"""
+
+
+_SKIP_NOTE_CODE = """try:
+    vars['note_write_error'] = 'yes'
+    vars['note_index'] = str(int(vars.get('note_index') or 0) + 1)
+except Exception:
+    vars['note_write_error'] = 'yes'
+    vars['note_index'] = '1'
 """
 
 
@@ -535,7 +936,8 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     holidays = _holiday_dates(policy)
     bands = _deadline_bands(policy)
     identity_fields = _identity_fields(openapi)
-    outcomes = _outcome_names(openapi)
+    outcomes = _outcome_names(openapi, policy)
+    reason_names, close_reason_names, note_codes, close_codes = _reason_names(openapi, policy)
     bank_name = _bank_name(policy)
     source_policy = "\n".join(str(policy.get(key) or "") for key in
                               ("global_rules", "opening", "identity", "verified_call", "outcomes", "tool_policy", "constraints", "raw_brief"))
@@ -576,7 +978,7 @@ except Exception:
                       description="Close the call exactly once, after farewell. This is the last bank API call.")
     close["pre_process_code"] = """try:
     body = config.get('body')
-    if isinstance(body, dict) and body.get('outcome') in ('promise', 'paid'):
+    if isinstance(body, dict) and not body.get('reason'):
         body.pop('reason', None)
 except Exception:
     pass
@@ -612,7 +1014,7 @@ except Exception:
         tools=[callback],
         extraction=[_enum("third_party_status", ["deceased", "wrong_number", "no_callback", "waiting"],
                           "Classify the latest answer. no_callback only after refusal or a second invalid callback proposal; waiting otherwise.")],
-        transitions=[_bool("finish_callback", "callback_recorded", "Callback was successfully booked"),
+        transitions=[_eq("finish_callback", "callback_recorded", "yes", "Callback was successfully booked"),
                      _eq("finish_deceased", "third_party_status", "deceased"),
                      _eq("finish_wrong_number", "third_party_status", "wrong_number"),
                      _eq("finish_no_callback", "third_party_status", "no_callback")],
@@ -685,51 +1087,120 @@ except Exception:
         "Use each product's own deadline and amount floor when the source policy requires them. Handle proposed amounts, specific or vague dates, invalid dates, refusals, hardship, paid and dispute claims under the source policy. "
         "Honor the source policy's attempt limits and order. Never invent figures, dates, reasons, discounts or concessions. "
         "For more than one product, state all products before an ask and follow the source policy's product order and combined confirmation rules. "
-        "Before recording, read back every proposed promise with product, amount and date, and obtain the exact confirmation the source policy requires. If terms change, validate and read them back again. "
-        "No tool call is allowed in this node. When confirmation is clear, use transition_to_record_results. If there are no promises to record and each product has a final reason, use transition_to_record_results. "
-        "On a transfer request use the corresponding transfer transition immediately; no notes may be made on a transfer."
+        "When the caller has proposed specific terms, stop after acknowledging them. The next step will read them back for confirmation. Do not say they are recorded yet. "
+        "If a prior read-back was corrected or validation failed, clarify the changed product, amount or date before offering another read-back. On a date validation error, ask for the exact day; a bare yes to the old read-back is not a new proposal. "
+        "For a flat refusal, paid claim, dispute, or hardship with no promise, finish the discussion under the source policy. "
+        "Do not say goodbye while a payment proposal remains unconfirmed. No tool call is allowed in this node."
     )
     transitions = [
-        {"target_node": "transfer_restructuring", "description": "Caller requests a new payment plan or lower instalments; transfer without notes.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "The caller requests restructuring or lower instalments"}},
-        {"target_node": "transfer_support", "description": "Caller accepts an offered support transfer after hardship; transfer without notes.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "The caller accepts support transfer"}},
-        {"target_node": "transfer_human", "description": "Caller insists on a human after being asked once whether the digital assistant can help; transfer without notes.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "The caller insists on a human"}},
-        {"target_node": "record_results", "description": "All products have a confirmed promise or a final non-promise reason, and there is no transfer request. Only use after one combined read-back and clear confirmation if any promises are proposed.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "The discussion is complete"}},
+        _eq("transfer_restructuring", "discussion_action", "transfer_restructuring"),
+        _eq("transfer_support", "discussion_action", "transfer_support"),
+        _eq("transfer_human", "discussion_action", "transfer_human"),
+        _eq("prepare_confirmation", "discussion_action", "proposal_ready"),
+        _eq("prepare_notes", "discussion_action", "done_no_promise"),
     ]
     nodes["account_discussion"] = _conversation("account_discussion", account_prompt, transitions=transitions,
-                                                 extraction=[_enum("single_product_reason", ["paid", "dispute", "hardship", "refused", "service_error"],
-                                                                   "For a one-product account only, classify the latest caller answer as already paid, disputed, hardship with support declined, flatly refused after attempts, or service error. Leave unchanged when still negotiating or making a promise.")],
-                                                 max_turns=40, max_target="record_results")
+                                                 extraction=[
+                                                     _enum("discussion_action", ["proposal_ready", "done_no_promise", "transfer_restructuring", "transfer_support", "transfer_human", "continue"],
+                                                           "Classify ONLY the latest caller answer using the source policy. proposal_ready only when this answer proposes or accepts specific payment terms with a fresh date phrase, including today or a weekday. A bare yes/I confirm to an earlier read-back in this node is continue, never proposal_ready. done_no_promise only when all products have final paid/dispute/hardship/refused reasons and no transfer is wanted. A no to today without another date is continue while persuasion remains. Transfer actions take priority."),
+                                                     {"name": "proposed_terms_json", "type": "string", "min_confidence": 0.55,
+                                                      "description": "Only when the latest caller answer proposes or accepts payment terms with a date, return a JSON array string with objects product_id, amount, date. Preserve the caller's raw date words verbatim in date, such as 'today', 'this Friday', 'next Friday', '30 October', or an ISO date; NEVER convert a relative date to a year or use the system clock. Code will resolve it from call now {{now}}. Use account facts {{account_facts}} for product ID and numeric full amount. For multiple products include each agreed product with its own raw date phrase. Leave empty for a bare yes/I confirm, no date, or no terms."},
+                                                     {"name": "proposed_date_words", "type": "string", "min_confidence": 0.55,
+                                                      "description": "For a one-product proposal only, copy the exact date phrase spoken in the LATEST caller answer, verbatim, such as 'this Friday'. Do not convert it to a date. Leave empty if the latest answer contains no date phrase, including a bare yes/I confirm."},
+                                                     {"name": "pending_note_reasons_json", "type": "string", "min_confidence": 0.55,
+                                                      "description": "For each product the caller has finally refused, disputed, said already paid, or declined after hardship, return a JSON object string mapping product_id to the correct add_note reason from the source policy and API. Leave empty if still discussing."},
+                                                     _enum("single_product_reason", note_codes or ["paid", "dispute", "hardship", "refused", "service_error"],
+                                                           "For a one-product account only, classify a final paid, dispute, hardship, or refused result; do not fill while negotiating a promise."),
+                                                 ],
+                                                 max_turns=40, max_target="prepare_notes")
+    nodes["account_discussion"]["on_enter_first_entry_only"] = True
 
-    record_prompt = (
-        "Use the confirmed terms from the conversation and the account facts: {{account_facts}}. Products still needing an action: {{missing_products}}. "
-        "For each confirmed promise call create_promise exactly once per product in API order, with that product's exact ID, amount and valid ISO date. "
-        "If a call does not return ok=true, retry once with identical arguments. Never say recorded before ok=true. "
-        "After success say the exact confirmation sentence required by the source policy. "
-        "For multi-product accounts, call add_note once per product without a recorded promise, with the valid reason required by the source policy and API. "
-        "For a one-product account do not call add_note. For a transfer, add no notes and do not record agreed but unrecorded promises. "
-        "Follow the source policy's retry limit. If a promise ultimately fails, say it could not be recorded and, for multi-product accounts, note the permitted failure reason. Keep any other recorded promises. "
-        "Use actual tool result ok, not a hopeful assumption. On any tool result, speak or make the next tool call; never go silent. "
-        "Once every product has a recorded promise or final note (one-product accounts need no note), use transition_to_finalize. "
-        "If a new restructuring/support/human transfer request occurs, use the transfer transition and add no further notes. "
-        "After a recorded promise, handle change requests under the source policy."
-    )
-    record_transitions = [
-        _bool("finalize", "transfer_reason", "Transfer succeeded"),
-        {"target_node": "transfer_restructuring", "description": "New restructuring request, stop other work; no notes.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "Customer requests restructuring"}},
-        {"target_node": "transfer_support", "description": "Customer accepts support transfer; no notes.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "Customer accepts support"}},
-        {"target_node": "transfer_human", "description": "Customer insists on a human; no notes.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "Customer insists on human"}},
-        {"target_node": "finalize", "description": "All required promise and note API results have been checked. Finish the call.", "is_tool_call": True,
-         "condition": {"operator": "matches_intent", "description": "All products processed"}},
+    nodes["prepare_confirmation"] = _code_node(
+        "prepare_confirmation", _PREPARE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
+    nodes["prepare_confirmation"]["transitions"] = [
+        _eq("confirmation", "proposal_validation_state", "ready"),
+        _eq("account_discussion", "proposal_validation_state", "invalid"),
+        _always("service_unavailable")]
+    nodes["confirmation"] = _conversation(
+        "confirmation",
+        "The exact validated read-back was spoken on entry: {{confirmation_readback}}. Wait for the caller's answer. Only a clear yes to all stated terms counts as confirmation. If the caller changes a term, acknowledge it and obtain another validated read-back and confirmation. Do not claim a promise is recorded. No tool call is allowed in this node.",
+        opening="{{confirmation_readback}} " + _confirmation_question(policy),
+        extraction=[
+            _enum("confirmation_status", ["confirmed", "changed", "declined", "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
+                  "Classify ONLY the latest answer to the immediately preceding read-back. confirmed requires a clear yes to all stated product, amount and date terms. changed if any amount or date is corrected. declined if caller rejects the read-back. Transfer requests take priority over confirmation. An earlier yes elsewhere in the conversation is not confirmation."),
+        ],
+        transitions=[
+            _eq("transfer_restructuring", "confirmation_status", "transfer_restructuring"),
+            _eq("transfer_support", "confirmation_status", "transfer_support"),
+            _eq("transfer_human", "confirmation_status", "transfer_human"),
+            _eq("validate_confirmation", "confirmation_status", "confirmed"),
+            _eq("clear_confirmation", "confirmation_status", "changed"),
+            _eq("prepare_notes", "confirmation_status", "declined"),
+        ],
+        max_turns=3, max_target="account_discussion")
+    nodes["clear_confirmation"] = _code_node("clear_confirmation", _CLEAR_CONFIRMATION_CODE, "account_discussion")
+    nodes["validate_confirmation"] = _code_node(
+        "validate_confirmation", _VALIDATE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
+    nodes["validate_confirmation"]["transitions"] = [
+        _eq("record_results", "validation_state", "ready"), _always("account_discussion")]
+
+    # Every write below is an engine-run action. The model cannot call a promise
+    # tool, and the only path to the first promise action is a clear confirmation.
+    nodes["record_results"] = _code_node("record_results", _SELECT_PROMISE_CODE, "prepare_notes")
+    nodes["record_results"]["transitions"] = [
+        _eq("create_promise_call", "write_state", "promise"),
+        _eq("account_discussion", "write_state", "invalid"),
+        _always("prepare_notes"),
     ]
-    nodes["record_results"] = _conversation("record_results", record_prompt, tools=[promise, note],
-                                              transitions=record_transitions, max_turns=30, max_target="finalize")
+    promise_engine = _api_tool(openapi, "create_promise", fixed={
+        "product_id": "{{pending_product_id}}", "amount": "{{pending_amount}}", "date": "{{pending_date}}"},
+        description="Record the explicitly confirmed and validated current product promise.", post_code=_PROMISE_HOOK)
+    promise_engine["pre_process_code"] = promise["pre_process_code"]
+    for node_name, failure_target in (("create_promise_call", "retry_promise_call"),
+                                      ("retry_promise_call", "mark_promise_error")):
+        nodes[node_name] = {
+            "name": node_name, "node_type": "api_request", "on_enter": {"type": "silent"},
+            "passthrough": True, "passthrough_default_transition": failure_target,
+            "pre_actions": [promise_engine],
+            "transitions": [_bool("mark_promise_success", node_name + "_response.data.ok", "Promise API confirmed success"),
+                            _always(failure_target)],
+        }
+    nodes["mark_promise_success"] = _code_node("mark_promise_success", _ADVANCE_PROMISE_CODE, "promise_success_notice")
+    nodes["promise_success_notice"] = {
+        "name": "promise_success_notice", "node_type": "conversation",
+        "on_enter": {"type": "tts", "text": _success_sentence(policy)},
+        "task_message": "Say the fixed confirmation of a successfully recorded promise. No tool call is allowed in this turn.",
+        "passthrough": True, "passthrough_default_transition": "record_results",
+        "transitions": [_always("record_results")],
+    }
+    nodes["mark_promise_error"] = _code_node(
+        "mark_promise_error", _MARK_PROMISE_ERROR_CODE.replace("__SERVICE_ERROR_REASON__", repr(reason_names.get("service_error") or "service_error")),
+        "record_results")
+
+    prepare_notes_code = (_PREPARE_NOTES_CODE
+                          .replace("__NOTE_CODES__", repr(note_codes))
+                          .replace("__REFUSAL_REASON__", repr(reason_names.get("refused") or "refused")))
+    nodes["prepare_notes"] = _code_node("prepare_notes", prepare_notes_code, "finalize")
+    nodes["prepare_notes"]["transitions"] = [
+        _eq("select_note", "note_write_state", "notes"), _always("finalize")]
+    nodes["select_note"] = _code_node("select_note", _SELECT_NOTE_CODE, "finalize")
+    nodes["select_note"]["transitions"] = [
+        _eq("add_note_call", "note_write_state", "notes"), _always("finalize")]
+    note_engine = _api_tool(openapi, "add_note", fixed={
+        "product_id": "{{pending_note_product_id}}", "reason": "{{pending_note_reason}}"},
+        description="Record one deferred non-promise reason after the discussion has ended and no transfer is pending.", post_code=_NOTE_HOOK)
+    note_engine["pre_process_code"] = note["pre_process_code"]
+    for node_name, failure_target in (("add_note_call", "retry_note_call"),
+                                      ("retry_note_call", "note_write_failed")):
+        nodes[node_name] = {
+            "name": node_name, "node_type": "api_request", "on_enter": {"type": "silent"},
+            "passthrough": True, "passthrough_default_transition": failure_target,
+            "pre_actions": [note_engine],
+            "transitions": [_bool("advance_note", node_name + "_response.data.ok", "Note API confirmed success"),
+                            _always(failure_target)],
+        }
+    nodes["advance_note"] = _code_node("advance_note", _ADVANCE_NOTE_CODE, "select_note")
+    nodes["note_write_failed"] = _code_node("note_write_failed", _SKIP_NOTE_CODE, "select_note")
     for suffix in ("restructuring", "support", "human"):
         queue = _queue_for(openapi, suffix)
         t = _api_tool(openapi, "transfer_to_agent", fixed={"queue": queue},
@@ -746,13 +1217,25 @@ except Exception:
             "passthrough": True, "passthrough_default_transition": "finalize",
             "pre_actions": [t], "transitions": [_always("finalize")],
         }
-    final_code = _FINAL_CODE
-    for role in ("transferred", "promise", "paid", "no_promise"):
-        final_code = final_code.replace("'" + role + "'", repr(outcomes[role]))
+    transfer_first = True
+    precedence_text = str((policy.get("constraints") or {}).get("outcome_precedence") or "") if isinstance(policy.get("constraints"), dict) else ""
+    precedence_text += "\n" + brief
+    transfer_matches = list(re.finditer(r"(?:promise|pledge)[^\n.]{0,60}wins?\s+over\s+(?:transfer|handoff)|(?:transfer|handoff)[^\n.]{0,60}wins?\s+over\s+(?:promise|pledge)", precedence_text, flags=re.IGNORECASE))
+    if transfer_matches:
+        transfer_first = not bool(re.match(r"(?:promise|pledge)", transfer_matches[-1].group(), flags=re.IGNORECASE))
+    final_code = (_FINAL_CODE
+                  .replace("__OUTCOME_MAP__", repr(outcomes))
+                  .replace("__REASON_MAP__", repr(reason_names))
+                  .replace("__CLOSE_REASON_MAP__", repr(close_reason_names))
+                  .replace("__NOTE_CODES__", repr(note_codes))
+                  .replace("__CLOSE_CODES__", repr(close_codes))
+                  .replace("__TRANSFER_FIRST__", repr(transfer_first))
+                  .replace("__ERROR_OUTCOME__", repr(outcomes["no_promise"]))
+                  .replace("__ERROR_REASON__", repr(close_reason_names.get("service_error") or "")))
     nodes["finalize"] = _code_node("finalize", final_code, "farewell")
     nodes["finalize"]["transitions"] = [
-        _eq("record_results", "processing_complete", "no", "Multi-product account has products still awaiting a promise or note"),
-        _always("farewell"),
+        _to("farewell", "Close outcome was computed", _when(_check("close_outcome", "is_set"))),
+        _always("service_unavailable"),
     ]
 
     for label, outcome, reason in (
@@ -765,7 +1248,7 @@ except Exception:
         ("identity_declined", "not_verified", "declined"),
         ("service_error", "no_promise", "service_error"),
     ):
-        nodes["finish_" + label] = _finish_node("finish_" + label, outcomes[outcome], reason)
+        nodes["finish_" + label] = _finish_node("finish_" + label, outcomes[outcome], close_reason_names.get(reason, reason) if reason else "")
     nodes["finish_deceased"]["passthrough_default_transition"] = "farewell_deceased"
     nodes["finish_deceased"]["transitions"] = [_always("farewell_deceased")]
     nodes["finish_identity_failed"]["passthrough_default_transition"] = "farewell_identity_failed"
@@ -806,6 +1289,41 @@ except Exception:
             }},
         }},
     }
+    nodes["service_unavailable"] = {
+        "name": "service_unavailable", "node_type": "conversation",
+        "on_enter": {"type": "tts", "text": "I cannot confirm or complete this request right now. Please check the mobile app or contact the bank. Thank you and goodbye."},
+        "task_message": "A bank service is unavailable. Say only the fixed message. Do not claim a promise, callback, transfer, or note was recorded. No tool call is allowed in this turn.",
+        "passthrough": True, "passthrough_default_transition": "close_call",
+        "transitions": [_always("close_call")],
+    }
+    # A failed code_exec must never continue on the node's normal fallback.
+    # Use both the failure counter and the passthrough default because Freya
+    # may skip condition evaluation when its sandbox cannot be reached.
+    code_names = []
+    for code_name, code_node in nodes.items():
+        if code_node.get("node_type") == "code":
+            code_names.append(code_name)
+            # If the engine skips transition evaluation after a tool failure,
+            # the passthrough default must still lead to the truthful fallback.
+            code_node["passthrough_default_transition"] = "service_unavailable"
+            code_node["transitions"].insert(0, _to(
+                "service_unavailable", "Code execution failed; no result may be assumed",
+                _when(_check(code_name + "_failure_count", "greater_than", 0)),
+            ))
+    close["pre_process_code"] = (
+        "try:\n"
+        "    body = config.get('body')\n"
+        "    if isinstance(body, dict):\n"
+        f"        failed_nodes = {code_names!r}\n"
+        "        failed = any(int(vars.get(name + '_failure_count') or 0) > 0 for name in failed_nodes)\n"
+        "        if failed or not vars.get('close_outcome'):\n"
+        f"            body['outcome'] = {outcomes['no_promise']!r}\n"
+        f"            body['reason'] = {(close_reason_names.get('service_error') or 'service_error')!r}\n"
+        "        elif not body.get('reason'):\n"
+        "            body.pop('reason', None)\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
     system_prompt = (
         f"You are {bank_name}'s digital assistant. Follow the source policy below in full. "
         "Follow the current node's task exactly. Never disclose account information before the required identity checks pass. "

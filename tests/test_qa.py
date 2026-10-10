@@ -12,6 +12,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import qa  # noqa: E402
+from policy_compiler import compile_policy  # noqa: E402
+from workflow_generator import build_workflow  # noqa: E402
 
 
 OPENAPI = json.loads((ROOT / "tools" / "openapi.json").read_text())
@@ -103,6 +105,27 @@ def explicit_close_workflow():
     return workflow
 
 
+def confirmed_promise_workflow():
+    workflow = explicit_close_workflow()
+    workflow["nodes"]["account"]["task_message"] = "Read back the proposed promise and ask for confirmation."
+    workflow["nodes"]["account"]["extraction_schema"] = [
+        {"name": "promise_confirmation", "type": "string",
+         "enum_values": ["confirmed", "pending", "changed"],
+         "description": "Confirmed only after the full read-back is accepted."}]
+    workflow["nodes"]["account"]["transitions"] = [
+        transition("commit", {"logic": "or", "conditions": [
+            {"variable": "promise_confirmation", "operator": "equals", "operand": "confirmed"}]}),
+        transition("close", {"operator": "matches_intent", "description": "No promise"}),
+    ]
+    workflow["nodes"]["commit"] = {
+        "name": "commit", "node_type": "conversation",
+        "task_message": "Record the confirmed promise.",
+        "tools": [bank_tool("create_promise")],
+        "transitions": [transition("close")],
+    }
+    return workflow
+
+
 class ValidatorTests(unittest.TestCase):
     def check_has(self, workflow, phrase):
         errors = qa.validate_workflow(workflow, OPENAPI)
@@ -118,6 +141,32 @@ class ValidatorTests(unittest.TestCase):
         workflow = explicit_close_workflow()
         workflow["nodes"]["identity"]["transitions"][1]["target_node"] = "finish"
         self.check_has(workflow, "path reaches end_call without a preceding close_call")
+
+    def test_promise_requires_positive_confirmation_on_every_path(self):
+        workflow = confirmed_promise_workflow()
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        workflow["nodes"]["account"]["max_turn_transition"] = "commit"
+        self.check_has(workflow, "create_promise is reachable without a positive confirmation condition")
+
+        workflow["nodes"]["account"].pop("max_turn_transition")
+        workflow["nodes"]["account"]["transitions"][0]["condition"]["conditions"].append(
+            {"operator": "always"})
+        self.check_has(workflow, "create_promise is reachable without a positive confirmation condition")
+
+    def test_tool_call_transition_is_not_a_confirmation_gate(self):
+        workflow = confirmed_promise_workflow()
+        transition_to_commit = workflow["nodes"]["account"]["transitions"][0]
+        transition_to_commit["is_tool_call"] = True
+        transition_to_commit["condition"] = {
+            "operator": "matches_intent", "description": "Caller confirmed"}
+        self.check_has(workflow, "create_promise is reachable without a positive confirmation condition")
+
+    def test_no_tool_call_prompt_cannot_offer_transition_tool(self):
+        workflow = confirmed_promise_workflow()
+        workflow["nodes"]["account"]["task_message"] = (
+            "No tool call is allowed in this node. Use transition_to_commit when ready.")
+        workflow["nodes"]["account"]["transitions"][0]["is_tool_call"] = True
+        self.check_has(workflow, "contradicts callable tools or is_tool_call transitions")
 
     def test_null_and_secret_are_found_at_nested_paths(self):
         workflow = valid_workflow()
@@ -199,6 +248,31 @@ class ValidatorTests(unittest.TestCase):
         code["function"]["parameters"]["properties"]["code"]["default"] = (
             "vars['date_facts'] = 'today: ' + today.isoformat() +\n")
         self.check_has(workflow, "Python syntax error on line 1")
+
+    def test_failed_confirmation_code_cannot_resume_ungated_discussion(self):
+        policy = compile_policy([str(ROOT / "briefs" / "brief-a.md")],
+                                str(ROOT / "tools" / "openapi.json"), None)
+        workflow = build_workflow(policy, OPENAPI)
+        node = workflow["nodes"]["prepare_confirmation"]
+        node["transitions"] = [t for t in node["transitions"] if
+                               "prepare_confirmation_failure_count" not in
+                               qa._condition_variables(t["condition"])]
+        node["transitions"][-1] = transition("account_discussion")
+        node["passthrough_default_transition"] = "account_discussion"
+        errors = qa.validate_workflow(workflow, OPENAPI)
+        self.assertTrue(any("code_exec confirmation/promise gate needs a first" in e
+                            and "prepare_confirmation" in e for e in errors), errors)
+        self.assertTrue(any("prepare_confirmation.passthrough_default_transition" in e
+                            and "ungated conversation" in e for e in errors), errors)
+
+    def test_promise_success_speech_requires_successful_api_response(self):
+        policy = compile_policy([str(ROOT / "briefs" / "brief-a.md")],
+                                str(ROOT / "tools" / "openapi.json"), None)
+        workflow = build_workflow(policy, OPENAPI)
+        promise_call = workflow["nodes"]["create_promise_call"]
+        promise_call["transitions"][-1] = transition("promise_success_notice")
+        promise_call["passthrough_default_transition"] = "promise_success_notice"
+        self.check_has(workflow, "recorded-promise success speech is reachable without create_promise ok=true")
 
     def test_hooks_compile_without_executing_them(self):
         workflow = valid_workflow()

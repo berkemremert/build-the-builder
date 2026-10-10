@@ -66,6 +66,79 @@ def _condition_has_verification(condition) -> bool:
     )
 
 
+def _condition_has_confirmation(condition) -> bool:
+    """Prove an edge requires a positive confirmation state, including groups."""
+    if not isinstance(condition, dict):
+        return False
+    children = condition.get("conditions")
+    if isinstance(children, list):
+        if condition.get("logic") == "and":
+            return any(_condition_has_confirmation(child) for child in children)
+        if condition.get("logic") == "or":
+            return bool(children) and all(_condition_has_confirmation(child) for child in children)
+        return False
+    variable = str(condition.get("variable", "")).lower()
+    operand = str(condition.get("operand", "")).lower()
+    return (condition.get("operator") == "equals" and "confirm" in variable and
+            operand in {"true", "confirmed", "yes", "accepted"})
+
+
+def _condition_variables(condition) -> set[str]:
+    if not isinstance(condition, dict):
+        return set()
+    children = condition.get("conditions")
+    if isinstance(children, list):
+        return set().union(*(_condition_variables(child) for child in children))
+    variable = condition.get("variable")
+    return {variable} if isinstance(variable, str) else set()
+
+
+def _condition_requires(condition, variable: str, operator: str, operand: str) -> bool:
+    """Prove a route requires a particular atomic condition."""
+    if not isinstance(condition, dict):
+        return False
+    children = condition.get("conditions")
+    if isinstance(children, list):
+        checks = [_condition_requires(child, variable, operator, operand) for child in children]
+        if condition.get("logic") == "and":
+            return any(checks)
+        if condition.get("logic") == "or":
+            return bool(checks) and all(checks)
+        return False
+    return (condition.get("variable") == variable and
+            condition.get("operator") == operator and
+            str(condition.get("operand")) == operand)
+
+
+def _condition_requires_promise_ok(condition, variable: str) -> bool:
+    if not isinstance(condition, dict):
+        return False
+    children = condition.get("conditions")
+    if isinstance(children, list):
+        checks = [_condition_requires_promise_ok(child, variable) for child in children]
+        if condition.get("logic") == "and":
+            return any(checks)
+        if condition.get("logic") == "or":
+            return bool(checks) and all(checks)
+        return False
+    return (condition.get("variable") == variable and
+            condition.get("operator") == "equals" and
+            str(condition.get("operand")).lower() == "true")
+
+
+def _promise_success_notice(node) -> bool:
+    """Recognize fixed speech that claims a promise was recorded or confirmed."""
+    if not isinstance(node, dict):
+        return False
+    on_enter = node.get("on_enter")
+    if not isinstance(on_enter, dict) or on_enter.get("type") != "tts":
+        return False
+    text = on_enter.get("text", "")
+    return (isinstance(text, str) and
+            bool(re.search(r"\bpromis(?:e|es)\b", text, re.I)) and
+            bool(re.search(r"\brecord(?:ed|ing)?\b|\bconfirm(?:ed|ing)?\b|\bregister(?:ed)?\b|\bsms\b", text, re.I)))
+
+
 def _schema_for(openapi: dict, path: str, method: str) -> dict:
     op = openapi.get("paths", {}).get(path, {}).get(method.lower(), {})
     return op.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {})
@@ -275,7 +348,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             if field == "customer_id" and spec.get("default") != "{{customer_id}}":
                 errors.append(f"{where}: set default to {{{{customer_id}}}} from call variables")
 
-    edges: dict[str, list[tuple[str, bool]]] = {}
+    edges: dict[str, list[tuple[str, bool, bool]]] = {}
     for name, node in all_nodes.items():
         loc = f"workflow.{'global_nodes' if name in globals_ else 'nodes'}.{name}"
         if not isinstance(node, dict):
@@ -303,6 +376,13 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             errors.append(f"{loc}.tools are stripped from {kind} nodes; move them to a conversation node")
         if actions and kind not in {"api_request", "code"}:
             errors.append(f"{loc}.pre_actions are stripped from {kind} nodes; use an api_request or code node")
+        task_message = node.get("task_message", "")
+        raw_transitions = node.get("transitions", [])
+        callable_transitions = raw_transitions if isinstance(raw_transitions, list) else []
+        if (kind == "conversation" and isinstance(task_message, str) and
+                re.search(r"\bno\s+tool\s+calls?\s+(?:is|are)\s+allowed\b", task_message, re.I) and
+                (tools or any(isinstance(t, dict) and t.get("is_tool_call") for t in callable_transitions))):
+            errors.append(f"{loc}.task_message: 'no tool call is allowed' contradicts callable tools or is_tool_call transitions")
         for i, tool in enumerate(tools):
             check_tool(tool, f"{loc}.tools[{i}]")
         for i, tool in enumerate(actions):
@@ -339,14 +419,16 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"{tloc}.target_node {target!r} does not name a node")
                 continue
             if target != "__previous__":
-                edges[name].append((target, _condition_has_verification(transition.get("condition"))))
+                condition = transition.get("condition")
+                edges[name].append((target, _condition_has_verification(condition),
+                                    _condition_has_confirmation(condition)))
         for field in ("passthrough_default_transition", "max_turn_transition"):
             target = node.get(field)
             if target is not None:
                 if not isinstance(target, str) or (target not in all_nodes and not (name in globals_ and target == "__previous__")):
                     errors.append(f"{loc}.{field} {target!r} does not name a node")
                 elif target != "__previous__" and (field != "passthrough_default_transition" or node.get("passthrough")):
-                    edges[name].append((target, False))
+                    edges[name].append((target, False, False))
         if node.get("passthrough"):
             if kind == "end_call":
                 errors.append(f"{loc}: end_call nodes must not be passthrough")
@@ -381,7 +463,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             if current in reachable:
                 continue
             reachable.add(current)
-            queue.extend(target for target, _ in edges.get(current, []))
+            queue.extend(target for target, _, _ in edges.get(current, []))
         for name in nodes:
             if name not in reachable:
                 errors.append(f"workflow.nodes.{name}: unreachable from initial_node")
@@ -390,7 +472,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             errors.append("workflow: no reachable end_call node; add a terminal path")
         reverse = {n: [] for n in all_nodes}
         for source, links in edges.items():
-            for target, _ in links:
+            for target, _, _ in links:
                 reverse[target].append(source)
         can_end = set(end_nodes)
         queue = deque(end_nodes)
@@ -401,6 +483,82 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                     queue.append(parent)
         for name in reachable - can_end:
             errors.append(f"workflow.nodes.{name}: no route to an end_call node")
+
+        def safe_code_failure_route(start: str) -> bool:
+            """A failed computation may only reach fixed speech and closing actions."""
+            pending, visited = [start], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                target_node = all_nodes.get(current)
+                if not isinstance(target_node, dict):
+                    return False
+                if target_node.get("node_type") == "conversation":
+                    on_enter = target_node.get("on_enter")
+                    if not (target_node.get("passthrough") and isinstance(on_enter, dict)
+                            and on_enter.get("type") == "tts"):
+                        return False
+                pending.extend(target for target, _, _ in edges.get(current, []))
+            return bool(visited & end_nodes)
+
+        def reaches_promise_stage(start: str) -> bool:
+            """Follow deterministic steps up to the next spoken turn."""
+            pending, visited = [start], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                target_node = all_nodes.get(current)
+                if not isinstance(target_node, dict):
+                    continue
+                actions = target_node.get("pre_actions", [])
+                if isinstance(actions, list) and any(
+                        _tool_name(action) == "create_promise" for action in actions):
+                    return True
+                if target_node.get("node_type") == "conversation":
+                    on_enter = target_node.get("on_enter")
+                    extractions = target_node.get("extraction_schema", [])
+                    if (isinstance(on_enter, dict) and on_enter.get("type") == "tts" and
+                            isinstance(extractions, list) and any(
+                                isinstance(item, dict) and
+                                "confirm" in str(item.get("name", "")).lower()
+                                for item in extractions)):
+                        return True
+                    continue
+                pending.extend(target for target, _, _ in edges.get(current, []))
+            return False
+
+        # Freya can leave a code node after code_exec fails. A stale value must
+        # never send the call back to free-form discussion or onward to a write.
+        for name in reachable:
+            node = all_nodes.get(name)
+            if not isinstance(node, dict):
+                continue
+            actions = node.get("pre_actions", [])
+            if not isinstance(actions, list) or not any(
+                    isinstance(action, dict) and isinstance(action.get("function"), dict) and
+                    action["function"].get("handler") == "__function__:code_exec"
+                    for action in actions):
+                continue
+            transitions = node.get("transitions", [])
+            if not isinstance(transitions, list):
+                continue
+            if not any(reaches_promise_stage(target) for target, _, _ in edges.get(name, [])):
+                continue
+            loc = f"workflow.nodes.{name}"
+            failure_variable = f"{name}_failure_count"
+            first = transitions[0] if transitions else None
+            if not (isinstance(first, dict) and
+                    _condition_requires(first.get("condition"), failure_variable, "greater_than", "0") and
+                    isinstance(first.get("target_node"), str) and
+                    safe_code_failure_route(first["target_node"])):
+                errors.append(f"{loc}: code_exec confirmation/promise gate needs a first {failure_variable} > 0 route to fixed failure speech and close")
+            default = node.get("passthrough_default_transition") if node.get("passthrough") else None
+            if not isinstance(default, str) or not safe_code_failure_route(default):
+                errors.append(f"{loc}.passthrough_default_transition: code_exec failure fallback must lead to fixed failure speech and close, not ungated conversation")
 
         # Propagate whether identity has been proven. A path to an account tool
         # with state=False is an actionable potential policy breach.
@@ -423,8 +581,60 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                     tool_name = tool["function"].get("name")
                     if tool_name in _ACCOUNT_TOOLS and not verified:
                         errors.append(f"workflow.nodes.{name}: {tool_name} may run before a verified identity gate; route through a positive verification condition")
-            for target, gate in edges.get(name, []):
+            for target, gate, _ in edges.get(name, []):
                 queue.append((target, verified or gate))
+
+        # A model-callable create_promise must not be available until a
+        # deterministic positive confirmation condition has been crossed.
+        # Prompt prose and is_tool_call transitions alone cannot prove this.
+        confirmed_seen = set()
+        queue = deque([(initial, False)])
+        while queue:
+            name, confirmed = queue.popleft()
+            if (name, confirmed) in confirmed_seen:
+                continue
+            confirmed_seen.add((name, confirmed))
+            node = all_nodes.get(name)
+            if not isinstance(node, dict):
+                continue
+            callable_tools = node.get("tools", []) if isinstance(node.get("tools", []), list) else []
+            entry_actions = node.get("pre_actions", []) if isinstance(node.get("pre_actions", []), list) else []
+            if not confirmed and any(_tool_name(tool) == "create_promise"
+                                     for tool in callable_tools + entry_actions):
+                errors.append(f"workflow.nodes.{name}: create_promise is reachable without a positive confirmation condition; gate this route on a confirmed state variable")
+            for target, _, gate in edges.get(name, []):
+                queue.append((target, confirmed or gate))
+
+        # A fixed recorded-promise notice requires an ok=true response from
+        # create_promise on every path, including passthrough defaults.
+        success_seen = set()
+        queue = deque([(initial, False)])
+        while queue:
+            name, promise_ok = queue.popleft()
+            if (name, promise_ok) in success_seen:
+                continue
+            success_seen.add((name, promise_ok))
+            node = all_nodes.get(name)
+            if not isinstance(node, dict):
+                continue
+            if _promise_success_notice(node) and not promise_ok:
+                errors.append(f"workflow.nodes.{name}: recorded-promise success speech is reachable without create_promise ok=true")
+            actions = node.get("pre_actions", [])
+            has_promise_action = (isinstance(actions, list) and
+                                  any(_tool_name(action) == "create_promise" for action in actions))
+            for transition in node.get("transitions", []) if isinstance(node.get("transitions", []), list) else []:
+                if not isinstance(transition, dict):
+                    continue
+                target = transition.get("target_node")
+                if target not in all_nodes:
+                    continue
+                gated = (has_promise_action and _condition_requires_promise_ok(
+                    transition.get("condition"), f"{name}_response.data.ok"))
+                queue.append((target, gated if has_promise_action else promise_ok))
+            for field in ("passthrough_default_transition", "max_turn_transition"):
+                target = node.get(field)
+                if target in all_nodes and (field != "passthrough_default_transition" or node.get("passthrough")):
+                    queue.append((target, False if has_promise_action else promise_ok))
 
     closers = tool_locations.get("close_call", set())
     lifecycle_close = any(
@@ -464,7 +674,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"workflow.nodes.{name}: a bank API call may run after close_call")
             if node.get("node_type") == "end_call" and not closed:
                 errors.append(f"workflow.nodes.{name}: path reaches end_call without a preceding close_call pre_action")
-            for target, _ in edges.get(name, []):
+            for target, _, _ in edges.get(name, []):
                 queue.append((target, closed))
         if not any(
             isinstance(node, dict) and isinstance(node.get("pre_actions"), list)

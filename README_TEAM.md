@@ -90,9 +90,8 @@ hard.
   and each self-test with its result.
 - [ ] The repository commit includes builder code, both exports, and both traces;
   the exact commit hash and repository URL are recorded.
-- [ ] A Git repository and remote exist. This supplied kit directory has no Git
-  metadata yet; create or connect the team's repository before the final window.
-  Copy chosen exports and traces from the ignored local `out/` directory to a
+- [ ] The Git repository and remote are available at submission time. Copy
+  chosen exports and traces from the ignored local `out/` directory to a
   deliberate `submission/` path before committing.
 - [ ] The submission includes team identity, repository URL, exact commit,
   reproducible command with `{brief_path}` and `{tool_api_path}`, two export
