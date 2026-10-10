@@ -682,6 +682,7 @@ try:
                          '; bank holidays: ' + ', '.join(sorted(holidays)))
     vars['last_business_day_offer'] = friday.isoformat() if {offer_last_business_day!r} else ''
     vars['single_floor_stage'] = '0'
+    vars['single_revision_attempts'] = '0'
     vars['recorded_ids'] = '[]'
     vars['recorded_count'] = '0'
     vars['note_reasons'] = '{{}}'
@@ -845,13 +846,13 @@ try:
                     'twenty fourth', 'twenty fifth', 'twenty sixth', 'twenty seventh', 'twenty eighth',
                     'twenty ninth', 'thirtieth', 'thirty first')))
                 spoken_day = None
-                if month:
+                if month or any(word in date_raw for word in ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')):
                     normalized = re.sub(r'[-\\s]+', ' ', date_raw)
                     day_pattern = '|'.join(re.escape(name) for name in sorted(named_days, key=len, reverse=True))
                     month_pattern = '|'.join(months)
-                    before = re.search(r'\\b(?:the\\s+)?(' + day_pattern + r')(?:\\s+of)?\\s+(?:' + month_pattern + r')\\b', normalized)
-                    after = re.search(r'\\b(?:' + month_pattern + r')\\s+(?:the\\s+)?(' + day_pattern + r')\\b', normalized)
-                    spoken = before or after
+                    before = re.search(r'\\b(?:the\\s+)?(' + day_pattern + r')(?:\\s+of)?\\s+(?:' + month_pattern + r')\\b', normalized) if month else None
+                    after = re.search(r'\\b(?:' + month_pattern + r')\\s+(?:the\\s+)?(' + day_pattern + r')\\b', normalized) if month else None
+                    spoken = before or after or (re.search(r'\\b(?:the\\s+)?(' + day_pattern + r')\\b', normalized) if not month else None)
                     if spoken:
                         spoken_day = named_days[spoken.group(1)]
                 weekdays = ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')
@@ -978,6 +979,11 @@ except Exception:
 
 _SINGLE_REVISE_CODE = """import json
 try:
+    attempts = int(vars.get('single_revision_attempts') or 0) + 1
+    vars['single_revision_attempts'] = str(attempts)
+    if attempts > 3:
+        vars['single_revision_state'] = 'exhausted'
+        raise RuntimeError('Too many correction attempts')
     products = json.loads(str(vars.get('product_json') or '[]'))
     if len(products) != 1:
         raise ValueError('Expected one product')
@@ -1002,7 +1008,8 @@ try:
     vars['single_revision_state'] = 'ready'
 except Exception:
     vars['proposed_terms_json'] = ''
-    vars['single_revision_state'] = 'clarify'
+    if str(vars.get('single_revision_state') or '') != 'exhausted':
+        vars['single_revision_state'] = 'clarify'
 finally:
     vars['single_corrected_terms_json'] = ''
     vars['confirmation_status'] = 'changed'
@@ -1052,7 +1059,7 @@ _SINGLE_ROBOT_ROUTE_CODE = """try:
     action = str(vars.get('discussion_action') or '')
     terms = str(vars.get('proposed_terms_json') or '').strip()
     amount_intent = str(vars.get('single_amount_intent') or '')
-    vars['single_robot_next'] = ('prepare_confirmation' if action == 'proposal_ready' and terms else
+    vars['single_robot_next'] = ('single_proposal_gate' if action == 'proposal_ready' and terms else
                                  'single_floor_prepare' if amount_intent == 'full_too_much' and str(vars.get('single_floor_stage') or '0') == '0' else
                                  'single_exact_date' if action == 'vague_date' else
                                  'prepare_notes' if action == 'done_no_promise' else 'account_discussion')
@@ -1083,6 +1090,70 @@ try:
     vars['single_floor_state'] = 'ready'
 except Exception:
     vars['single_floor_state'] = 'invalid'
+"""
+
+
+_SINGLE_REFUSAL_PREPARE_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    if len(products) != 1:
+        raise ValueError('Expected one product')
+    product = products[0]
+    date = str(vars.get('last_business_day_offer') or '')
+    if not date:
+        raise ValueError('No source-derived first offer day')
+    amount = float(product.get('past_due') or 0)
+    vars['single_floor_offer_terms_json'] = json.dumps([dict(product_id=product.get('product_id'), amount=amount, date=date)])
+    vars['single_floor_offer_text'] = ('For ' + str(product.get('label') or 'this product') +
+                                       ', can you pay ' + format(amount, '.2f') + ' on ' + date + '?')
+    vars['single_floor_stage'] = '1'
+    vars['single_floor_action'] = 'unclear'
+    vars['single_refusal_intent'] = 'no'
+    vars['single_floor_state'] = 'ready'
+except Exception:
+    vars['single_floor_state'] = 'invalid'
+"""
+
+
+_SINGLE_PROPOSAL_GATE_CODE = """import json
+import re
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    if len(products) != 1:
+        raise ValueError('Expected one product')
+    product = products[0]
+    raw = vars.get('proposed_terms_json') or ''
+    raw = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+    raw = raw.get('promises') or raw.get('products') or [raw] if isinstance(raw, dict) else raw
+    if not isinstance(raw, list) or len(raw) != 1 or not isinstance(raw[0], dict):
+        raise ValueError('No one-product proposal')
+    term = raw[0]
+    pid = str(product.get('product_id') or '')
+    if str(term.get('product_id') or pid) != pid:
+        raise ValueError('Wrong product')
+    floor = float(product.get('floor') or 0)
+    amount_raw = term.get('amount')
+    words = str(amount_raw or '').lower().strip()
+    if words in ('floor', 'minimum', 'minimum payment', 'instalment', 'installment'):
+        amount = floor
+    elif words in ('full', 'full amount', 'past due', 'past_due') or amount_raw is None:
+        amount = float(product.get('past_due') or 0)
+    else:
+        match = re.search(r'(?<!\\d)(\\d[\\d,]*(?:\\.\\d{1,2})?)(?!\\d)', words)
+        amount = float(match.group(1).replace(',', '')) if match else float(words)
+    date = str(term.get('date_phrase') or term.get('date_words') or term.get('raw_date') or term.get('date') or
+               vars.get('proposed_date_words') or '').strip()
+    vars['single_proposal_gate_state'] = 'normal'
+    if amount < floor and date:
+        vars['single_floor_offer_terms_json'] = json.dumps([dict(product_id=pid, amount=floor, date=date)])
+        vars['single_floor_offer_text'] = ('I cannot record ' + format(amount, '.2f') +
+                                           ' because it is below the minimum payment of ' + format(floor, '.2f') +
+                                           '. The rest stays overdue. Can you pay ' + format(floor, '.2f') +
+                                           ' on ' + date + '?')
+        vars['single_floor_action'] = 'unclear'
+        vars['single_proposal_gate_state'] = 'below_floor'
+except Exception:
+    vars['single_proposal_gate_state'] = 'normal'
 """
 
 
@@ -1785,6 +1856,7 @@ except Exception:
         "Date facts calculated from the supplied call variable now: {{date_facts}}. Never use the real clock. "
         "Use each product's own deadline and amount floor when the source policy requires them. Handle proposed amounts, specific or vague dates, invalid dates, refusals, hardship, paid and dispute claims under the source policy. "
         "Honor the source policy's attempt limits and order. Never invent figures, dates, reasons, discounts or concessions. "
+        "For a single product, after the initial today question, stop speaking on a flat no with no date or amount; the workflow will make the counted dated offer. Do not improvise a persuasion offer in this node. "
         "For more than one product, state all products before an ask and follow the source policy's product order and combined confirmation rules. "
         "When the caller has proposed specific terms, stop after acknowledging them. The next step will read them back for confirmation. Do not say they are recorded yet. "
         "If a prior read-back was corrected or validation failed, clarify the changed product, amount or date before offering another read-back. On a date validation error, ask for the exact day; a bare yes to the old read-back is not a new proposal. "
@@ -1813,6 +1885,12 @@ except Exception:
                                    _check("single_amount_intent", "equals", "full_too_much"),
                                    _check("single_floor_stage", "equals", "0"),
                                ]})))
+        transitions.append(_to("single_refusal_prepare", "Make the first counted one-product offer",
+                               _when({"logic": "and", "conditions": [
+                                   _check("product_count", "equals", "1"),
+                                   _check("single_refusal_intent", "equals", "yes"),
+                                   _check("single_floor_stage", "equals", "0"),
+                               ]})))
     if multi_enabled:
         transitions.append(_to("multi_advance", "Begin ordered product discussion after the all-today answer",
                                _when(_check("product_count", "greater_than", 1))))
@@ -1821,25 +1899,27 @@ except Exception:
         ]})
         transitions.extend([
             _to("single_exact_date", "Ask once for a precise single-product payment day", single("vague_date")),
-            _to("prepare_confirmation", "Single product proposal", single("proposal_ready")),
+            _to("single_proposal_gate", "Check one-product amount before confirmation", single("proposal_ready")),
             _to("prepare_notes", "Single product final answer", single("done_no_promise")),
         ])
     else:
         transitions.extend([
             _eq("single_exact_date", "discussion_action", "vague_date"),
-            _eq("prepare_confirmation", "discussion_action", "proposal_ready"),
+            _eq("single_proposal_gate", "discussion_action", "proposal_ready"),
             _eq("prepare_notes", "discussion_action", "done_no_promise"),
         ])
     nodes["account_discussion"] = _conversation("account_discussion", account_prompt, transitions=transitions,
                                                  extraction=[
                                                      _enum("discussion_action", ["proposal_ready", "vague_date", "done_no_promise", "transfer_restructuring", "transfer_support", "transfer_human", "continue"],
-                                                           "Classify ONLY the latest caller answer using the source policy. proposal_ready when the caller gives a specific payment day, including today or a weekday; for a one-product account use its full past-due amount when the caller names only a date. vague_date when a one-product caller intends to pay but gives only a vague period such as 'the week after next'; ask for an exact day. A bare yes/I confirm to an earlier read-back in this node is continue, never proposal_ready. done_no_promise only when all products have final paid/dispute/hardship/refused reasons and no transfer is wanted. A no to today without another date is continue while persuasion remains. Transfer actions take priority except hardship takes priority over restructuring."),
+                                                           "Classify ONLY the latest caller answer using the source policy. proposal_ready when the caller gives a specific payment day, including today or a weekday; for a one-product account use its full past-due amount when the caller names only a date. vague_date when a one-product caller intends to pay but gives only a vague period such as 'the week after next'; ask for an exact day. A bare yes/I confirm to an earlier read-back in this node is continue, never proposal_ready. done_no_promise only when all products have final paid/dispute/hardship/refused reasons and no transfer is wanted. A no to today without another date is continue while the workflow makes a counted first offer. Transfer actions take priority except hardship takes priority over restructuring."),
                                                      _enum("single_sensitive_intent", ["hardship", "paid_current_due", "none"],
                                                            "For a one-product account classify ONLY the latest caller answer. hardship if the caller mentions illness, a death in the family, or job loss, even alongside a request for lower instalments. paid_current_due only if they say this current past-due amount was already paid; a product closed or paid off in the past is a dispute, not this intent. none otherwise. Hardship takes priority over restructuring."),
                                                      _enum("single_robot_question", ["yes", "no"],
                                                            "For a one-product account, yes if the LATEST caller answer asks whether they are speaking to a robot, AI, automated agent, or digital assistant. Keep yes even if the same answer also proposes a payment date or amount. no otherwise."),
                                                      _enum("single_amount_intent", ["full_too_much", "none"],
-                                                           "For a one-product account, full_too_much only if the LATEST caller answer says the full past-due amount is too high or unaffordable. Do not classify a specific date or amount proposal as this intent. none otherwise."),
+                                                           "For a one-product account, full_too_much only if the LATEST caller answer explicitly says the FULL past-due amount is too high or unaffordable, before any dated persuasion offer. A refusal of a specific dated offer, such as 'I cannot pay Friday' or 'I won't have the money then', is never full_too_much. Do not classify a specific date or amount proposal as this intent. none otherwise."),
+                                                     _enum("single_refusal_intent", ["yes", "no"],
+                                                           "For one product, yes only when the latest caller answer flatly refuses the INITIAL pay-today question without proposing any amount or day. Say yes for 'No, I cannot pay today.' Say no for a refusal of a dated offer, a specific payment proposal, hardship, paid claim, or transfer request."),
                                                      {"name": "proposed_terms_json", "type": "string", "min_confidence": 0.55,
                                                       "description": "Only when the latest caller answer proposes or accepts payment terms with a date, return a JSON array string with objects product_id, amount, date. Preserve the caller's raw date words verbatim in date, such as 'today', 'this Friday', 'next Friday', '30 October', or an ISO date; NEVER convert a relative date to a year or use the system clock. Code will resolve it from call now {{now}}. Use account facts {{account_facts}} for product ID and numeric full amount. For multiple products include each agreed product with its own raw date phrase. Leave empty for a bare yes/I confirm, no date, or no terms."},
                                                      {"name": "proposed_date_words", "type": "string", "min_confidence": 0.55,
@@ -1864,7 +1944,7 @@ except Exception:
     nodes["single_robot_answer"] = _conversation(
         "single_robot_answer", "The truthful digital-assistant disclosure was spoken on entry. Continue to the preserved payment proposal without asking the caller to repeat it.",
         opening=f"Yes, I am {bank_name}'s digital assistant.",
-        transitions=[_eq("prepare_confirmation", "single_robot_next", "prepare_confirmation"),
+        transitions=[_eq("single_proposal_gate", "single_robot_next", "single_proposal_gate"),
                      _eq("single_floor_prepare", "single_robot_next", "single_floor_prepare"),
                      _eq("single_exact_date", "single_robot_next", "single_exact_date"),
                      _eq("prepare_notes", "single_robot_next", "prepare_notes"),
@@ -1872,6 +1952,28 @@ except Exception:
         max_turns=1, max_target="account_discussion")
     nodes["single_robot_answer"]["passthrough"] = True
     nodes["single_robot_answer"]["passthrough_default_transition"] = "account_discussion"
+
+    nodes["single_proposal_gate"] = _code_node("single_proposal_gate", _SINGLE_PROPOSAL_GATE_CODE, "prepare_confirmation")
+    nodes["single_proposal_gate"]["transitions"] = [
+        _eq("single_below_floor_offer", "single_proposal_gate_state", "below_floor"),
+        _always("prepare_confirmation")]
+    nodes["single_below_floor_offer"] = _conversation(
+        "single_below_floor_offer",
+        "The customer's proposed amount was below the permitted floor. The exact floor, caller's date, and rest-overdue warning were spoken on entry. Wait for acceptance. Never ask how much they can pay. If they refuse, use the first counted policy offer. No tool call is allowed.",
+        opening="{{single_floor_offer_text}}",
+        extraction=[_enum("single_floor_action", ["accepted", "proposal", "date_needed", "refused", "unclear"],
+                          "accepted if the caller clearly agrees to the offered minimum amount and day. proposal if they independently give a new exact amount or day. date_needed if they accept the minimum but ask for a different day without naming it. refused for no or repeating only the below-floor amount. unclear otherwise."),
+                    {"name": "single_floor_reply_terms_json", "type": "string", "min_confidence": 0.55,
+                     "description": "For proposal only, return a JSON object with any new amount and raw date words from the latest caller answer; omit unchanged fields. Leave empty otherwise."}],
+        transitions=[_eq("single_floor_capture", "single_floor_action", "accepted"),
+                     _eq("single_floor_capture", "single_floor_action", "proposal"),
+                     _eq("single_floor_capture", "single_floor_action", "date_needed"),
+                     _eq("single_refusal_prepare", "single_floor_action", "refused"),
+                     _eq("single_refusal_prepare", "single_floor_action", "unclear")],
+        max_turns=2, max_target="single_refusal_prepare")
+    nodes["single_refusal_prepare"] = _code_node("single_refusal_prepare", _SINGLE_REFUSAL_PREPARE_CODE, "service_unavailable")
+    nodes["single_refusal_prepare"]["transitions"] = [
+        _eq("single_floor_offer", "single_floor_state", "ready"), _always("service_unavailable")]
 
     nodes["single_floor_prepare"] = _code_node("single_floor_prepare", _SINGLE_FLOOR_PREPARE_CODE, "service_unavailable")
     nodes["single_floor_prepare"]["transitions"] = [
@@ -2095,6 +2197,7 @@ except Exception:
         max_turns=3, max_target="account_discussion")
     nodes["single_revise"] = _code_node("single_revise", _SINGLE_REVISE_CODE, "single_clarify")
     nodes["single_revise"]["transitions"] = [
+        _eq("service_unavailable", "single_revision_state", "exhausted"),
         _eq("prepare_confirmation", "single_revision_state", "ready"),
         _always("single_clarify"),
     ]

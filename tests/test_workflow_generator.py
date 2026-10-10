@@ -810,6 +810,10 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual(1, len(proposal_route))
         self.assertFalse(proposal_route[0].get("is_tool_call", False))
         preparer_name = proposal_route[0]["target_node"]
+        self.assertEqual("single_proposal_gate", preparer_name)
+        _run_code_node(workflow, preparer_name, state)
+        self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"][preparer_name], state))
+        preparer_name = "prepare_confirmation"
         _run_code_node(workflow, preparer_name, state)
         self.assertEqual("ready", state["proposal_validation_state"])
         self.assertIn("420.00 on 2026-10-14", state["confirmation_readback"])
@@ -1228,11 +1232,13 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("single_robot_route", _first_engine_route(workflow["nodes"]["account_discussion"], state))
         _run_code_node(workflow, "single_robot_route", state)
         self.assertEqual("no", state["single_robot_question"])
-        self.assertEqual("prepare_confirmation", state["single_robot_next"])
+        self.assertEqual("single_proposal_gate", state["single_robot_next"])
         answer = workflow["nodes"]["single_robot_answer"]
         self.assertTrue(answer["passthrough"])
         self.assertIn("digital assistant", answer["on_enter"]["text"].lower())
-        self.assertEqual("prepare_confirmation", _first_engine_route(answer, state))
+        self.assertEqual("single_proposal_gate", _first_engine_route(answer, state))
+        _run_code_node(workflow, "single_proposal_gate", state)
+        self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"]["single_proposal_gate"], state))
         _run_code_node(workflow, "prepare_confirmation", state)
         self.assertEqual("ready", state["proposal_validation_state"])
         self.assertEqual(products[0]["deadline"], json.loads(state["readback_terms_json"])[0]["date"])
@@ -1269,6 +1275,79 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         _run_code_node(workflow, "single_floor_next", refused)
         self.assertEqual("prepare_notes", _first_engine_route(workflow["nodes"]["single_floor_next"], refused))
         self.assertEqual("refused", refused["single_product_reason"])
+
+    def test_first_flat_refusal_uses_one_counted_early_band_offer(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 420,
+             "minimum_payment": 126, "days_late": 6},
+        ], "2026-10-14T11:00")
+        state = {"product_count": "1", "product_json": json.dumps(products),
+                 "last_business_day_offer": prepared["last_business_day_offer"],
+                 "single_floor_stage": "0", "single_refusal_intent": "yes",
+                 "single_amount_intent": "none", "discussion_action": "continue"}
+        self.assertEqual("single_refusal_prepare", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        _run_code_node(workflow, "single_refusal_prepare", state)
+        self.assertEqual("single_floor_offer", _first_engine_route(workflow["nodes"]["single_refusal_prepare"], state))
+        self.assertEqual("1", state["single_floor_stage"])
+        self.assertIn("420.00 on 2026-10-16", state["single_floor_offer_text"])
+        state["single_floor_action"] = "refused"  # Cannot pay this first dated offer.
+        self.assertEqual("single_floor_next", _first_engine_route(workflow["nodes"]["single_floor_offer"], state))
+        _run_code_node(workflow, "single_floor_next", state)
+        self.assertEqual("close", state["single_floor_state"])
+        self.assertEqual("prepare_notes", _first_engine_route(workflow["nodes"]["single_floor_next"], state))
+        self.assertNotIn("126.00", state["single_floor_offer_text"])
+
+    def test_below_floor_today_routes_to_fixed_floor_offer_then_confirmation(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 420,
+             "minimum_payment": 126, "days_late": 6},
+        ], "2026-10-14T11:00")
+        state = {"now": "2026-10-14T11:00", "product_count": "1", "product_json": json.dumps(products),
+                 "last_business_day_offer": prepared["last_business_day_offer"],
+                 "discussion_action": "proposal_ready", "single_floor_stage": "0",
+                 "proposed_terms_json": '[{"product_id":"p1","amount":50,"date":"today"}]'}
+        self.assertEqual("single_proposal_gate", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        _run_code_node(workflow, "single_proposal_gate", state)
+        self.assertEqual("below_floor", state["single_proposal_gate_state"])
+        self.assertEqual("single_below_floor_offer", _first_engine_route(workflow["nodes"]["single_proposal_gate"], state))
+        self.assertIn("cannot record 50.00", state["single_floor_offer_text"])
+        self.assertIn("minimum payment of 126.00", state["single_floor_offer_text"])
+        state["single_floor_action"] = "accepted"
+        self.assertEqual("single_floor_capture", _first_engine_route(workflow["nodes"]["single_below_floor_offer"], state))
+        _run_code_node(workflow, "single_floor_capture", state)
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        self.assertEqual((126.0, "2026-10-14"),
+                         tuple(json.loads(state["readback_terms_json"])[0][key] for key in ("amount", "date")))
+        self.assertEqual("unclear", state["confirmation_status"])
+        state["single_floor_action"] = "refused"
+        self.assertEqual("single_refusal_prepare", _first_engine_route(workflow["nodes"]["single_below_floor_offer"], state))
+
+    def test_spoken_twenty_sixth_resolves_holiday_and_corrections_are_bounded(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "personal_loan", "past_due": 540,
+             "instalment_amount": 108, "days_late": 5},
+        ], "2026-10-14T11:00")
+        state = {"now": "2026-10-14T11:00", "product_json": json.dumps(products),
+                 "product_count": "1", "single_revision_attempts": prepared["single_revision_attempts"],
+                 "single_exact_date_words": "Monday the twenty sixth"}
+        _run_code_node(workflow, "single_date_capture", state)
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        self.assertEqual("2026-10-27", json.loads(state["readback_terms_json"])[0]["date"])
+        self.assertIn("next business day", state["confirmation_readback"].lower())
+        for count in range(1, 5):
+            state["single_corrected_terms_json"] = '{"date":"Monday the twenty sixth"}'
+            _run_code_node(workflow, "single_revise", state)
+            self.assertEqual(str(count), state["single_revision_attempts"])
+            if count < 4:
+                self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"]["single_revise"], state))
+                _run_code_node(workflow, "prepare_confirmation", state)
+            else:
+                self.assertEqual("service_unavailable", _first_engine_route(workflow["nodes"]["single_revise"], state))
 
     def test_strict_promise_retry_requires_current_explicit_bank_result(self) -> None:
         workflow = self._build("brief-a.md")
