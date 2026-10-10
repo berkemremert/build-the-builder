@@ -1459,7 +1459,8 @@ try:
     phase = str(vars.get('multi_phase') or 'initial')
     next_step = ''
     if phase == 'initial':
-        raw_notes = vars.get('pending_note_reasons_json') or '{}'
+        disclosure = str(vars.get('multi_disclosure_state') or 'none')
+        raw_notes = '{}' if disclosure in ('incomplete', 'hardship') else (vars.get('pending_note_reasons_json') or '{}')
         raw_notes = json.loads(raw_notes) if isinstance(raw_notes, str) else raw_notes
         if isinstance(raw_notes, dict):
             for raw_pid, raw_reason in raw_notes.items():
@@ -1480,10 +1481,11 @@ try:
                     if pid not in notes:
                         terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=common)
             add_terms(vars.get('proposed_terms_json') or '')
-            for pid in parsed(vars.get('multi_full_too_much_ids_json') or '[]'):
-                resolved = resolve_pid(pid)
-                if resolved:
-                    floor_first.add(resolved)
+            if disclosure != 'incomplete':
+                for pid in parsed(vars.get('multi_full_too_much_ids_json') or '[]'):
+                    resolved = resolve_pid(pid)
+                    if resolved:
+                        floor_first.add(resolved)
         vars['multi_offer_stage'] = '1'
     else:
         pid = str(vars.get('multi_focus_product_id') or '')
@@ -1578,6 +1580,11 @@ try:
         vars['multi_offer_stage'] = '1'
         vars['multi_phase'] = 'offer'
         vars['multi_next'] = 'offer'
+        if phase == 'initial' and not terms and not notes and disclosure in ('incomplete', 'hardship'):
+            vars['multi_focus_label'] = str(product_by_id[focus].get('label') or focus)
+            vars['multi_phase'] = 'disclosure' if disclosure == 'incomplete' else 'support'
+            vars['multi_next'] = vars['multi_phase']
+            vars['multi_disclosure_rounds'] = '0'
     else:
         vars['multi_next'] = 'confirm' if terms else 'notes'
         vars['proposed_terms_json'] = json.dumps([terms[str(item.get('product_id') or '')] for item in products
@@ -1586,6 +1593,35 @@ try:
     vars['multi_terms_json'] = json.dumps(terms)
     vars['multi_notes_json'] = json.dumps(notes)
     vars['multi_floor_first_json'] = json.dumps(sorted(floor_first))
+except Exception:
+    vars['multi_next'] = 'service_error'
+"""
+
+
+_MULTI_DISCLOSURE_RESOLVE_CODE = """import json
+try:
+    answer = str(vars.get('multi_disclosure_followup') or 'incomplete')
+    if answer == 'hardship':
+        vars['multi_phase'] = 'support'
+        vars['multi_next'] = 'support'
+    elif answer == 'proposal' and str(vars.get('multi_reply_terms_json') or '').strip():
+        vars['multi_phase'] = 'offer'
+        vars['multi_offer_action'] = 'proposal'
+        vars['multi_next'] = 'advance'
+    elif answer == 'unrelated':
+        vars['multi_phase'] = 'offer'
+        vars['multi_next'] = 'offer'
+    elif answer == 'full_too_much':
+        floor_first = set(json.loads(str(vars.get('multi_floor_first_json') or '[]')))
+        floor_first.add(str(vars.get('multi_focus_product_id') or ''))
+        vars['multi_floor_first_json'] = json.dumps(sorted(floor_first))
+        vars['multi_phase'] = 'offer'
+        vars['multi_next'] = 'offer'
+    else:
+        rounds = int(vars.get('multi_disclosure_rounds') or 0) + 1
+        vars['multi_disclosure_rounds'] = str(rounds)
+        vars['multi_phase'] = 'disclosure'
+        vars['multi_next'] = 'disclosure' if rounds < 2 else 'service_error'
 except Exception:
     vars['multi_next'] = 'service_error'
 """
@@ -1952,6 +1988,9 @@ except Exception:
                                                            "For a one-product account only, classify a final paid, dispute, hardship, or refused result; do not fill while negotiating a promise."),
                                                      *([_enum("all_today_status", ["yes", "no", "other"],
                                                               "Only for a multi-product account: yes if the latest caller answer accepts paying ALL products today; no if it rejects paying all today; other otherwise."),
+                                                        _enum("multi_disclosure_state", ["incomplete", "hardship", "none"],
+                                                              "For a multi-product account, classify ONLY the latest caller answer. hardship only when the caller clearly mentions illness, a death in the family, or job loss. incomplete when the caller trails off mid-disclosure and the missing words could determine whether a hardship rule applies; do not infer hardship or an ordinary refusal from an unfinished subject or clause. none when the answer is complete, including an ordinary no to paying all today or an unrelated statement such as losing a card. Do not treat inability to pay right now alone as hardship.",
+                                                              min_confidence=0.55),
                                                         {"name": "multi_common_date_words", "type": "string", "min_confidence": 0.55,
                                                          "description": "For a multi-product account only, copy a date phrase explicitly offered for ALL products, such as 'next Friday'. Leave empty for a date applying to just one product."},
                                                         {"name": "multi_full_too_much_ids_json", "type": "string", "min_confidence": 0.55,
@@ -2091,8 +2130,31 @@ except Exception:
             _eq("prepare_notes", "multi_next", "notes"),
             _eq("multi_select_offer", "multi_next", "offer"),
             _eq("multi_support", "multi_next", "support"),
+            _eq("multi_disclosure_clarify", "multi_next", "disclosure"),
             _eq("multi_clarify", "multi_next", "clarify"),
             _eq("multi_identify", "multi_next", "identify"),
+            _always("service_unavailable"),
+        ]
+        nodes["multi_disclosure_clarify"] = _conversation(
+            "multi_disclosure_clarify",
+            "The caller's last statement was unfinished. The neutral request to finish was spoken on entry. Wait for the caller's completion. Do not infer hardship, make a payment offer, ask for a payment date, or change product while their meaning is unclear. If the answer is still incomplete, briefly ask them to finish again. No tool call is allowed.",
+            opening="Sorry, I didn't catch the end of that. Could you finish what you were saying?",
+            extraction=[_enum("multi_disclosure_followup", ["hardship", "unrelated", "full_too_much", "proposal", "incomplete", "transfer_restructuring", "transfer_support", "transfer_human"],
+                              "Classify the caller's completion together with the unfinished preceding statement. hardship only if the completed meaning clearly reports illness, death in the family, or job loss. proposal if the caller gives their own payment amount or date; do not count it as a refusal or persuasion attempt. full_too_much only if they explicitly say the current product's full past-due amount is too high; do not infer it from inability to pay right now. unrelated if it completes an ordinary payment refusal or another matter without a hardship fact, including a lost card. incomplete if the meaning remains cut off or ambiguous; do not guess hardship from an unfinished fragment. Use transfer actions only for an explicit request."),
+                        {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.45,
+                         "description": "If the latest completed answer gives a fresh payment proposal, return a JSON array string of product_id, amount, and RAW date words for each product explicitly covered. Leave empty otherwise."}],
+            transitions=[_eq("transfer_restructuring", "multi_disclosure_followup", "transfer_restructuring"),
+                         _eq("transfer_support", "multi_disclosure_followup", "transfer_support"),
+                         _eq("transfer_human", "multi_disclosure_followup", "transfer_human"),
+                         _always("multi_disclosure_resolve")],
+            max_turns=3, max_target="multi_disclosure_resolve")
+        nodes["multi_disclosure_resolve"] = _code_node(
+            "multi_disclosure_resolve", _MULTI_DISCLOSURE_RESOLVE_CODE, "service_unavailable")
+        nodes["multi_disclosure_resolve"]["transitions"] = [
+            _eq("multi_support", "multi_next", "support"),
+            _eq("multi_select_offer", "multi_next", "offer"),
+            _eq("multi_advance", "multi_next", "advance"),
+            _eq("multi_disclosure_clarify", "multi_next", "disclosure"),
             _always("service_unavailable"),
         ]
         nodes["multi_select_offer"] = _code_node(

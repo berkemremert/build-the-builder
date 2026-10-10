@@ -781,6 +781,102 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual({"p2": "hardship", "p3": "refused"},
                          json.loads(floor_state["multi_notes_json"]))
 
+    def test_bank_b_unfinished_disclosure_waits_before_any_offer(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        _, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "2288",
+             "past_due": 220, "minimum_payment": 66, "days_late": 9},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 640,
+             "instalment_amount": 213, "days_late": 9},
+        ], "2026-10-14T11:00")
+        discussion = workflow["nodes"]["account_discussion"]
+        field = next(item for item in discussion["extraction_schema"]
+                     if item["name"] == "multi_disclosure_state")
+        description = field["description"].lower()
+        self.assertEqual(0.55, field["min_confidence"])
+        self.assertIn("trails off", description)
+        self.assertIn("losing a card", description)
+        state = dict(prepared, all_today_status="no", multi_disclosure_state="incomplete",
+                     multi_full_too_much_ids_json='["p1"]')
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("multi_disclosure_clarify", _first_engine_route(workflow["nodes"]["multi_advance"], state))
+        self.assertEqual(("p1", "1", "disclosure"),
+                         (state["multi_focus_product_id"], state["multi_offer_stage"], state["multi_phase"]))
+        self.assertEqual({}, json.loads(state["multi_notes_json"]))
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertEqual([], json.loads(state["multi_floor_first_json"]),
+                         "A partial disclosure cannot justify a floor offer")
+        clarification = workflow["nodes"]["multi_disclosure_clarify"]
+        self.assertNotIn("pay", clarification["on_enter"]["text"].lower())
+        self.assertNotIn("date", clarification["on_enter"]["text"].lower())
+
+        hardship = copy.deepcopy(state)
+        hardship["multi_disclosure_followup"] = "hardship"
+        _run_code_node(workflow, "multi_disclosure_resolve", hardship)
+        self.assertEqual("multi_support", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], hardship))
+        self.assertEqual(("p1", "1", "support"),
+                         (hardship["multi_focus_product_id"], hardship["multi_offer_stage"], hardship["multi_phase"]))
+        self.assertEqual({}, json.loads(hardship["multi_notes_json"]))
+        hardship["multi_offer_action"] = "accepted"
+        self.assertEqual("transfer_support", _first_engine_route(workflow["nodes"]["multi_support"], hardship))
+
+        declined = copy.deepcopy(hardship)
+        declined["multi_offer_action"] = "refused"
+        _run_code_node(workflow, "multi_advance", declined)
+        self.assertEqual({"p1": "hardship"}, json.loads(declined["multi_notes_json"]))
+        self.assertEqual("p2", declined["multi_focus_product_id"])
+
+        lost_card = copy.deepcopy(state)
+        lost_card["multi_disclosure_followup"] = "unrelated"
+        _run_code_node(workflow, "multi_disclosure_resolve", lost_card)
+        self.assertEqual("multi_select_offer", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], lost_card))
+        self.assertEqual(("p1", "1", "offer"),
+                         (lost_card["multi_focus_product_id"], lost_card["multi_offer_stage"], lost_card["multi_phase"]))
+        _run_code_node(workflow, "multi_select_offer", lost_card)
+        self.assertEqual(220, float(lost_card["multi_offer_amount"]))
+
+        incomplete = copy.deepcopy(state)
+        incomplete["multi_disclosure_followup"] = "incomplete"
+        _run_code_node(workflow, "multi_disclosure_resolve", incomplete)
+        self.assertEqual("multi_disclosure_clarify", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], incomplete))
+        self.assertEqual("p1", incomplete["multi_focus_product_id"])
+        self.assertEqual("1", incomplete["multi_offer_stage"])
+        _run_code_node(workflow, "multi_disclosure_resolve", incomplete)
+        self.assertEqual("service_unavailable", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], incomplete))
+
+        floor = copy.deepcopy(state)
+        floor["multi_disclosure_followup"] = "full_too_much"
+        _run_code_node(workflow, "multi_disclosure_resolve", floor)
+        self.assertEqual("multi_select_offer", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], floor))
+        _run_code_node(workflow, "multi_select_offer", floor)
+        self.assertEqual(66, float(floor["multi_offer_amount"]))
+        self.assertIn("rest would stay overdue", floor["multi_offer_text"].lower())
+
+    def test_bank_b_complete_initial_hardship_and_clarified_proposal(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        _, prepared = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "2288",
+             "past_due": 220, "minimum_payment": 66, "days_late": 9},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 640,
+             "instalment_amount": 213, "days_late": 9},
+        ], "2026-10-14T11:00")
+        direct = dict(prepared, all_today_status="no", multi_disclosure_state="hardship")
+        _run_code_node(workflow, "multi_advance", direct)
+        self.assertEqual("multi_support", _first_engine_route(workflow["nodes"]["multi_advance"], direct))
+        self.assertEqual("p1", direct["multi_focus_product_id"])
+        self.assertEqual({}, json.loads(direct["multi_notes_json"]))
+
+        proposed = dict(prepared, all_today_status="no", multi_disclosure_state="incomplete")
+        _run_code_node(workflow, "multi_advance", proposed)
+        proposed.update({"multi_disclosure_followup": "proposal",
+                         "multi_reply_terms_json":
+                         '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})
+        _run_code_node(workflow, "multi_disclosure_resolve", proposed)
+        self.assertEqual("multi_advance", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], proposed))
+        _run_code_node(workflow, "multi_advance", proposed)
+        self.assertEqual({"p1"}, set(json.loads(proposed["multi_terms_json"])))
+        self.assertEqual("p2", proposed["multi_focus_product_id"])
+
     def test_bank_b_failed_first_write_retries_same_confirmed_terms_without_success_speech(self) -> None:
         workflow = self._build("brief-a.md", "brief-b.md")
         now = "2026-10-14T11:00"
