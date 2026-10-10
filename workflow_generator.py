@@ -1955,7 +1955,7 @@ except Exception:
                                                         {"name": "multi_common_date_words", "type": "string", "min_confidence": 0.55,
                                                          "description": "For a multi-product account only, copy a date phrase explicitly offered for ALL products, such as 'next Friday'. Leave empty for a date applying to just one product."},
                                                         {"name": "multi_full_too_much_ids_json", "type": "string", "min_confidence": 0.55,
-                                                         "description": "For a multi-product account only, return a JSON array of product IDs for which the caller explicitly said the full amount is too much. Otherwise return []."}]
+                                                         "description": "For a multi-product account only, return a JSON array of product IDs for which the caller explicitly says that product's FULL past-due amount is too high or unaffordable. 'I cannot pay all of them today' or 'I cannot pay all three of those today' only refuses the timing of the all-today question; neither says any product's full amount is too much, so return [] unless the caller separately names an unaffordable product or amount. Do not infer that every product needs its floor from a no-to-all-today answer."}]
                                                        if multi_enabled else []),
                                                  ],
                                                  max_turns=2 if multi_enabled else 40,

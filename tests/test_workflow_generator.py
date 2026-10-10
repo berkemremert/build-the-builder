@@ -720,6 +720,67 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual({"p2": "refused", "p3": "refused"}, json.loads(state["note_reasons"]))
         self.assertEqual(1, len(_nodes_using_tool(workflow, "close_call")))
 
+    def test_bank_b_early_car_loan_refusal_uses_only_its_first_full_offer(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        _, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "2288",
+             "past_due": 220, "minimum_payment": 66, "days_late": 9},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 640,
+             "instalment_amount": 213, "days_late": 9},
+            {"product_id": "p3", "type": "car_loan", "past_due": 75,
+             "instalment_amount": 25, "days_late": 3},
+        ], "2026-10-14T11:00")
+        extraction = next(item for item in workflow["nodes"]["account_discussion"]["extraction_schema"]
+                          if item["name"] == "multi_full_too_much_ids_json")
+        self.assertIn("cannot pay all of them today", extraction["description"].lower())
+        self.assertIn("cannot pay all three of those today", extraction["description"].lower())
+        self.assertIn("return []", extraction["description"].lower())
+        initial_state = copy.deepcopy(state)
+        state.update({"all_today_status": "no", "multi_full_too_much_ids_json": "[]"})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("p1", state["multi_focus_product_id"])
+        _run_code_node(workflow, "multi_select_offer", state)
+        self.assertEqual(220, float(state["multi_offer_amount"]))
+        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json":
+                      '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("p2", state["multi_focus_product_id"])
+        _run_code_node(workflow, "multi_select_offer", state)
+        self.assertEqual(640, float(state["multi_offer_amount"]))
+        state["multi_offer_action"] = "hardship"
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("support", state["multi_next"])
+        state["multi_offer_action"] = "refused"
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("p3", state["multi_focus_product_id"])
+        self.assertEqual("1", state["multi_offer_stage"])
+        _run_code_node(workflow, "multi_select_offer", state)
+        self.assertEqual((75.0, "2026-10-16"),
+                         (float(state["multi_offer_amount"]), state["multi_offer_date"]))
+        self.assertNotIn("rest would stay overdue", state["multi_offer_text"].lower())
+        state["multi_offer_action"] = "refused"
+        _run_code_node(workflow, "multi_advance", state)
+        self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual({"p2": "hardship", "p3": "refused"},
+                         json.loads(state["multi_notes_json"]))
+        self.assertEqual(["p1"], list(json.loads(state["multi_terms_json"])))
+
+        floor_state = initial_state
+        floor_state.update({"all_today_status": "no", "multi_full_too_much_ids_json": '["p3"]',
+                            "pending_note_reasons_json": '{"p2":"hardship"}',
+                            "proposed_terms_json":
+                            '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})
+        _run_code_node(workflow, "multi_advance", floor_state)
+        self.assertEqual("p3", floor_state["multi_focus_product_id"])
+        _run_code_node(workflow, "multi_select_offer", floor_state)
+        self.assertEqual(25, float(floor_state["multi_offer_amount"]))
+        self.assertIn("rest would stay overdue", floor_state["multi_offer_text"].lower())
+        floor_state["multi_offer_action"] = "refused"
+        _run_code_node(workflow, "multi_advance", floor_state)
+        self.assertEqual("confirm", floor_state["multi_next"])
+        self.assertEqual({"p2": "hardship", "p3": "refused"},
+                         json.loads(floor_state["multi_notes_json"]))
+
     def test_bank_b_failed_first_write_retries_same_confirmed_terms_without_success_speech(self) -> None:
         workflow = self._build("brief-a.md", "brief-b.md")
         now = "2026-10-14T11:00"
