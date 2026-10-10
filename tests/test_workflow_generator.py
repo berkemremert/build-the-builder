@@ -1219,6 +1219,40 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         close_actions = workflow["nodes"]["close_call"]["pre_actions"]
         self.assertTrue(any(action["function"]["name"] == "close_call" for action in close_actions))
 
+    def test_wrong_dob_with_account_question_still_verifies_before_closing(self) -> None:
+        workflow = self._build("brief-a.md")
+        dob = workflow["nodes"]["identity_dob"]
+        mixed_answer = {"identity_intent": "answered", "identity_purpose_question": "yes"}
+        self.assertIsNone(_first_engine_route(dob, mixed_answer))
+        mixed_answer["verify_identity_response.data.wrong_answers_left"] = 0
+        self.assertEqual("finish_identity_failed", _first_engine_route(dob, mixed_answer))
+        self.assertEqual("identity_decline", _first_engine_route(dob, {
+            "identity_intent": "other", "identity_purpose_question": "yes"}))
+        self.assertEqual("identity_decline", _first_engine_route(dob, {
+            "identity_intent": "declined", "identity_purpose_question": "yes"}))
+
+    def test_lower_instalments_outranks_floor_and_generic_hardship(self) -> None:
+        workflow = self._build("brief-a.md")
+        discussion = workflow["nodes"]["account_discussion"]
+        floor = workflow["nodes"]["single_floor_offer"]
+        request = {"product_count": "1", "discussion_action": "continue",
+                   "single_amount_intent": "full_too_much", "single_floor_stage": "0",
+                   "single_sensitive_intent": "none", "single_restructuring_request": "yes"}
+        self.assertEqual("transfer_restructuring", _first_engine_route(discussion, request))
+        request["single_sensitive_intent"] = "hardship"
+        self.assertEqual("single_hardship", _first_engine_route(discussion, request))
+        floor_request = {"single_floor_action": "hardship",
+                         "single_floor_hardship_signal": "no",
+                         "single_floor_restructuring_request": "yes"}
+        self.assertEqual("transfer_restructuring", _first_engine_route(floor, floor_request))
+        floor_request["single_floor_hardship_signal"] = "yes"
+        self.assertEqual("single_hardship", _first_engine_route(floor, floor_request))
+        for node, signal in ((discussion, "single_restructuring_request"),
+                             (floor, "single_floor_restructuring_request")):
+            description = next(item["description"] for item in node["extraction_schema"]
+                               if item["name"] == signal)
+            self.assertIn("lower instalments", description.lower())
+
     def test_robot_question_with_late_proposal_discloses_then_validates(self) -> None:
         workflow = self._build("brief-a.md")
         products, prepared = _prepared_products(workflow, [
