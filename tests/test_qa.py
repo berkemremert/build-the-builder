@@ -202,11 +202,72 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(any("field.type: use 'string'" in e for e in errors), errors)
         self.assertTrue(any("nonempty subset" in e for e in errors), errors)
 
+    def test_api_tool_identity_uses_operation_id_for_renamed_path(self):
+        changed = copy.deepcopy(OPENAPI)
+        operation = changed["paths"].pop("/verify_identity")
+        operation["post"]["operationId"] = "verify_identity"
+        changed["paths"]["/v3/security/check"] = operation
+        workflow = valid_workflow()
+        tool = workflow["nodes"]["identity"]["tools"][0]
+        tool["function"]["parameters"]["properties"]["url"]["default"] = (
+            BASE_URL + "/v3/security/check")
+        self.assertEqual(qa.validate_workflow(workflow, changed), [])
+
+        operation["post"]["operationId"] = "another_operation"
+        errors = qa.validate_workflow(workflow, changed)
+        self.assertTrue(any("must match OpenAPI operation 'another_operation'" in e
+                            for e in errors), errors)
+
     def test_account_requires_positive_identity_route(self):
         workflow = valid_workflow()
         workflow["nodes"]["identity"]["transitions"][0]["condition"] = {
             "operator": "matches_intent", "description": "customer says yes"}
         self.check_has(workflow, "get_account may run before a verified identity gate")
+
+    def test_source_forbidden_notes_cannot_follow_transfer(self):
+        workflow = explicit_close_workflow()
+        workflow["system_prompt"] = "On any transfer, add no notes at all."
+        workflow["nodes"]["account"]["transitions"] = [transition("transfer")]
+        workflow["nodes"]["transfer"] = {
+            "name": "transfer", "node_type": "api_request",
+            "passthrough": True, "passthrough_default_transition": "close",
+            "pre_actions": [bank_tool("transfer_to_agent")],
+            "transitions": [transition("close")],
+        }
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        workflow["nodes"]["transfer"]["passthrough_default_transition"] = "note"
+        workflow["nodes"]["transfer"]["transitions"] = [transition("note")]
+        workflow["nodes"]["note"] = {
+            "name": "note", "node_type": "api_request",
+            "passthrough": True, "passthrough_default_transition": "close",
+            "pre_actions": [bank_tool("add_note")],
+            "transitions": [transition("close")],
+        }
+        self.check_has(workflow, "add_note is reachable after transfer_to_agent")
+
+    def test_combined_confirmation_needs_product_disposition_gate(self):
+        workflow = explicit_close_workflow()
+        workflow["system_prompt"] = (
+            "Read all promises back together and ask for one confirmation.")
+        workflow["nodes"]["account"]["transitions"] = [transition("reducer")]
+        workflow["nodes"]["reducer"] = {
+            "name": "reducer", "node_type": "conversation",
+            "task_message": "Resolve products in service order.",
+            "transitions": [
+                transition("confirmation", {"logic": "or", "conditions": [
+                    {"variable": "multi_next", "operator": "equals", "operand": "confirm"}]}),
+                transition("close"),
+            ],
+        }
+        workflow["nodes"]["confirmation"] = {
+            "name": "confirmation", "node_type": "conversation",
+            "on_enter": {"type": "tts", "text": "{{confirmation_readback}} Do you confirm?"},
+            "extraction_schema": [{"name": "confirmation_status", "type": "string"}],
+            "transitions": [transition("close")],
+        }
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        workflow["nodes"]["reducer"]["transitions"][0] = transition("confirmation")
+        self.check_has(workflow, "combined confirmation is reachable before multi_next=confirm")
 
     def test_unreachable_or_dead_end_node_is_reported(self):
         workflow = valid_workflow()
@@ -272,7 +333,61 @@ class ValidatorTests(unittest.TestCase):
         promise_call = workflow["nodes"]["create_promise_call"]
         promise_call["transitions"][-1] = transition("promise_success_notice")
         promise_call["passthrough_default_transition"] = "promise_success_notice"
-        self.check_has(workflow, "recorded-promise success speech is reachable without create_promise ok=true")
+        self.check_has(workflow, "recorded-promise success speech is reachable without an explicit successful create_promise response")
+
+        promise_call["passthrough_default_transition"] = "promise_write_uncertain"
+        promise_call["transitions"][-1] = transition("promise_write_uncertain")
+        promise_call["transitions"][0]["condition"] = {"logic": "or", "conditions": [
+            {"variable": "create_promise_call_response.data.ok",
+             "operator": "equals", "operand": "true"}]}
+        self.check_has(workflow, "recorded-promise notice requires an explicit successful bank response")
+
+    def test_promise_retry_rejects_ambiguous_and_undocumented_results(self):
+        policy = compile_policy([str(ROOT / "briefs" / "brief-a.md")],
+                                str(ROOT / "tools" / "openapi.json"), None)
+        workflow = build_workflow(policy, OPENAPI)
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        first = workflow["nodes"]["create_promise_call"]
+        retry_route = next(t for t in first["transitions"]
+                           if t["target_node"] == "prepare_promise_retry")
+        retry_route["condition"] = {"operator": "always"}
+        self.check_has(workflow, "create_promise retry requires an explicit bank nonrecording response")
+        retry_route["condition"] = {"logic": "or", "conditions": [
+            {"variable": "create_promise_call_failure_count",
+             "operator": "greater_than", "operand": 0}]}
+        self.check_has(workflow, "ambiguous create_promise result must close without retry")
+
+        retry_route["condition"] = {"logic": "or", "conditions": [
+            {"variable": "create_promise_call_response.status_code",
+             "operator": "equals", "operand": "200"}]}
+        self.check_has(workflow, "create_promise retry requires an explicit bank nonrecording response")
+
+        retry_route["condition"] = copy.deepcopy(build_workflow(policy, OPENAPI)["nodes"]
+                                                  ["create_promise_call"]["transitions"][1]["condition"])
+        first["passthrough_default_transition"] = "prepare_promise_retry"
+        self.check_has(workflow, "passthrough_default_transition: ambiguous create_promise result must close")
+
+    def test_promise_retry_status_codes_follow_openapi(self):
+        policy = compile_policy([str(ROOT / "briefs" / "brief-a.md")],
+                                str(ROOT / "tools" / "openapi.json"), None)
+        workflow = build_workflow(policy, OPENAPI)
+        changed = copy.deepcopy(OPENAPI)
+        responses = changed["paths"]["/create_promise"]["post"]["responses"]
+        responses["503"] = responses.pop("500")
+        properties = responses["200"]["content"]["application/json"]["schema"]["properties"]
+        properties["recorded"] = properties.pop("ok")
+        responses["200"]["description"] = (
+            "`recorded` is false when the action was not carried out.")
+        errors = qa.validate_workflow(workflow, changed)
+        self.assertTrue(any("create_promise retry requires an explicit bank nonrecording response"
+                            in e for e in errors), errors)
+        updated = build_workflow(policy, changed)
+        self.assertEqual(qa.validate_workflow(updated, changed), [])
+
+    def test_uncertain_promise_speech_is_not_a_success_notice(self):
+        uncertain = {"on_enter": {"type": "tts", "text":
+                     "I cannot confirm whether your payment promise was recorded."}}
+        self.assertFalse(qa._promise_success_notice(uncertain))
 
     def test_hooks_compile_without_executing_them(self):
         workflow = valid_workflow()

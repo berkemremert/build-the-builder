@@ -111,21 +111,10 @@ def compile_policy(
     if call_model is None:
         return _source_fallback(raw_brief, names)
 
-    # Supplying the exact request and response schemas helps the extractor bind
-    # policy rules to the correct API fields and enum values in a changed final.
-    tool_spec = {
-        path: {
-            method: {
-                "operationId": op.get("operationId"),
-                "description": op.get("description"),
-                "requestBody": op.get("requestBody"),
-                "responses": op.get("responses"),
-            }
-            for method, op in operations.items()
-            if method in {"post", "get", "put", "patch", "delete"} and isinstance(op, dict)
-        }
-        for path, operations in openapi.get("paths", {}).items()
-    }
+    # Pass the complete API source. Filtering operations previously discarded
+    # path/query/header parameters, server overrides, security requirements,
+    # and component schemas referenced by $ref. Those can define mandatory
+    # fields or enum values in an unseen tool API.
     prompt = (
         "You compile bank call policy from supplied source documents. Return one JSON object only. "
         "Use the documents in their supplied order; later amendments override earlier rules only where they conflict. "
@@ -147,7 +136,7 @@ def compile_policy(
         "constraints: object of explicit calendars, calculations, limits, timing, product rules, forbidden actions, "
         "and any unresolved ambiguity. Preserve numerals and enums from the source.\n\n"
         f"TOOL NAMES: {json.dumps(names)}\n"
-        f"OPENAPI OPERATIONS: {json.dumps(tool_spec, ensure_ascii=False)}\n\n"
+        f"OPENAPI DOCUMENT (including parameters, servers, security, and components): {json.dumps(openapi, ensure_ascii=False)}\n\n"
         f"SOURCE DOCUMENTS IN ORDER:\n{raw_brief}"
     )
     policy = _json_object(call_model(prompt, purpose="compile bank brief and tool policy"))
@@ -163,6 +152,10 @@ def compile_policy(
     unknown_tools = set(policy["tool_policy"]) - set(names)
     if unknown_tools:
         raise ValueError("Policy references unknown tools: " + ", ".join(sorted(unknown_tools)))
-    policy["tool_policy"] = {name: policy["tool_policy"].get(name, "") for name in names}
+    missing_tool_rules = [name for name in names if not isinstance(policy["tool_policy"].get(name), str)
+                          or not policy["tool_policy"][name].strip()]
+    if missing_tool_rules:
+        raise ValueError("Policy omitted tool instructions: " + ", ".join(missing_tool_rules))
+    policy["tool_policy"] = {name: policy["tool_policy"][name] for name in names}
     policy["raw_brief"] = raw_brief
     return policy

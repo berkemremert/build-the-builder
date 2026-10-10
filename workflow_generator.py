@@ -37,6 +37,24 @@ def _bool(target: str, variable: str, description: str) -> dict:
     return _to(target, description, _when(_check(variable, "equals", "true"), _check(variable, "equals", "True")))
 
 
+def _bank_response(name: str, codes: list[str], flag: str, value: bool) -> dict:
+    """Require a current bank HTTP status and an explicit write-result flag."""
+    text = "true" if value else "false"
+    return _when(*(
+        {"logic": "and", "conditions": [
+            _check(name + "_response.status_code", "equals", code),
+            _check(name + "_response.data." + flag, "equals", spelling),
+        ]}
+        for code in codes for spelling in (text, text.title())
+    ))
+
+
+def _bank_non_recording(name: str, false_codes: list[str], no_write_codes: list[str], flag: str) -> dict:
+    """Only source-documented non-recording responses can authorize a retry."""
+    return _when(*_bank_response(name, false_codes, flag, False)["conditions"],
+                 *(_check(name + "_response.status_code", "equals", code) for code in no_write_codes))
+
+
 def _enum(name: str, choices: list[str], description: str) -> dict:
     return {"name": name, "type": "string", "enum_values": choices, "description": description, "min_confidence": 0.65}
 
@@ -87,17 +105,77 @@ def _conversation(name: str, prompt: str, *, opening: str | None = None,
 
 
 def _api_spec(openapi: dict, name: str) -> tuple[str, str, dict]:
-    paths = openapi.get("paths") or {}
-    matches = [(path, operations) for path, operations in paths.items() if path.rstrip("/").split("/")[-1] == name]
+    operations = [
+        (path, method.upper(), operation)
+        for path, path_item in (openapi.get("paths") or {}).items()
+        if isinstance(path_item, dict)
+        for method, operation in path_item.items()
+        if method.lower() in ("post", "put", "patch", "get", "delete") and isinstance(operation, dict)
+    ]
+    matches = [item for item in operations if item[2].get("operationId") == name]
     if not matches:
-        raise ValueError(f"OpenAPI does not define {name}")
-    path, operations = matches[0]
-    method, operation = next(((method.upper(), value) for method, value in operations.items()
-                              if method.lower() in ("post", "put", "patch", "get")), (None, None))
-    if operation is None:
-        raise ValueError(f"OpenAPI operation missing for {name}")
+        # The public draft has no operationIds. Only then use its path-tail
+        # convention; an operation with a different ID must not be rebound.
+        matches = [item for item in operations
+                   if not item[2].get("operationId") and item[0].rstrip("/").split("/")[-1] == name]
+    if len(matches) != 1:
+        raise ValueError(f"OpenAPI must define exactly one operation for {name}; found {len(matches)}")
+    path, method, operation = matches[0]
     schema = operation.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {})
     return path, method, schema
+
+
+def _source_says_no_write(description: str) -> bool:
+    """Recognize only explicit API guarantees that a write did not happen."""
+    text = description.lower()
+    return bool(re.search(
+        r"\b(?:nothing|no (?:promise|write|record|action))\b.{0,50}"
+        r"\b(?:recorded|written|persisted|created|carried out|made)\b|"
+        r"\b(?:not|never)\b.{0,35}\b(?:recorded|written|persisted|created|carried out)\b|"
+        r"\bno write\b|\bnothing was recorded\b",
+        text,
+    ))
+
+
+def _promise_response_contract(openapi: dict) -> tuple[list[str], str, list[str], list[str]]:
+    """Read the write-result field and retry guarantees from create_promise OpenAPI."""
+    path, method, _ = _api_spec(openapi, "create_promise")
+    operation = openapi["paths"][path][method.lower()]
+    responses = operation.get("responses") or {}
+    success_codes: list[str] = []
+    false_codes: list[str] = []
+    no_write_codes: list[str] = []
+    flags: set[str] = set()
+    for raw_code, response in responses.items():
+        code = str(raw_code)
+        if not (len(code) == 3 and code.isdigit() and isinstance(response, dict)):
+            continue
+        description = str(response.get("description") or "")
+        if code.startswith("2"):
+            schema = (response.get("content") or {}).get("application/json", {}).get("schema") or {}
+            properties = schema.get("properties") or {}
+            candidates = [
+                field for field, spec in properties.items()
+                if isinstance(spec, dict) and spec.get("type") == "boolean" and (
+                    re.search(r"(?:^|_)(?:ok|success|succeeded|recorded|saved|created|written|persisted|completed)$", field, re.I)
+                    or re.search(r"\btrue\b.{0,50}\b(?:recorded|written|persisted|created|carried out)\b",
+                                 str(spec.get("description") or ""), re.I)
+                )
+            ]
+            if len(candidates) != 1:
+                continue
+            flag = candidates[0]
+            flags.add(flag)
+            success_codes.append(code)
+            if "false" in (description + " " + str(properties[flag].get("description") or "")).lower() and _source_says_no_write(
+                description + " " + str(properties[flag].get("description") or "")
+            ):
+                false_codes.append(code)
+        elif _source_says_no_write(description):
+            no_write_codes.append(code)
+    if len(flags) != 1 or not success_codes:
+        raise ValueError("create_promise OpenAPI must unambiguously define one boolean write-success field")
+    return success_codes, next(iter(flags)), false_codes, no_write_codes
 
 
 def _url(openapi: dict, path: str) -> str:
@@ -263,6 +341,36 @@ def _bank_name(policy: dict) -> str:
     return match.group(1) if match else "the bank"
 
 
+def _opening_line(policy: dict, bank_name: str) -> str:
+    """Render the source's initial disclosure before asking who answered."""
+    raw = str(policy.get("raw_brief") or "")
+    opening_source = str(policy.get("opening") or "")
+    for line in (raw + "\n" + opening_source).splitlines():
+        if not re.search(r"\b(?:first sentence|opening(?: sentence| line)?|start(?: the)? call|begin(?: the)? call)\b", line, re.I):
+            continue
+        if not re.search(r"\b(?:exact(?:ly)?|verbatim|word.for.word|must say|required wording)\b", line, re.I):
+            continue
+        quoted_parts = re.findall(r'["“]([^"”]+)["”]', line)
+        quoted_parts += re.findall(r"(?<!\w)'((?:[^']|'(?=\w))*)'", line)
+        for quoted in quoted_parts:
+            if bank_name.lower() in quoted.lower() or "digital assistant" in quoted.lower():
+                exact = re.sub(r"(?<!\{)\{(title|last_name)\}(?!\})", r"{{\1}}", quoted.strip())
+                return exact if "?" in exact else exact + " Am I speaking with {{title}} {{last_name}}?"
+    opening_lines = [line for line in raw.splitlines()
+                     if re.search(r"\b(?:first sentence|opening(?: sentence| line)?|start(?: the)? call|begin(?: the)? call)\b", line, re.I)]
+    opening_source = "\n".join([opening_source, *opening_lines]).strip()
+    recording_disclosure = bool(re.search(
+        r"\b(?:call|conversation)\s+(?:is|was|will be|may be|must be|shall be|is being)\s+recorded\b|"
+        r"\brecord(?:ing)?\s+(?:this|the)\s+(?:call|conversation)\b|"
+        r"\brecording\s+disclosure\b",
+        opening_source, re.I,
+    ))
+    first_sentence = f"Hello, this is {bank_name}'s digital assistant"
+    if recording_disclosure:
+        first_sentence += ", and we are recording this call"
+    return first_sentence + ". Am I speaking with {{title}} {{last_name}}?"
+
+
 def _deadline_bands(policy: dict) -> list[dict]:
     source = "\n".join(str(policy.get(key) or "") for key in ("raw_brief", "verified_call", "global_rules"))
     bands = []
@@ -366,22 +474,25 @@ _PROMISE_HOOK = """try:
     if not isinstance(data, dict):
         data = dict()
         result['data'] = data
-    pid = str(vars.get('pending_promise_product_id') or vars.get('create_promise_args.product_id') or '')
+    pid = str(vars.get('pending_promise_product_id') or vars.get('pending_product_id') or '')
     ids = json.loads(str(vars.get('recorded_ids') or '[]'))
     attempts = json.loads(str(vars.get('promise_attempts') or '{}'))
-    if data.get('ok') is True:
+    status_code = str(result.get('status_code') or '')
+    if status_code in __SUCCESS_CODES__ and data.get(__RESULT_FLAG__) is True:
         if pid and pid not in ids:
             ids.append(pid)
         vars['recorded_ids'] = json.dumps(ids)
         vars['recorded_count'] = str(len(ids))
         data['what_to_do_next'] = 'Promise was recorded. Say the exact successful-promise confirmation required by the policy. Continue with remaining products; never record this product again.'
-    else:
+    elif (status_code in __FALSE_CODES__ and data.get(__RESULT_FLAG__) is False) or status_code in __NO_WRITE_CODES__:
         attempts[pid] = int(attempts.get(pid, 0)) + 1
         vars['promise_attempts'] = json.dumps(attempts)
         if attempts[pid] < 2:
             data['what_to_do_next'] = 'Promise was NOT recorded. Retry create_promise once with the same product, amount and date. Do not claim success.'
         else:
             data['what_to_do_next'] = 'Promise failed twice. Tell caller it could not be recorded. For a multi-product account add a service_error note for this product, then continue.'
+    else:
+        data['what_to_do_next'] = 'The write result is unknown. Do not retry or claim that a promise was recorded.'
 except Exception:
     pass
 """
@@ -515,6 +626,7 @@ try:
     vars['date_facts'] = ('Now: ' + str(vars.get('now') or '') + '; today: ' + today.isoformat() +
                          ('; final business day offer: ' + friday.isoformat() if {offer_last_business_day!r} else '') +
                          '; bank holidays: ' + ', '.join(sorted(holidays)))
+    vars['last_business_day_offer'] = friday.isoformat() if {offer_last_business_day!r} else ''
     vars['recorded_ids'] = '[]'
     vars['recorded_count'] = '0'
     vars['note_reasons'] = '{{}}'
@@ -792,6 +904,10 @@ except Exception:
 
 _SELECT_PROMISE_CODE = """import json
 try:
+    for name in ('create_promise_call', 'retry_promise_call'):
+        for suffix in ('response.status', 'response.status_code', 'response.data.__RESULT_FLAG__', 'status_code'):
+            vars[name + '_' + suffix] = ''
+    vars['pending_promise_product_id'] = ''
     vars['write_state'] = 'done'
     if str(vars.get('confirmation_status') or '') != 'confirmed' or str(vars.get('validation_state') or '') != 'ready':
         vars['write_state'] = 'invalid'
@@ -918,6 +1034,187 @@ except Exception:
 """
 
 
+_MULTI_ADVANCE_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    product_by_id = dict((str(item.get('product_id') or ''), item) for item in products)
+    terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
+    notes = json.loads(str(vars.get('multi_notes_json') or '{}'))
+    floor_first = set(json.loads(str(vars.get('multi_floor_first_json') or '[]')))
+    def parsed(value):
+        if isinstance(value, str):
+            value = json.loads(value) if value.strip() else []
+        if isinstance(value, dict):
+            value = value.get('promises') or value.get('products') or [value]
+        return value if isinstance(value, list) else []
+    def add_terms(value, fallback_pid=''):
+        added = False
+        for item in parsed(value):
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get('product_id') or fallback_pid)
+            if pid not in product_by_id:
+                continue
+            date = str(item.get('date_phrase') or item.get('date_words') or item.get('raw_date') or item.get('date') or '').strip()
+            if not date:
+                continue
+            amount = item.get('amount')
+            if amount is None:
+                amount = product_by_id[pid].get('past_due')
+            terms[pid] = dict(product_id=pid, amount=amount, date=date)
+            notes.pop(pid, None)
+            added = True
+        return added
+    phase = str(vars.get('multi_phase') or 'initial')
+    next_step = ''
+    if phase == 'initial':
+        if str(vars.get('all_today_status') or '') == 'yes':
+            today = str(vars.get('now') or '')[:10]
+            for pid, item in product_by_id.items():
+                terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=today)
+        else:
+            common = str(vars.get('multi_common_date_words') or '').strip()
+            if common:
+                for pid, item in product_by_id.items():
+                    terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=common)
+            add_terms(vars.get('proposed_terms_json') or '')
+            raw_notes = vars.get('pending_note_reasons_json') or '{}'
+            raw_notes = json.loads(raw_notes) if isinstance(raw_notes, str) else raw_notes
+            if isinstance(raw_notes, dict):
+                for pid, reason in raw_notes.items():
+                    pid = str(pid)
+                    if pid in product_by_id and pid not in terms and str(reason) in __NOTE_CODES__ and str(reason) != __REFUSAL_REASON__:
+                        notes[pid] = str(reason)
+            for pid in parsed(vars.get('multi_full_too_much_ids_json') or '[]'):
+                if str(pid) in product_by_id:
+                    floor_first.add(str(pid))
+        vars['multi_offer_stage'] = '1'
+    else:
+        pid = str(vars.get('multi_focus_product_id') or '')
+        action = str(vars.get('multi_offer_action') or 'unclear')
+        if phase == 'support':
+            if action == 'proposal' and add_terms(vars.get('multi_reply_terms_json') or '', pid):
+                pass
+            else:
+                notes[pid] = __HARDSHIP_REASON__
+        elif action == 'accepted' and phase == 'offer':
+            terms[pid] = dict(product_id=pid, amount=vars.get('multi_offer_amount'), date=str(vars.get('multi_offer_date') or ''))
+            notes.pop(pid, None)
+        elif action == 'proposal':
+            common = str(vars.get('multi_reply_common_date_words') or '').strip()
+            if common:
+                for item in products:
+                    other = str(item.get('product_id') or '')
+                    if other not in terms and other not in notes:
+                        terms[other] = dict(product_id=other, amount=item.get('past_due'), date=common)
+            if not add_terms(vars.get('multi_reply_terms_json') or '', pid) and not common:
+                next_step = 'clarify'
+        elif action == 'paid':
+            notes[pid] = __PAID_REASON__
+        elif action == 'dispute':
+            notes[pid] = __DISPUTE_REASON__
+        elif action == 'hardship':
+            next_step = 'support'
+        elif action == 'full_too_much' and pid not in floor_first:
+            floor_first.add(pid)
+            next_step = 'offer'
+        elif phase == 'clarify' and action != 'proposal':
+            next_step = 'offer'
+            vars['multi_offer_stage'] = str(min(int(vars.get('multi_offer_stage') or 1) + 1,
+                                                int(product_by_id.get(pid, dict()).get('attempts') or 1)))
+        else:
+            stage = int(vars.get('multi_offer_stage') or 1)
+            limit = int(product_by_id.get(pid, dict()).get('attempts') or 1)
+            if stage < limit:
+                vars['multi_offer_stage'] = str(stage + 1)
+                next_step = 'offer'
+            else:
+                notes[pid] = __REFUSAL_REASON__
+        vars['multi_reply_terms_json'] = ''
+        vars['multi_reply_common_date_words'] = ''
+    unresolved = [(index, str(item.get('product_id') or '')) for index, item in enumerate(products)
+                  if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
+    if next_step in ('support', 'clarify'):
+        vars['multi_phase'] = next_step
+        vars['multi_next'] = next_step
+    elif next_step == 'offer' and pid in product_by_id and pid not in terms and pid not in notes:
+        vars['multi_phase'] = 'offer'
+        vars['multi_next'] = 'offer'
+    elif unresolved:
+        index, focus = unresolved[0]
+        vars['multi_focus_index'] = str(index)
+        vars['multi_focus_product_id'] = focus
+        vars['multi_offer_stage'] = '1'
+        vars['multi_phase'] = 'offer'
+        vars['multi_next'] = 'offer'
+    else:
+        vars['multi_next'] = 'confirm' if terms else 'notes'
+        vars['proposed_terms_json'] = json.dumps([terms[str(item.get('product_id') or '')] for item in products
+                                                  if str(item.get('product_id') or '') in terms])
+        vars['pending_note_reasons_json'] = json.dumps(notes)
+    vars['multi_terms_json'] = json.dumps(terms)
+    vars['multi_notes_json'] = json.dumps(notes)
+    vars['multi_floor_first_json'] = json.dumps(sorted(floor_first))
+except Exception:
+    vars['multi_next'] = 'service_error'
+"""
+
+
+_MULTI_OFFER_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    pid = str(vars.get('multi_focus_product_id') or '')
+    product = next(item for item in products if str(item.get('product_id') or '') == pid)
+    stage = int(vars.get('multi_offer_stage') or 1)
+    floor_first = set(json.loads(str(vars.get('multi_floor_first_json') or '[]')))
+    if stage == 1:
+        amount = product.get('floor') if pid in floor_first else product.get('past_due')
+        date = str(vars.get('last_business_day_offer') or '')
+    else:
+        amount = product.get('floor')
+        date = str(product.get('deadline') or '')
+    if not date:
+        raise ValueError('No source-derived offer date')
+    vars['multi_offer_amount'] = amount
+    vars['multi_offer_date'] = date
+    vars['multi_focus_label'] = str(product.get('label') or pid)
+    vars['multi_offer_text'] = ('For ' + vars['multi_focus_label'] + ', can you pay ' +
+                                format(float(amount), '.2f') + ' on ' + date + '?')
+    vars['multi_offer_state'] = 'ready'
+except Exception:
+    vars['multi_offer_state'] = 'invalid'
+    vars['multi_offer_text'] = ''
+"""
+
+
+_MULTI_REVISE_CODE = """import json
+try:
+    terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    known = set(str(item.get('product_id') or '') for item in products)
+    raw = vars.get('multi_corrected_terms_json') or ''
+    raw = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+    raw = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    changed = False
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get('product_id') or '')
+        date = str(item.get('date_phrase') or item.get('date_words') or item.get('date') or '').strip()
+        if pid in known and date:
+            previous = terms.get(pid) or dict()
+            terms[pid] = dict(product_id=pid, amount=item.get('amount', previous.get('amount')), date=date)
+            changed = True
+    vars['multi_terms_json'] = json.dumps(terms)
+    vars['proposed_terms_json'] = json.dumps([terms[str(item.get('product_id') or '')] for item in products
+                                              if str(item.get('product_id') or '') in terms])
+    vars['multi_corrected_terms_json'] = ''
+    vars['multi_next'] = 'confirm' if changed else 'clarify'
+except Exception:
+    vars['multi_next'] = 'clarify'
+"""
+
+
 def build_workflow(policy: dict, openapi: dict) -> dict:
     """Return a runnable workflow using the supplied policy and OpenAPI schema.
 
@@ -938,10 +1235,27 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     identity_fields = _identity_fields(openapi)
     outcomes = _outcome_names(openapi, policy)
     reason_names, close_reason_names, note_codes, close_codes = _reason_names(openapi, policy)
+    promise_success_codes, promise_result_flag, promise_false_codes, promise_no_write_codes = _promise_response_contract(openapi)
+    promise_hook = (_PROMISE_HOOK
+                    .replace("__SUCCESS_CODES__", repr(promise_success_codes))
+                    .replace("__RESULT_FLAG__", repr(promise_result_flag))
+                    .replace("__FALSE_CODES__", repr(promise_false_codes))
+                    .replace("__NO_WRITE_CODES__", repr(promise_no_write_codes)))
+    select_promise_code = _SELECT_PROMISE_CODE.replace("__RESULT_FLAG__", promise_result_flag)
     bank_name = _bank_name(policy)
     source_policy = "\n".join(str(policy.get(key) or "") for key in
                               ("global_rules", "opening", "identity", "verified_call", "outcomes", "tool_policy", "constraints", "raw_brief"))
     offer_last_business_day = "last business day of this week" in source_policy.lower()
+    multi_constraints = policy.get("constraints") or {}
+    product_limits = str(multi_constraints.get("product_limits") or "") if isinstance(multi_constraints, dict) else ""
+    multi_enabled = bool(re.search(
+        r"\b(?:all|multiple|several|up to (?:three|3)|one to (?:three|3)) products\b|"
+        r"\bproducts? one by one\b|\beach product.{0,35}\border\b",
+        str(policy.get("verified_call") or "") + "\n" + product_limits, re.I,
+    ))
+    offer_source = str(policy.get("verified_call") or "") or source_policy
+    fixed_multi_offers = ("last business day of this week" in offer_source.lower() and
+                          bool(re.search(r"attempt\s*2.{0,100}floor.{0,100}deadline", offer_source, re.I)))
 
     verify_dob = _api_tool(openapi, "verify_identity", fixed={"field": identity_fields[0]},
                            description=f"Check the customer's {identity_fields[0].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=_VERIFY_HOOK)
@@ -949,7 +1263,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
                              description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=_VERIFY_HOOK)
     callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=_CALLBACK_HOOK)
     account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")
-    promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once if the first result is not ok=true.", post_code=_PROMISE_HOOK)
+    promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
     note = _api_tool(openapi, "add_note", description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=_NOTE_HOOK)
     transfer = _api_tool(openapi, "transfer_to_agent", description="Transfer only for accepted support, persistent human request, or restructuring. Never add notes on a transfer.", post_code=_TRANSFER_HOOK)
     promise["pre_process_code"] = """try:
@@ -993,7 +1307,7 @@ except Exception:
         "Determine whether the person is the named customer. Only an explicit yes, 'that's me', 'speaking', or the customer's own name confirms. "
         "A hello, go ahead or who is this does not confirm; ask once more after answering any question. "
         "For a third party ask only when the customer can be reached, without explaining the purpose. No tool call is allowed in this turn.",
-        opening=f"Hello, this is {bank_name}'s digital assistant." + (" This call is recorded." if "recorded" in source_policy.lower() else "") + " Am I speaking with {{title}} {{last_name}}?",
+        opening=_opening_line(policy, bank_name),
         extraction=[_enum("opening_role", ["self", "third_party", "wrong_number", "deceased", "unclear"],
                           "Classify ONLY the latest caller answer: self only on explicit confirmation; third_party if another person answered; wrong_number if number is not theirs; deceased if customer died; unclear otherwise.")],
         transitions=[_eq("finish_wrong_number", "opening_role", "wrong_number"),
@@ -1096,9 +1410,22 @@ except Exception:
         _eq("transfer_restructuring", "discussion_action", "transfer_restructuring"),
         _eq("transfer_support", "discussion_action", "transfer_support"),
         _eq("transfer_human", "discussion_action", "transfer_human"),
-        _eq("prepare_confirmation", "discussion_action", "proposal_ready"),
-        _eq("prepare_notes", "discussion_action", "done_no_promise"),
     ]
+    if multi_enabled:
+        transitions.append(_to("multi_advance", "Begin ordered product discussion after the all-today answer",
+                               _when(_check("product_count", "greater_than", 1))))
+        single = lambda action: _when({"logic": "and", "conditions": [
+            _check("product_count", "equals", "1"), _check("discussion_action", "equals", action),
+        ]})
+        transitions.extend([
+            _to("prepare_confirmation", "Single product proposal", single("proposal_ready")),
+            _to("prepare_notes", "Single product final answer", single("done_no_promise")),
+        ])
+    else:
+        transitions.extend([
+            _eq("prepare_confirmation", "discussion_action", "proposal_ready"),
+            _eq("prepare_notes", "discussion_action", "done_no_promise"),
+        ])
     nodes["account_discussion"] = _conversation("account_discussion", account_prompt, transitions=transitions,
                                                  extraction=[
                                                      _enum("discussion_action", ["proposal_ready", "done_no_promise", "transfer_restructuring", "transfer_support", "transfer_human", "continue"],
@@ -1111,8 +1438,16 @@ except Exception:
                                                       "description": "For each product the caller has finally refused, disputed, said already paid, or declined after hardship, return a JSON object string mapping product_id to the correct add_note reason from the source policy and API. Leave empty if still discussing."},
                                                      _enum("single_product_reason", note_codes or ["paid", "dispute", "hardship", "refused", "service_error"],
                                                            "For a one-product account only, classify a final paid, dispute, hardship, or refused result; do not fill while negotiating a promise."),
+                                                     *([_enum("all_today_status", ["yes", "no", "other"],
+                                                              "Only for a multi-product account: yes if the latest caller answer accepts paying ALL products today; no if it rejects paying all today; other otherwise."),
+                                                        {"name": "multi_common_date_words", "type": "string", "min_confidence": 0.55,
+                                                         "description": "For a multi-product account only, copy a date phrase explicitly offered for ALL products, such as 'next Friday'. Leave empty for a date applying to just one product."},
+                                                        {"name": "multi_full_too_much_ids_json", "type": "string", "min_confidence": 0.55,
+                                                         "description": "For a multi-product account only, return a JSON array of product IDs for which the caller explicitly said the full amount is too much. Otherwise return []."}]
+                                                       if multi_enabled else []),
                                                  ],
-                                                 max_turns=40, max_target="prepare_notes")
+                                                 max_turns=2 if multi_enabled else 40,
+                                                 max_target="multi_advance" if multi_enabled else "prepare_notes")
     nodes["account_discussion"]["on_enter_first_entry_only"] = True
 
     nodes["prepare_confirmation"] = _code_node(
@@ -1139,14 +1474,21 @@ except Exception:
         ],
         max_turns=3, max_target="account_discussion")
     nodes["clear_confirmation"] = _code_node("clear_confirmation", _CLEAR_CONFIRMATION_CODE, "account_discussion")
+    # Validation also selects the first write, so a confirmed proposal needs
+    # one sandbox call between the caller's yes and create_promise.
+    validate_and_select_code = (_VALIDATE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays))
+                                + "\n" + select_promise_code)
     nodes["validate_confirmation"] = _code_node(
-        "validate_confirmation", _VALIDATE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
+        "validate_confirmation", validate_and_select_code, "account_discussion")
     nodes["validate_confirmation"]["transitions"] = [
-        _eq("record_results", "validation_state", "ready"), _always("account_discussion")]
+        _eq("create_promise_call", "write_state", "promise"),
+        _eq("account_discussion", "write_state", "invalid"),
+        _always("prepare_notes"),
+    ]
 
     # Every write below is an engine-run action. The model cannot call a promise
     # tool, and the only path to the first promise action is a clear confirmation.
-    nodes["record_results"] = _code_node("record_results", _SELECT_PROMISE_CODE, "prepare_notes")
+    nodes["record_results"] = _code_node("record_results", select_promise_code, "prepare_notes")
     nodes["record_results"]["transitions"] = [
         _eq("create_promise_call", "write_state", "promise"),
         _eq("account_discussion", "write_state", "invalid"),
@@ -1154,24 +1496,62 @@ except Exception:
     ]
     promise_engine = _api_tool(openapi, "create_promise", fixed={
         "product_id": "{{pending_product_id}}", "amount": "{{pending_amount}}", "date": "{{pending_date}}"},
-        description="Record the explicitly confirmed and validated current product promise.", post_code=_PROMISE_HOOK)
-    promise_engine["pre_process_code"] = promise["pre_process_code"]
-    for node_name, failure_target in (("create_promise_call", "retry_promise_call"),
-                                      ("retry_promise_call", "mark_promise_error")):
+        description="Record the explicitly confirmed and validated current product promise.", post_code=promise_hook)
+    promise_engine["config"]["maxRetries"] = 0
+    promise_engine["function"]["parameters"]["properties"]["connect_retries"] = {
+        "type": "number", "default": 0,
+    }
+    promise_engine["pre_process_code"] = """try:
+    for name in ('create_promise_call', 'retry_promise_call'):
+        for suffix in ('response.status', 'response.status_code', 'response.data.__RESULT_FLAG__', 'status_code'):
+            vars[name + '_' + suffix] = ''
+    vars['pending_promise_product_id'] = ''
+    body = config.get('body')
+    if isinstance(body, dict):
+        vars['pending_promise_product_id'] = str(body.get('product_id') or '')
+except Exception:
+    pass
+""".replace("__RESULT_FLAG__", promise_result_flag)
+    for node_name, negative_target in (
+        ("create_promise_call", "prepare_promise_retry"),
+        ("retry_promise_call", "mark_promise_error"),
+    ):
         nodes[node_name] = {
             "name": node_name, "node_type": "api_request", "on_enter": {"type": "silent"},
-            "passthrough": True, "passthrough_default_transition": failure_target,
+            "passthrough": True, "passthrough_default_transition": "promise_write_uncertain",
             "pre_actions": [promise_engine],
-            "transitions": [_bool("mark_promise_success", node_name + "_response.data.ok", "Promise API confirmed success"),
-                            _always(failure_target)],
+            "transitions": [
+                _to("mark_promise_success", "Bank confirmed promise write",
+                    _bank_response(node_name, promise_success_codes, promise_result_flag, True)),
+                *([_to(negative_target, "Bank explicitly confirmed no write",
+                       _bank_non_recording(node_name, promise_false_codes, promise_no_write_codes, promise_result_flag))]
+                  if promise_false_codes or promise_no_write_codes else []),
+                _always("promise_write_uncertain"),
+            ],
         }
-    nodes["mark_promise_success"] = _code_node("mark_promise_success", _ADVANCE_PROMISE_CODE, "promise_success_notice")
+    nodes["prepare_promise_retry"] = _code_node(
+        "prepare_promise_retry", """try:
+    for suffix in ('response.status', 'response.status_code', 'response.data.ok', 'status_code'):
+        vars['retry_promise_call_' + suffix] = ''
+except Exception:
+    pass
+""".replace("response.data.ok", "response.data." + promise_result_flag), "retry_promise_call")
+    # On a successful bank response, update the recorded set and select the
+    # next product in the same sandbox call. The notice still follows a
+    # source-defined positive bank response.
+    nodes["mark_promise_success"] = _code_node(
+        "mark_promise_success", _ADVANCE_PROMISE_CODE + "\n" + select_promise_code,
+        "promise_success_notice")
     nodes["promise_success_notice"] = {
         "name": "promise_success_notice", "node_type": "conversation",
         "on_enter": {"type": "tts", "text": _success_sentence(policy)},
         "task_message": "Say the fixed confirmation of a successfully recorded promise. No tool call is allowed in this turn.",
-        "passthrough": True, "passthrough_default_transition": "record_results",
-        "transitions": [_always("record_results")],
+        "passthrough": True, "passthrough_default_transition": "service_unavailable",
+        "transitions": [
+            _eq("create_promise_call", "write_state", "promise"),
+            _eq("prepare_notes", "write_state", "done"),
+            _always("service_unavailable"),
+        ],
     }
     nodes["mark_promise_error"] = _code_node(
         "mark_promise_error", _MARK_PROMISE_ERROR_CODE.replace("__SERVICE_ERROR_REASON__", repr(reason_names.get("service_error") or "service_error")),
@@ -1296,6 +1676,13 @@ except Exception:
         "passthrough": True, "passthrough_default_transition": "close_call",
         "transitions": [_always("close_call")],
     }
+    nodes["promise_write_uncertain"] = {
+        "name": "promise_write_uncertain", "node_type": "conversation",
+        "on_enter": {"type": "tts", "text": "I cannot confirm whether your payment promise was recorded. Please check the mobile app or contact the bank. Thank you and goodbye."},
+        "task_message": "The bank write result is unknown. Say only the fixed message. Do not retry or claim the promise was recorded. No tool call is allowed in this turn.",
+        "passthrough": True, "passthrough_default_transition": "close_call",
+        "transitions": [_always("close_call")],
+    }
     # A failed code_exec must never continue on the node's normal fallback.
     # Use both the failure counter and the passthrough default because Freya
     # may skip condition evaluation when its sandbox cannot be reached.
@@ -1312,13 +1699,23 @@ except Exception:
             ))
     close["pre_process_code"] = (
         "try:\n"
+        "    import json\n"
         "    body = config.get('body')\n"
         "    if isinstance(body, dict):\n"
         f"        failed_nodes = {code_names!r}\n"
         "        failed = any(int(vars.get(name + '_failure_count') or 0) > 0 for name in failed_nodes)\n"
         "        if failed or not vars.get('close_outcome'):\n"
-        f"            body['outcome'] = {outcomes['no_promise']!r}\n"
-        f"            body['reason'] = {(close_reason_names.get('service_error') or 'service_error')!r}\n"
+        "            recorded = vars.get('recorded_ids') or '[]'\n"
+        "            try:\n"
+        "                recorded = json.loads(recorded) if isinstance(recorded, str) else recorded\n"
+        "            except Exception:\n"
+        "                recorded = []\n"
+        "            if recorded:\n"
+        f"                body['outcome'] = {outcomes['promise']!r}\n"
+        "                body.pop('reason', None)\n"
+        "            else:\n"
+        f"                body['outcome'] = {outcomes['no_promise']!r}\n"
+        f"                body['reason'] = {(close_reason_names.get('service_error') or 'service_error')!r}\n"
         "        elif not body.get('reason'):\n"
         "            body.pop('reason', None)\n"
         "except Exception:\n"
@@ -1327,7 +1724,7 @@ except Exception:
     system_prompt = (
         f"You are {bank_name}'s digital assistant. Follow the source policy below in full. "
         "Follow the current node's task exactly. Never disclose account information before the required identity checks pass. "
-        "Treat tool ok=false and HTTP failures as failures; never claim an action succeeded until ok=true. "
+        "Treat failed or missing bank responses as failures; never claim an action succeeded until the bank explicitly confirms it. "
         "Never invent facts or offer an unapproved concession. Keep each reply concise. "
         "\n\nSOURCE POLICY:\n" + source_policy
     )

@@ -14,15 +14,19 @@ the agent when the corresponding credentials are present.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -71,6 +75,59 @@ def _remaining(started: float) -> float:
     if remaining <= 0:
         raise TimeoutError("Builder reached its 30-minute limit")
     return remaining
+
+
+@contextmanager
+def _within_budget(started: float):
+    """Bound a blocking Freya step by the remaining build wall-clock budget."""
+    remaining = _remaining(started)
+    can_alarm = hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread()
+    if not can_alarm:
+        try:
+            yield
+        finally:
+            _remaining(started)
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def expired(_signum, _frame):
+        raise TimeoutError("Builder reached its 30-minute limit during a Freya step")
+
+    entered = time.monotonic()
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+        _remaining(started)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, max(0, previous_timer[0] - (time.monotonic() - entered)), previous_timer[1])
+
+
+def _input_fingerprint(path: Path) -> dict[str, str]:
+    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def _new_slot_published_version(freya: Any, workflow_id: str) -> tuple[int, str]:
+    """Read back the initial version, which create_workflow does not return."""
+    result = freya.api(
+        "GET", f"/api/v2/versions/workflow/{workflow_id}",
+        workspaceId=freya.workspace_id(),
+    )
+    versions = result.get("versions") if isinstance(result, dict) else None
+    published = [version for version in versions or []
+                 if isinstance(version, dict) and version.get("isPublished") is True]
+    if len(published) != 1:
+        raise RuntimeError(f"Cannot confirm one published version for new workflow {workflow_id}")
+    version = published[0]
+    number, version_id = version.get("versionNumber"), version.get("id")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1 or not isinstance(version_id, str) or not version_id:
+        raise RuntimeError(f"Published version metadata is invalid for new workflow {workflow_id}")
+    return number, version_id
 
 
 def _model_caller(trace: Trace, started: float):
@@ -212,6 +269,7 @@ def _validation_failed(result: Any) -> bool:
 
 def _run_practice_test(agent_id: str, brief: str, out: Path, trace: Trace, started: float) -> dict[str, Any]:
     result_path = out / "practice-results.json"
+    result_path.unlink(missing_ok=True)
     command = [sys.executable, str(KIT / "tools" / "run_cases.py"), agent_id, "--brief", brief, "--out", str(result_path)]
     begun = time.monotonic()
     trace.write("test_start", brief=brief, agent_id=agent_id)
@@ -225,6 +283,12 @@ def _run_practice_test(agent_id: str, brief: str, out: Path, trace: Trace, start
     if result_path.exists():
         data = json.loads(result_path.read_text(encoding="utf-8"))
         summary.update({key: data.get(key) for key in ("simulation_id", "iteration_id", "passed", "total", "seconds")})
+        passed, total = data.get("passed"), data.get("total")
+        if not isinstance(passed, int) or not isinstance(total, int) or total <= 0 or passed != total:
+            summary["status"] = "failed"
+    else:
+        summary["status"] = "failed"
+        summary["reason"] = "practice runner produced no result file"
     trace.write("test_end", brief=brief, agent_id=agent_id, duration_seconds=round(time.monotonic() - begun, 3), **summary)
     return summary
 
@@ -239,8 +303,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     trace.write("start", slot=args.slot, briefs=[str(path) for path in briefs], openapi=str(openapi_path), no_live=args.no_live)
     summary: dict[str, Any] = {"slot": args.slot, "trace": str(trace.path)}
     try:
+        trace.write("inputs", briefs=[_input_fingerprint(path) for path in briefs], openapi=_input_fingerprint(openapi_path))
         openapi = json.loads(openapi_path.read_text(encoding="utf-8"))
         model_call = _model_caller(trace, begun)
+        model_degraded = model_call is None
         try:
             policy = compile_policy([str(path) for path in briefs], str(openapi_path), model_call)
         except (RuntimeError, ValueError) as error:
@@ -248,6 +314,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # is unavailable or returns invalid structured output.
             trace.write("policy_model_fallback", error_type=type(error).__name__, reason=str(error)[:200])
             policy = compile_policy([str(path) for path in briefs], str(openapi_path), None)
+            model_degraded = True
         policy_path = out / f"{args.slot}.policy.json"
         policy_path.write_text(json.dumps(policy, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         trace.write("policy_written", path=str(policy_path), tool_count=len(policy["tool_policy"]), extraction_status=policy.get("constraints", {}).get("extraction_status", "model"))
@@ -271,24 +338,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         live = bool(not args.no_live and os.environ.get("FREYA_API_KEY"))
         if live:
+            if model_degraded or policy.get("constraints", {}).get("extraction_status") == "source_only":
+                trace.write("publish_blocked", reason="source-only policy after unavailable or failed model extraction")
+                raise RuntimeError("Refusing to publish a source-only policy; restore model extraction and rerun")
             import freya
 
-            _remaining(begun)
-            dry_run = freya.validate_workflow(args.slot, workflow)
+            with _within_budget(begun):
+                dry_run = freya.validate_workflow(args.slot, workflow)
             trace.write("freya_dry_run", status="ok", result_type=type(dry_run).__name__)
             # Keep slot identity stable even when successive runs use different
             # output directories; Freya has a finite workflow quota.
             state_file = KIT / ".freya-agents.json"
-            saved = freya.save_workflow(args.slot, workflow, state_file=str(state_file))
-            trace.write("freya_saved_published", workflow_id=saved.get("workflow_id"), agent_id=saved.get("agent_id"), version=saved.get("version"))
-            summary.update({key: saved.get(key) for key in ("workflow_id", "agent_id", "version")})
+            with _within_budget(begun):
+                saved = freya.save_workflow(args.slot, workflow, state_file=str(state_file))
+            published_version = saved.get("version")
+            version_id = None
+            if published_version is None:
+                trace.write("freya_created", workflow_id=saved.get("workflow_id"), agent_id=saved.get("agent_id"))
+                with _within_budget(begun):
+                    published_version, version_id = _new_slot_published_version(freya, saved["workflow_id"])
+            trace.write("freya_saved_published", workflow_id=saved.get("workflow_id"), agent_id=saved.get("agent_id"), version=published_version, version_id=version_id)
+            summary.update({"workflow_id": saved.get("workflow_id"), "agent_id": saved.get("agent_id"), "version": published_version})
             export_path = out / f"{args.slot}.workflow.json"
-            freya.export_workflow(saved["workflow_id"], str(export_path))
+            with _within_budget(begun):
+                freya.export_workflow(saved["workflow_id"], str(export_path))
             trace.write("freya_exported", path=str(export_path), workflow_id=saved["workflow_id"])
             summary["workflow"] = str(export_path)
             practice = _practice_brief(briefs)
             if not args.no_test and practice and os.environ.get("FREYA_BANK_TEAM_KEY"):
                 summary["test"] = _run_practice_test(saved["agent_id"], practice, out, trace, begun)
+                if summary["test"]["status"] != "ok":
+                    raise RuntimeError(f"Practice test failed: {summary['test'].get('passed', '?')}/{summary['test'].get('total', '?')} passed")
             else:
                 reason = "disabled" if args.no_test else "no matching public practice brief or team key"
                 trace.write("test_skipped", reason=reason)

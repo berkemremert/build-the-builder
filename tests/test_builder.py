@@ -19,7 +19,16 @@ sys.path.insert(0, str(ROOT))
 
 import builder  # noqa: E402
 import freya  # noqa: E402
+from policy_compiler import compile_policy  # noqa: E402
 from qa import validate_workflow  # noqa: E402
+
+
+def _fixture_model_call(_prompt: str, *, purpose: str) -> dict:
+    """Provide a valid extracted policy without invoking a model or Freya."""
+    policy = compile_policy([str(ROOT / "briefs" / "brief-a.md")],
+                            str(ROOT / "tools" / "openapi.json"), None)
+    policy["constraints"]["extraction_status"] = "model"
+    return policy
 
 
 class BuilderAcceptanceTests(unittest.TestCase):
@@ -105,7 +114,7 @@ class BuilderAcceptanceTests(unittest.TestCase):
                 return path
 
             with mock.patch.dict(os.environ, {"FREYA_API_KEY": secret}, clear=False), \
-                 mock.patch.object(builder, "_model_caller", return_value=None), \
+                 mock.patch.object(builder, "_model_caller", return_value=_fixture_model_call), \
                  mock.patch.object(freya, "validate_workflow", return_value={"valid": True}) as dry_run, \
                  mock.patch.object(freya, "save_workflow", return_value={"workflow_id": "wf_fake", "agent_id": "ag_fake", "version": 7}) as save, \
                  mock.patch.object(freya, "export_workflow", side_effect=fake_export) as export:
@@ -143,7 +152,7 @@ class BuilderAcceptanceTests(unittest.TestCase):
                 slot="redacted-error", out=str(out), no_live=False, no_test=True,
             )
             with mock.patch.dict(os.environ, {"FREYA_API_KEY": secret}, clear=False), \
-                 mock.patch.object(builder, "_model_caller", return_value=None), \
+                 mock.patch.object(builder, "_model_caller", return_value=_fixture_model_call), \
                  mock.patch.object(freya, "validate_workflow", side_effect=RuntimeError("dry run failed for " + secret)):
                 with self.assertRaises(RuntimeError):
                     builder.run(args)

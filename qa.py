@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections import deque
+from itertools import product
 from pathlib import Path
 
 
@@ -110,20 +111,26 @@ def _condition_requires(condition, variable: str, operator: str, operand: str) -
             str(condition.get("operand")) == operand)
 
 
-def _condition_requires_promise_ok(condition, variable: str) -> bool:
+def _condition_clauses(condition) -> list[frozenset[tuple[str, str, str]]]:
+    """Expand a small transition condition into ORs of required atoms."""
     if not isinstance(condition, dict):
-        return False
+        return []
     children = condition.get("conditions")
-    if isinstance(children, list):
-        checks = [_condition_requires_promise_ok(child, variable) for child in children]
-        if condition.get("logic") == "and":
-            return any(checks)
+    if isinstance(children, list) and children:
+        groups = [_condition_clauses(child) for child in children]
         if condition.get("logic") == "or":
-            return bool(checks) and all(checks)
-        return False
-    return (condition.get("variable") == variable and
-            condition.get("operator") == "equals" and
-            str(condition.get("operand")).lower() == "true")
+            clauses = [clause for group in groups for clause in group]
+            return clauses if len(clauses) <= 128 else []
+        if condition.get("logic") == "and" and all(groups):
+            combinations = product(*groups)
+            clauses = [frozenset().union(*parts) for _, parts in zip(range(129), combinations)]
+            return clauses if len(clauses) <= 128 else []
+        return []
+    variable = condition.get("variable")
+    operator = condition.get("operator")
+    if not isinstance(variable, str) or not isinstance(operator, str):
+        return []
+    return [frozenset({(variable, operator, str(condition.get("operand", "")).lower())})]
 
 
 def _promise_success_notice(node) -> bool:
@@ -134,9 +141,22 @@ def _promise_success_notice(node) -> bool:
     if not isinstance(on_enter, dict) or on_enter.get("type") != "tts":
         return False
     text = on_enter.get("text", "")
+    if isinstance(text, str) and re.search(
+            r"\b(?:cannot|can't|could not|not|unable|unknown|whether)\b", text, re.I):
+        return False
     return (isinstance(text, str) and
             bool(re.search(r"\bpromis(?:e|es)\b", text, re.I)) and
             bool(re.search(r"\brecord(?:ed|ing)?\b|\bconfirm(?:ed|ing)?\b|\bregister(?:ed)?\b|\bsms\b", text, re.I)))
+
+
+def _source_guarantees_no_write(description: str) -> bool:
+    return bool(re.search(
+        r"\b(?:nothing|no (?:promise|write|record|action))\b.{0,50}"
+        r"\b(?:recorded|written|persisted|created|carried out|made)\b|"
+        r"\b(?:not|never)\b.{0,35}\b(?:recorded|written|persisted|created|carried out)\b|"
+        r"\bno write\b",
+        description, re.I,
+    ))
 
 
 def _schema_for(openapi: dict, path: str, method: str) -> dict:
@@ -286,7 +306,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         if handler != "__function__:api_call":
             errors.append(f"{location}: unsupported handler {handler!r}; use bank API or code_exec")
             return
-        if name not in _BANK_TOOLS or f"/{name}" not in openapi["paths"]:
+        if name not in _BANK_TOOLS:
             errors.append(f"{location}: API tool {name!r} must use one of the seven bank tool names in OpenAPI")
         params = fn.get("parameters")
         props = params.get("properties") if isinstance(params, dict) else None
@@ -302,8 +322,10 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         api_path, api_method = expected_urls[url]
         if not isinstance(method, str) or method.lower() != api_method:
             errors.append(f"{location}: method.default must be {api_method.upper()} for {api_path}")
-        if name != api_path.lstrip("/"):
-            errors.append(f"{location}: function.name {name!r} must match API path {api_path!r}")
+        operation = openapi["paths"][api_path][api_method]
+        expected_name = operation.get("operationId") or api_path.rstrip("/").split("/")[-1]
+        if name != expected_name:
+            errors.append(f"{location}: function.name {name!r} must match OpenAPI operation {expected_name!r} at {api_path!r}")
         schema = _schema_for(openapi, api_path, api_method)
         api_props = schema.get("properties", {})
         body = props.get("body")
@@ -484,6 +506,80 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         for name in reachable - can_end:
             errors.append(f"workflow.nodes.{name}: no route to an end_call node")
 
+        # Some policies explicitly forbid notes once a transfer is made.
+        # Check every graph path after the transfer, including passthrough
+        # defaults, because a later note action would violate that rule.
+        if re.search(r"\bon any transfer\b.{0,100}\b(?:add no|no)\b.{0,30}\bnotes\b",
+                     str(workflow.get("system_prompt", "")), re.I | re.S):
+            for name in reachable:
+                node = all_nodes.get(name)
+                if not isinstance(node, dict):
+                    continue
+                actions = node.get("pre_actions", [])
+                if not isinstance(actions, list) or not any(
+                        _tool_name(action) == "transfer_to_agent" for action in actions):
+                    continue
+                pending, visited = [name], set()
+                while pending:
+                    current = pending.pop()
+                    if current in visited:
+                        continue
+                    visited.add(current)
+                    downstream = all_nodes.get(current)
+                    if not isinstance(downstream, dict):
+                        continue
+                    calls = []
+                    for field in ("pre_actions", "tools"):
+                        items = downstream.get(field, [])
+                        if isinstance(items, list):
+                            calls.extend(items)
+                    if any(_tool_name(action) == "add_note" for action in calls):
+                        errors.append(f"workflow.nodes.{name}: add_note is reachable after transfer_to_agent despite the source policy forbidding notes on transfer")
+                        break
+                    pending.extend(target for target, _, _ in edges.get(current, []))
+
+        # A policy requiring one combined read-back needs a deterministic
+        # all-products-disposed route before entering its confirmation turn.
+        # The reducer's multi_next=confirm branch is the graph contract; the
+        # arithmetic and product order inside that reducer are covered by
+        # executable generator tests.
+        if re.search(r"read all promises back together.{0,100}one confirmation|combined confirmation",
+                     str(workflow.get("system_prompt", "")), re.I | re.S):
+            confirmation_turns = {
+                name for name, node in all_nodes.items()
+                if isinstance(node, dict) and node.get("node_type") == "conversation"
+                and isinstance(node.get("on_enter"), dict)
+                and node["on_enter"].get("type") == "tts"
+                and isinstance(node.get("extraction_schema"), list)
+                and any(isinstance(item, dict) and "confirm" in str(item.get("name", "")).lower()
+                        for item in node["extraction_schema"])
+            }
+            seen_multi = set()
+            pending = deque([(initial, False)])
+            while pending:
+                current, disposed = pending.popleft()
+                if (current, disposed) in seen_multi:
+                    continue
+                seen_multi.add((current, disposed))
+                if current in confirmation_turns and not disposed:
+                    errors.append(f"workflow.nodes.{current}: combined confirmation is reachable before multi_next=confirm resolves every product")
+                node = all_nodes.get(current)
+                if not isinstance(node, dict):
+                    continue
+                transitions = node.get("transitions", [])
+                for transition in transitions if isinstance(transitions, list) else []:
+                    if not isinstance(transition, dict):
+                        continue
+                    target = transition.get("target_node")
+                    if target in all_nodes:
+                        gated = _condition_requires(transition.get("condition"),
+                                                    "multi_next", "equals", "confirm")
+                        pending.append((target, disposed or gated))
+                for field in ("passthrough_default_transition", "max_turn_transition"):
+                    target = node.get(field)
+                    if target in all_nodes and (field != "passthrough_default_transition" or node.get("passthrough")):
+                        pending.append((target, disposed))
+
         def safe_code_failure_route(start: str) -> bool:
             """A failed computation may only reach fixed speech and closing actions."""
             pending, visited = [start], set()
@@ -502,6 +598,156 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                         return False
                 pending.extend(target for target, _, _ in edges.get(current, []))
             return bool(visited & end_nodes)
+
+        def safe_ambiguous_write_route(start: str) -> bool:
+            """An unknown write result must reach closure without another write or success claim."""
+            pending, visited = [start], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                target_node = all_nodes.get(current)
+                if not isinstance(target_node, dict) or _promise_success_notice(target_node):
+                    return False
+                actions = target_node.get("pre_actions", [])
+                if isinstance(actions, list) and any(
+                        _tool_name(action) == "create_promise" for action in actions):
+                    return False
+                if target_node.get("node_type") == "conversation":
+                    on_enter = target_node.get("on_enter")
+                    if not (target_node.get("passthrough") and isinstance(on_enter, dict)
+                            and on_enter.get("type") == "tts"):
+                        return False
+                pending.extend(target for target, _, _ in edges.get(current, []))
+            return bool(visited & end_nodes)
+
+        def reaches_success_notice(start: str) -> bool:
+            """Stop at another bank write or free-form turn before its own result."""
+            pending, visited = [start], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                target_node = all_nodes.get(current)
+                if not isinstance(target_node, dict):
+                    continue
+                if _promise_success_notice(target_node):
+                    return True
+                actions = target_node.get("pre_actions", [])
+                if isinstance(actions, list) and any(
+                        _tool_name(action) == "create_promise" for action in actions):
+                    continue
+                if target_node.get("node_type") == "conversation":
+                    continue
+                pending.extend(target for target, _, _ in edges.get(current, []))
+            return False
+
+        def reaches_repeat_promise(start: str) -> bool:
+            """Find another promise action before a success notice or new caller turn."""
+            pending, visited = [start], set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                target_node = all_nodes.get(current)
+                if not isinstance(target_node, dict) or _promise_success_notice(target_node):
+                    continue
+                actions = target_node.get("pre_actions", [])
+                if isinstance(actions, list) and any(
+                        _tool_name(action) == "create_promise" for action in actions):
+                    return True
+                if target_node.get("node_type") == "conversation":
+                    continue
+                pending.extend(target for target, _, _ in edges.get(current, []))
+            return False
+
+        def promise_response_contract(action: dict) -> tuple[str, set[str], set[str], set[str]]:
+            """Read confirmed and nonrecording response shapes from the supplied API."""
+            fn = action.get("function", {})
+            props = fn.get("parameters", {}).get("properties", {})
+            url = props.get("url", {}).get("default")
+            if url not in expected_urls:
+                return "", set(), set(), set()
+            path, method = expected_urls[url]
+            responses = openapi["paths"][path][method].get("responses", {})
+            success_codes, false_codes, no_write_codes = set(), set(), set()
+            boolean_fields: set[str] = set()
+            for status, response in responses.items():
+                if not isinstance(response, dict):
+                    continue
+                schema = response.get("content", {}).get("application/json", {}).get("schema", {})
+                fields = schema.get("properties", {}) if isinstance(schema, dict) else {}
+                boolean_fields.update(key for key, spec in fields.items()
+                                      if isinstance(spec, dict) and spec.get("type") == "boolean")
+            flag = "ok" if "ok" in boolean_fields else next(iter(boolean_fields)) if len(boolean_fields) == 1 else ""
+            for status, response in responses.items():
+                if not isinstance(response, dict) or not str(status).isdigit():
+                    continue
+                description = str(response.get("description", "")).lower()
+                schema = response.get("content", {}).get("application/json", {}).get("schema", {})
+                fields = schema.get("properties", {}) if isinstance(schema, dict) else {}
+                if flag and isinstance(fields, dict) and flag in fields and 200 <= int(status) < 300:
+                    success_codes.add(str(status))
+                    if "false" in description and _source_guarantees_no_write(description):
+                        false_codes.add(str(status))
+                if not 200 <= int(status) < 300 and _source_guarantees_no_write(description):
+                    no_write_codes.add(str(status))
+            return flag, success_codes, false_codes, no_write_codes
+
+        def promise_response_kind(name: str, action: dict, condition) -> str:
+            flag, success_codes, false_codes, no_write_codes = promise_response_contract(action)
+            status_var = f"{name}_response.status_code"
+            flag_var = f"{name}_response.data.{flag}"
+            clauses = _condition_clauses(condition)
+            if not clauses:
+                return "unknown"
+            kinds = set()
+            for clause in clauses:
+                status_values = {value for variable, operator, value in clause
+                                 if variable == status_var and operator == "equals"}
+                true_flag = (flag_var, "equals", "true") in clause if flag else False
+                false_flag = (flag_var, "equals", "false") in clause if flag else False
+                if status_values and status_values <= success_codes and true_flag:
+                    kinds.add("success")
+                elif (status_values and status_values <= no_write_codes or
+                      status_values and status_values <= false_codes and false_flag):
+                    kinds.add("nonrecording")
+                else:
+                    kinds.add("unknown")
+            return next(iter(kinds)) if len(kinds) == 1 else "unknown"
+
+        # The first promise action may retry only after a bank response that
+        # its OpenAPI contract says recorded nothing. A tool failure alone is
+        # ambiguous because the bank may have committed before Freya errored.
+        for name in reachable:
+            node = all_nodes.get(name)
+            if not isinstance(node, dict):
+                continue
+            actions = node.get("pre_actions", [])
+            promise_actions = [action for action in actions if _tool_name(action) == "create_promise"] if isinstance(actions, list) else []
+            if not promise_actions:
+                continue
+            transitions = node.get("transitions", [])
+            for i, transition in enumerate(transitions if isinstance(transitions, list) else []):
+                if not isinstance(transition, dict):
+                    continue
+                target = transition.get("target_node")
+                if target not in all_nodes:
+                    continue
+                kind = promise_response_kind(name, promise_actions[0], transition.get("condition"))
+                location = f"workflow.nodes.{name}.transitions[{i}]"
+                if reaches_repeat_promise(target) and kind != "nonrecording":
+                    errors.append(f"{location}: create_promise retry requires an explicit bank nonrecording response")
+                if reaches_success_notice(target) and kind != "success":
+                    errors.append(f"{location}: recorded-promise notice requires an explicit successful bank response")
+                if kind == "unknown" and not safe_ambiguous_write_route(target):
+                    errors.append(f"{location}: ambiguous create_promise result must close without retry or success speech")
+            default = node.get("passthrough_default_transition") if node.get("passthrough") else None
+            if not isinstance(default, str) or not safe_ambiguous_write_route(default):
+                errors.append(f"workflow.nodes.{name}.passthrough_default_transition: ambiguous create_promise result must close without retry or success speech")
 
         def reaches_promise_stage(start: str) -> bool:
             """Follow deterministic steps up to the next spoken turn."""
@@ -605,7 +851,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             for target, _, gate in edges.get(name, []):
                 queue.append((target, confirmed or gate))
 
-        # A fixed recorded-promise notice requires an ok=true response from
+        # A fixed recorded-promise notice requires a successful bank response from
         # create_promise on every path, including passthrough defaults.
         success_seen = set()
         queue = deque([(initial, False)])
@@ -618,18 +864,18 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             if not isinstance(node, dict):
                 continue
             if _promise_success_notice(node) and not promise_ok:
-                errors.append(f"workflow.nodes.{name}: recorded-promise success speech is reachable without create_promise ok=true")
+                errors.append(f"workflow.nodes.{name}: recorded-promise success speech is reachable without an explicit successful create_promise response")
             actions = node.get("pre_actions", [])
-            has_promise_action = (isinstance(actions, list) and
-                                  any(_tool_name(action) == "create_promise" for action in actions))
+            promise_action = next((action for action in actions if _tool_name(action) == "create_promise"), None) if isinstance(actions, list) else None
+            has_promise_action = promise_action is not None
             for transition in node.get("transitions", []) if isinstance(node.get("transitions", []), list) else []:
                 if not isinstance(transition, dict):
                     continue
                 target = transition.get("target_node")
                 if target not in all_nodes:
                     continue
-                gated = (has_promise_action and _condition_requires_promise_ok(
-                    transition.get("condition"), f"{name}_response.data.ok"))
+                gated = (has_promise_action and promise_response_kind(
+                    name, promise_action, transition.get("condition")) == "success")
                 queue.append((target, gated if has_promise_action else promise_ok))
             for field in ("passthrough_default_transition", "max_turn_transition"):
                 target = node.get(field)

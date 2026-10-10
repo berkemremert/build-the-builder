@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -102,6 +103,29 @@ def _matches_deterministic_condition(condition: dict, state: dict) -> bool:
     return False
 
 
+def _first_engine_route(node: dict, state: dict) -> str | None:
+    """Select the first route using the condition subset emitted for API nodes."""
+    def matches(condition: dict) -> bool:
+        if "conditions" in condition:
+            values = [matches(child) for child in condition["conditions"]]
+            return all(values) if condition.get("logic") == "and" else any(values)
+        operator = condition.get("operator")
+        if operator == "always":
+            return True
+        variable = condition.get("variable")
+        if operator == "equals":
+            return str(state.get(variable, "")) == str(condition.get("operand"))
+        if operator == "greater_than":
+            try:
+                return float(state.get(variable, 0)) > float(condition.get("operand"))
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    return next((item["target_node"] for item in node.get("transitions", [])
+                 if matches(item["condition"])), None)
+
+
 def _embedded_python(workflow: dict):
     for tool in _all_tools(workflow):
         name = tool.get("function", {}).get("name", "unknown")
@@ -135,15 +159,34 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                                       if tool.get("function", {}).get("name") in TOOL_NAMES})
 
         first = workflow["nodes"][workflow["initial_node"]]
-        opening = _text(first.get("on_enter", {})) + " " + str(first.get("task_message", ""))
-        self.assertRegex(opening.lower(), r"digital assistant|freya bank")
-        self.assertRegex(opening.lower(), r"recorded|recording")
         spoken = first.get("on_enter", {}).get("text", "")
-        if spoken:
-            self.assertNotRegex(spoken.lower(), r"collections|debt|payment|credit card|loan|past.due")
+        self.assertTrue(spoken, "The opening disclosure must be spoken on entry")
+        first_sentence = re.split(r"(?<=[.!?])\s+", spoken, maxsplit=1)[0].lower()
+        self.assertIn("freya bank", first_sentence)
+        self.assertIn("digital assistant", first_sentence)
+        self.assertRegex(first_sentence, r"\b(?:recorded|recording|taped|taping|captured|saving|saved)\b")
+        self.assertNotRegex(spoken.lower(), r"collections|debt|payment|credit card|loan|past.due")
         self.assertFalse(_named_tool({"tools": first.get("tools", []), "nodes": {}, "global_nodes": {}}, "get_account"))
         self.assertTrue(_named_tool(workflow, "verify_identity"))
         self.assertTrue(_named_tool(workflow, "get_account"))
+
+    def test_exact_quoted_recording_opening_without_recorded_token_is_preserved(self) -> None:
+        mandatory = "Hello, this is Acme Bank's digital assistant and this call is being taped."
+        source = (
+            f'First sentence must be exactly: "{mandatory}" '
+            'Then ask: "Am I speaking with {title} {last_name}?" '
+            "Before identity verification do not reveal collections, debt, payment, card, or loan details."
+        )
+        self.assertNotIn("recorded", source.lower())
+        policy = {"global_rules": source, "opening": source, "identity": "Verify identity before account lookup.",
+                  "verified_call": "", "outcomes": {}, "tool_policy": {}, "raw_brief": source,
+                  "constraints": {"bank_name": "Acme Bank", "extraction_status": "source_only"}}
+        workflow = build_workflow(policy, self.openapi)
+        first = workflow["nodes"][workflow["initial_node"]]
+        spoken = first["on_enter"]["text"]
+        first_sentence = re.split(r"(?<=[.!?])\s+", spoken, maxsplit=1)[0]
+        self.assertEqual(mandatory, first_sentence)
+        self.assertNotRegex(spoken.lower(), r"collections|debt|payment|credit card|loan|past.due")
 
     def test_all_embedded_python_parses_before_freya_save(self) -> None:
         workflow = self._build("brief-a.md", "brief-b.md")
@@ -160,13 +203,13 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         state = {"recorded_ids": "[]", "promise_attempts": "{}", "note_reasons": "{}",
                  "pending_promise_product_id": "p1", "pending_note_product_id": "p2",
                  "pending_note_reason": "refused"}
-        failed = {"data": {"ok": False}}
+        failed = {"status_code": 200, "data": {"ok": False}}
         exec(promise_hook, {"vars": state, "result": failed})
         self.assertEqual([], json.loads(state["recorded_ids"]))
         self.assertEqual(1, json.loads(state["promise_attempts"])["p1"])
         self.assertIn("not recorded", failed["data"].get("what_to_do_next", "").lower())
 
-        succeeded = {"data": {"ok": True}}
+        succeeded = {"status_code": 200, "data": {"ok": True}}
         exec(promise_hook, {"vars": state, "result": succeeded})
         self.assertEqual(["p1"], json.loads(state["recorded_ids"]))
         self.assertIn("recorded", succeeded["data"].get("what_to_do_next", "").lower())
@@ -228,8 +271,6 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                                                              {"confirmation_status": "confirmed"}))
         _run_code_node(workflow, validator, state)
         self.assertEqual("invalid", state["validation_state"])
-        selector = _code_node_writing(workflow, "write_state")
-        _run_code_node(workflow, selector, state)
         self.assertNotEqual("promise", state["write_state"])
         self.assertEqual([], json.loads(state["recorded_ids"]))
 
@@ -239,16 +280,18 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual([("p1", "2026-10-30"), ("p2", "2026-10-23")],
                          [(item["product_id"], item["date"])
                           for item in json.loads(state["pending_promises_json"])])
-        for expected_pid in ("p1", "p2"):
-            _run_code_node(workflow, selector, state)
+        notice = workflow["nodes"]["promise_success_notice"]
+        for index, expected_pid in enumerate(("p1", "p2")):
             self.assertEqual("promise", state["write_state"])
             self.assertEqual(expected_pid, state["pending_product_id"])
+            route_node = workflow["nodes"][validator] if index == 0 else notice
             self.assertEqual(["create_promise_call"], [item["target_node"]
-                             for item in workflow["nodes"][selector]["transitions"]
+                             for item in route_node["transitions"]
                              if _matches_deterministic_condition(item["condition"], state)])
             _run_code_node(workflow, "mark_promise_success", state)
-        _run_code_node(workflow, selector, state)
         self.assertEqual("done", state["write_state"])
+        self.assertEqual(["prepare_notes"], [item["target_node"] for item in notice["transitions"]
+                         if _matches_deterministic_condition(item["condition"], state)])
         self.assertEqual(["p1", "p2"], json.loads(state["recorded_ids"]))
 
     def test_bank_b_phone_retry_keeps_passed_dob(self) -> None:
@@ -277,6 +320,102 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual(["load_account"], [item["target_node"] for item in phone["transitions"]
                          if _matches_deterministic_condition(item["condition"], corrected_phone)])
 
+    def test_bank_b_pub12_product_order_and_individual_attempt_limits(self) -> None:
+        case = next(item for item in json.loads((ROOT / "public-test-set.json").read_text(encoding="utf-8"))
+                    if item["id"] == "PUB-12")
+        workflow = self._build("brief-a.md", "brief-b.md")
+        account_products = [dict(item, product_id=f"p{index}")
+                            for index, item in enumerate(case["products"], start=1)]
+        products, state = _prepared_products(workflow, account_products, case["variables"]["now"])
+        self.assertEqual(["p1", "p2", "p3"], [item["product_id"] for item in products])
+        self.assertEqual(["credit card", "personal loan", "car loan"],
+                         [item["label"].split(" ending ")[0] for item in products])
+        self.assertEqual([510.0, 1320.0, 140.0], [item["past_due"] for item in products])
+        self.assertEqual([153.0, 440.0, 46.0], [item["floor"] for item in products])
+        self.assertEqual([2, 2, 1], [item["attempts"] for item in products])
+        self.assertEqual(["2026-10-23", "2026-10-23", "2026-11-02"],
+                         [item["deadline"] for item in products])
+        self.assertLess(state["account_facts"].index("product ID p1"),
+                        state["account_facts"].index("product ID p2"))
+        self.assertLess(state["account_facts"].index("product ID p2"),
+                        state["account_facts"].index("product ID p3"))
+
+    def test_bank_b_pub12_refusals_advance_only_the_current_product(self) -> None:
+        case = next(item for item in json.loads((ROOT / "public-test-set.json").read_text(encoding="utf-8"))
+                    if item["id"] == "PUB-12")
+        workflow = self._build("brief-a.md", "brief-b.md")
+        account_products = [dict(item, product_id=f"p{index}")
+                            for index, item in enumerate(case["products"], start=1)]
+        products, state = _prepared_products(workflow, account_products, case["variables"]["now"])
+        state.update({"product_json": json.dumps(products), "all_today_status": "no",
+                      "proposed_terms_json": '[{"product_id":"p1","amount":510,"date":"tomorrow"}]',
+                      "pending_note_reasons_json": "{}", "write_index": "0"})
+        advance = _code_node_writing(workflow, "multi_offer_stage")
+        offer = _code_node_writing(workflow, "multi_offer_state")
+        _run_code_node(workflow, advance, state)
+        self.assertEqual("offer", state["multi_next"])
+        self.assertEqual("p2", state["multi_focus_product_id"])
+        self.assertEqual("1", state["multi_offer_stage"],
+                         "Saying no to all today must not consume p2's first offer")
+        self.assertEqual({"p1"}, set(json.loads(state["multi_terms_json"])))
+        self.assertEqual({}, json.loads(state["multi_notes_json"]))
+
+        for expected_pid, expected_stage, expected_amount, expected_date in (
+            ("p2", "1", 1320.0, "2026-10-16"),
+            ("p2", "2", 440.0, "2026-10-23"),
+            ("p3", "1", 140.0, "2026-10-16"),
+        ):
+            with self.subTest(product=expected_pid, stage=expected_stage):
+                self.assertEqual("offer", state["multi_next"])
+                self.assertEqual("1" if expected_pid == "p3" else expected_stage,
+                                 state["multi_offer_stage"])
+                _run_code_node(workflow, offer, state)
+                self.assertEqual("ready", state["multi_offer_state"])
+                self.assertEqual((expected_pid, expected_amount, expected_date),
+                                 (state["multi_focus_product_id"],
+                                  float(state["multi_offer_amount"]), state["multi_offer_date"]))
+                self.assertIn("can you pay", state["multi_offer_text"].lower())
+                state["multi_offer_action"] = "refused"
+                _run_code_node(workflow, advance, state)
+                if expected_pid == "p2" and expected_stage == "1":
+                    self.assertEqual("2", state["multi_offer_stage"])
+                    self.assertEqual({}, json.loads(state["multi_notes_json"]))
+                elif expected_pid == "p2":
+                    self.assertEqual("p3", state["multi_focus_product_id"])
+                    self.assertEqual({"p2": "refused"}, json.loads(state["multi_notes_json"]))
+
+        self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual({"p2": "refused", "p3": "refused"},
+                         json.loads(state["multi_notes_json"]))
+        self.assertEqual(["p1"], [item["product_id"] for item in json.loads(state["proposed_terms_json"])])
+        preparer = _code_node_writing(workflow, "proposal_validation_state")
+        _run_code_node(workflow, preparer, state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        self.assertEqual([{"product_id": "p1", "amount": 510.0, "date": "2026-10-15"}],
+                         json.loads(state["readback_terms_json"]))
+        self.assertNotIn("personal loan", state["confirmation_readback"].lower())
+        self.assertNotIn("car loan", state["confirmation_readback"].lower())
+        self.assertEqual([], json.loads(state["recorded_ids"]))
+
+        confirmation = workflow["nodes"][_node_extracting(workflow, "confirmation_status")]
+        validator = next(item["target_node"] for item in confirmation["transitions"]
+                         if _matches_deterministic_condition(item["condition"],
+                                                             {"confirmation_status": "confirmed"}))
+        _run_code_node(workflow, validator, state)
+        self.assertNotEqual("promise", state["write_state"])
+        state["confirmation_status"] = "confirmed"
+        _run_code_node(workflow, validator, state)
+        self.assertEqual(("p1", 510.0, "2026-10-15"),
+                         (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+        self.assertEqual("promise", state["write_state"])
+        _run_code_node(workflow, "mark_promise_success", state)
+        self.assertEqual(["p1"], json.loads(state["recorded_ids"]))
+        self.assertEqual("done", state["write_state"])
+        _run_code_node(workflow, "prepare_notes", state)
+        self.assertEqual([("p2", "refused"), ("p3", "refused")],
+                         [(item["product_id"], item["reason"])
+                          for item in json.loads(state["pending_notes_json"])])
+
     def test_bank_b_one_promise_two_refusal_notes_close_promise_once(self) -> None:
         workflow = self._build("brief-a.md", "brief-b.md")
         state = {"product_json": json.dumps([{"product_id": pid}
@@ -301,6 +440,78 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("", state["close_reason"])
         self.assertEqual({"p2": "refused", "p3": "refused"}, json.loads(state["note_reasons"]))
         self.assertEqual(1, len(_nodes_using_tool(workflow, "close_call")))
+
+    def test_bank_b_failed_first_write_retries_same_confirmed_terms_without_success_speech(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        now = "2026-10-14T11:00"
+        products, _ = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "past_due": 420,
+             "minimum_payment": 126, "days_late": 6},
+            {"product_id": "p2", "type": "personal_loan", "past_due": 250,
+             "instalment_amount": 75, "days_late": 20},
+        ], now)
+        state = {"now": now, "customer_id": "c_test", "product_json": json.dumps(products),
+                 "recorded_ids": "[]", "promise_attempts": "{}", "write_index": "0",
+                 "proposed_terms_json": json.dumps([
+                     {"product_id": "p1", "amount": 420, "date": "2026-10-30"},
+                     {"product_id": "p2", "amount": 250, "date": "2026-10-30"},
+                 ])}
+        _run_code_node(workflow, _code_node_writing(workflow, "proposal_validation_state"), state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        state["confirmation_status"] = "confirmed"
+        confirmation = workflow["nodes"][_node_extracting(workflow, "confirmation_status")]
+        validator = next(item["target_node"] for item in confirmation["transitions"]
+                         if _matches_deterministic_condition(item["condition"], state))
+        _run_code_node(workflow, validator, state)
+        self.assertEqual("ready", state["validation_state"])
+        self.assertEqual(("p1", 420.0, "2026-10-30"),
+                         (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+
+        first = workflow["nodes"]["create_promise_call"]
+        retry_preparer = _first_engine_route(first, {
+            "create_promise_call_response.status_code": "200",
+            "create_promise_call_response.data.ok": "false",
+        })
+        self.assertEqual("prepare_promise_retry", retry_preparer)
+        retry_name = _first_engine_route(workflow["nodes"][retry_preparer], {})
+        self.assertEqual("retry_promise_call", retry_name)
+        retry = workflow["nodes"][retry_name]
+        first_tool = next(tool for tool in first["pre_actions"]
+                          if tool["function"]["name"] == "create_promise")
+        retry_tool = next(tool for tool in retry["pre_actions"]
+                          if tool["function"]["name"] == "create_promise")
+        first_body = first_tool["function"]["parameters"]["properties"]["body"]
+        retry_body = retry_tool["function"]["parameters"]["properties"]["body"]
+        self.assertEqual(first_body, retry_body, "Retry must reuse the exact confirmed body")
+        frozen_terms = (state["pending_product_id"], state["pending_amount"], state["pending_date"])
+        exec(first_tool["pre_process_code"], {"vars": state,
+                                              "config": {"body": {"product_id": frozen_terms[0]}}})
+        failed_result = {"status_code": 200, "data": {"ok": False}}
+        exec(first_tool["post_process_code"], {"vars": state, "result": failed_result})
+        self.assertEqual([], json.loads(state["recorded_ids"]))
+        self.assertEqual(1, json.loads(state["promise_attempts"])["p1"])
+        self.assertIn("not recorded", failed_result["data"]["what_to_do_next"].lower())
+        self.assertEqual(frozen_terms,
+                         (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+        success_route = first["transitions"][0]
+        self.assertFalse(_matches_deterministic_condition(success_route["condition"],
+                                                            {"create_promise_call_response.status_code": "200",
+                                                             "create_promise_call_response.data.ok": "false"}))
+        self.assertEqual("mark_promise_success", success_route["target_node"])
+        self.assertEqual("promise_write_uncertain", first["passthrough_default_transition"])
+        self.assertNotIn("text message", str(retry.get("on_enter", {})).lower())
+
+        success_result = {"status_code": 200, "data": {"ok": True}}
+        exec(retry_tool["post_process_code"], {"vars": state, "result": success_result})
+        self.assertEqual(["p1"], json.loads(state["recorded_ids"]))
+        self.assertEqual(frozen_terms,
+                         (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+        _run_code_node(workflow, retry["transitions"][0]["target_node"], state)
+        self.assertEqual(("p2", 250.0, "2026-10-23"),
+                         (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+        self.assertEqual(["create_promise_call"], [item["target_node"]
+                         for item in workflow["nodes"]["promise_success_notice"]["transitions"]
+                         if _matches_deterministic_condition(item["condition"], state)])
 
     def test_clear_confirmation_deterministically_unlocks_promise_write(self) -> None:
         workflow = self._build("brief-a.md")
@@ -338,16 +549,10 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("ready", state["validation_state"])
         self.assertEqual([{"product_id": "p1", "amount": 420.0, "date": "2026-10-14"}],
                          json.loads(state["pending_promises_json"]))
-
-        next_route = [item for item in workflow["nodes"][validator_name]["transitions"]
-                      if _matches_deterministic_condition(item["condition"], state)]
-        self.assertTrue(next_route)
-        selector = next_route[0]["target_node"]
-        _run_code_node(workflow, selector, state)
         self.assertEqual("promise", state["write_state"])
         self.assertEqual("p1", state["pending_product_id"])
         self.assertEqual(420.0, state["pending_amount"])
-        write_route = [item for item in workflow["nodes"][selector]["transitions"]
+        write_route = [item for item in workflow["nodes"][validator_name]["transitions"]
                        if _matches_deterministic_condition(item["condition"], state)]
         self.assertTrue(write_route)
         writer = workflow["nodes"][write_route[0]["target_node"]]
@@ -484,10 +689,12 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                          if _matches_deterministic_condition(item["condition"], state))
         _run_code_node(workflow, validator, state)
         self.assertEqual("ready", state["validation_state"])
-        _run_code_node(workflow, _code_node_writing(workflow, "write_state"), state)
         self.assertEqual("promise", state["write_state"])
         self.assertEqual(("p1", 365.0, "2026-10-16"),
                          (state["pending_product_id"], state["pending_amount"], state["pending_date"]))
+        self.assertEqual(["create_promise_call"], [item["target_node"]
+                         for item in workflow["nodes"][validator]["transitions"]
+                         if _matches_deterministic_condition(item["condition"], state)])
 
         writer = workflow["nodes"]["create_promise_call"]
         promise_tool = next(tool for tool in writer["pre_actions"]
@@ -498,11 +705,14 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                          {key: value["default"] for key, value in body["properties"].items()})
         exec(promise_tool["pre_process_code"], {"vars": state,
                                                 "config": {"body": {"product_id": state["pending_product_id"]}}})
-        exec(promise_tool["post_process_code"], {"vars": state, "result": {"data": {"ok": True}}})
+        exec(promise_tool["post_process_code"], {"vars": state,
+                                                 "result": {"status_code": 200, "data": {"ok": True}}})
         self.assertEqual(["p1"], json.loads(state["recorded_ids"]))
         _run_code_node(workflow, "mark_promise_success", state)
-        _run_code_node(workflow, "record_results", state)
         self.assertEqual("done", state["write_state"])
+        self.assertEqual(["prepare_notes"], [item["target_node"]
+                         for item in workflow["nodes"]["promise_success_notice"]["transitions"]
+                         if _matches_deterministic_condition(item["condition"], state)])
         self.assertEqual(["p1"], json.loads(state["recorded_ids"]))
         self.assertEqual("1", state["write_index"])
 
@@ -623,13 +833,114 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("ready", state["validation_state"])
         self.assertEqual(200.0, json.loads(state["pending_promises_json"])[0]["amount"])
 
+    def test_strict_promise_retry_requires_current_explicit_bank_result(self) -> None:
+        workflow = self._build("brief-a.md")
+        first = workflow["nodes"]["create_promise_call"]
+        retry = workflow["nodes"]["retry_promise_call"]
+        for name, node, false_target in (
+            ("create_promise_call", first, "prepare_promise_retry"),
+            ("retry_promise_call", retry, "mark_promise_error"),
+        ):
+            prefix = name + "_response."
+            with self.subTest(node=name):
+                self.assertEqual("mark_promise_success", _first_engine_route(node, {
+                    prefix + "status_code": "200", prefix + "data.ok": "true"}))
+                self.assertEqual(false_target, _first_engine_route(node, {
+                    prefix + "status_code": "200", prefix + "data.ok": "false"}))
+                # An explicit HTTP 500 is known not to have recorded a promise
+                # when Freya exposes its status; an opaque transport error is not.
+                self.assertEqual(false_target, _first_engine_route(node, {
+                    prefix + "status_code": "500"}))
+                for uncertain in (
+                    {},
+                    {prefix + "status_code": "200"},
+                    {prefix + "data.ok": "false"},
+                    {name + "_failure_count": "1"},
+                ):
+                    self.assertEqual("promise_write_uncertain", _first_engine_route(node, uncertain))
+                self.assertEqual("promise_write_uncertain", node["passthrough_default_transition"])
+
+        retry_preparer = workflow["nodes"]["prepare_promise_retry"]
+        self.assertEqual("retry_promise_call", _first_engine_route(retry_preparer, {}))
+        self.assertEqual("service_unavailable", _first_engine_route(retry_preparer, {
+            "prepare_promise_retry_failure_count": "1"}))
+
+        # The bank write hook must not turn a missing response into a known
+        # failure, schedule a retry, or claim that the promise was recorded.
+        hook = next(tool["post_process_code"] for tool in first["pre_actions"]
+                    if tool["function"]["name"] == "create_promise")
+        state = {"pending_promise_product_id": "p1", "recorded_ids": "[]",
+                 "promise_attempts": "{}"}
+        opaque = {"status": "error", "message": "transport lost"}
+        exec(hook, {"vars": state, "result": opaque})
+        self.assertEqual([], json.loads(state["recorded_ids"]))
+        self.assertEqual({}, json.loads(state["promise_attempts"]))
+        self.assertIn("do not retry", str(opaque.get("data", {})).lower())
+        self.assertIn("do not", str(opaque.get("data", {})).lower())
+
+        explicit_500 = {"status_code": 500, "data": {}}
+        exec(hook, {"vars": state, "result": explicit_500})
+        self.assertEqual([], json.loads(state["recorded_ids"]))
+        self.assertEqual(1, json.loads(state["promise_attempts"])["p1"])
+
+        uncertainty = workflow["nodes"]["promise_write_uncertain"]
+        success_speech = workflow["nodes"]["promise_success_notice"]["on_enter"]["text"]
+        self.assertNotEqual(success_speech, uncertainty["on_enter"].get("text"))
+        self.assertNotEqual("retry_promise_call", uncertainty.get("passthrough_default_transition"))
+
+    def test_next_product_clears_prior_promise_response_before_deciding_result(self) -> None:
+        workflow = self._build("brief-a.md", "brief-b.md")
+        first = workflow["nodes"]["create_promise_call"]
+        promise_tool = next(tool for tool in first["pre_actions"]
+                            if tool["function"]["name"] == "create_promise")
+        state = {"confirmation_status": "confirmed", "validation_state": "ready",
+                 "pending_promises_json": json.dumps([
+                     {"product_id": "p1", "amount": 420, "date": "2026-10-16"},
+                     {"product_id": "p2", "amount": 250, "date": "2026-10-23"},
+                 ]),
+                 "write_index": "1", "recorded_ids": '["p1"]', "promise_attempts": "{}",
+                 "create_promise_call_response.status_code": "200",
+                 "create_promise_call_response.data.ok": "true",
+                 "retry_promise_call_response.status_code": "200",
+                 "retry_promise_call_response.data.ok": "true"}
+        _run_code_node(workflow, "record_results", state)
+        self.assertEqual("p2", state["pending_product_id"])
+        self.assertEqual("promise", state["write_state"])
+        for name in ("create_promise_call", "retry_promise_call"):
+            self.assertFalse(state.get(name + "_response.status_code"))
+            self.assertFalse(state.get(name + "_response.data.ok"))
+        self.assertEqual("promise_write_uncertain", _first_engine_route(first, state))
+
+        # The API pre-hook repeats the reset immediately before the p2 call.
+        state["create_promise_call_response.status_code"] = "200"
+        state["create_promise_call_response.data.ok"] = "true"
+        exec(promise_tool["pre_process_code"], {"vars": state,
+                                                "config": {"body": {"product_id": "p2"}}})
+        self.assertFalse(state.get("create_promise_call_response.data.ok"))
+        self.assertEqual("p2", state["pending_promise_product_id"])
+        self.assertEqual("promise_write_uncertain", _first_engine_route(first, state))
+
+        # A fresh explicit negative result belongs to p2 even though p1 was
+        # already recorded successfully; it cannot trigger p2 success speech.
+        result = {"status_code": 200, "data": {"ok": False}}
+        exec(promise_tool["post_process_code"], {"vars": state, "result": result})
+        self.assertEqual(["p1"], json.loads(state["recorded_ids"]))
+        self.assertEqual({"p2": 1}, json.loads(state["promise_attempts"]))
+        current = {"create_promise_call_response.status_code": "200",
+                   "create_promise_call_response.data.ok": "false"}
+        self.assertEqual("prepare_promise_retry", _first_engine_route(first, current))
+
     def test_promise_api_result_controls_recorded_state_and_close_outcome(self) -> None:
         workflow = self._build("brief-a.md")
         writers = [(name, node) for name, node in _nodes_using_tool(workflow, "create_promise")
                    if node.get("node_type") == "api_request"]
         self.assertEqual(2, len(writers), "A failed promise should have one bounded retry")
         first_name, first = writers[0]
-        second_name = first["passthrough_default_transition"]
+        first_failure = {first_name + "_response.status_code": "200",
+                         first_name + "_response.data.ok": "false"}
+        retry_preparer = _first_engine_route(first, first_failure)
+        self.assertEqual("prepare_promise_retry", retry_preparer)
+        second_name = _first_engine_route(workflow["nodes"][retry_preparer], {})
         self.assertIn(second_name, dict(writers))
         second = workflow["nodes"][second_name]
         base = {"product_json": '[{"product_id":"p1"}]', "recorded_ids": "[]",
@@ -640,12 +951,12 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         success = dict(base)
         promise_tool = next(tool for tool in first["pre_actions"]
                             if tool.get("function", {}).get("name") == "create_promise")
-        exec(promise_tool["post_process_code"], {"vars": success, "result": {"data": {"ok": True}}})
+        exec(promise_tool["post_process_code"], {"vars": success,
+                                                 "result": {"status_code": 200, "data": {"ok": True}}})
+        success[first_name + "_response.status_code"] = "200"
         success[first_name + "_response.data.ok"] = "true"
-        success_route = [item for item in first["transitions"]
-                         if _matches_deterministic_condition(item["condition"], success)]
-        self.assertEqual(1, len(success_route))
-        _run_code_node(workflow, success_route[0]["target_node"], success)
+        self.assertEqual("mark_promise_success", _first_engine_route(first, success))
+        _run_code_node(workflow, _first_engine_route(first, success), success)
         self.assertEqual(["p1"], json.loads(success["recorded_ids"]))
         _run_code_node(workflow, "prepare_notes", success)
         _run_code_node(workflow, "finalize", success)
@@ -653,12 +964,18 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("", success["close_reason"])
 
         failure = dict(base)
-        exec(promise_tool["post_process_code"], {"vars": failure, "result": {"data": {"ok": False}}})
-        self.assertEqual(second_name, first["passthrough_default_transition"])
+        exec(promise_tool["post_process_code"], {"vars": failure,
+                                                 "result": {"status_code": 200, "data": {"ok": False}}})
+        self.assertEqual(retry_preparer, _first_engine_route(first, first_failure))
+        _run_code_node(workflow, retry_preparer, failure)
         retry_tool = next(tool for tool in second["pre_actions"]
                           if tool.get("function", {}).get("name") == "create_promise")
-        exec(retry_tool["post_process_code"], {"vars": failure, "result": {"data": {"ok": False}}})
-        error_name = second["passthrough_default_transition"]
+        exec(retry_tool["post_process_code"], {"vars": failure,
+                                               "result": {"status_code": 200, "data": {"ok": False}}})
+        second_failure = {second_name + "_response.status_code": "200",
+                          second_name + "_response.data.ok": "false"}
+        error_name = _first_engine_route(second, second_failure)
+        self.assertEqual("mark_promise_error", error_name)
         _run_code_node(workflow, error_name, failure)
         self.assertEqual([], json.loads(failure["recorded_ids"]))
         self.assertEqual(2, json.loads(failure["promise_attempts"])["p1"])
@@ -673,8 +990,10 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertTrue(transfer_nodes)
         transfer_tool = next(tool for _, node in transfer_nodes for tool in node.get("pre_actions", [])
                              if tool.get("function", {}).get("name") == "transfer_to_agent")
-        state = {"product_json": json.dumps([{"product_id": "p1"}, {"product_id": "p2"}]),
+        state = {"product_json": json.dumps([{"product_id": "p1"}, {"product_id": "p2"},
+                                               {"product_id": "p3"}]),
                  "recorded_ids": '["p1"]', "note_reasons": "{}",
+                 "pending_note_reasons_json": '{"p2":"refused","p3":"refused"}',
                  "pending_transfer_queue": "restructuring",
                  "pending_transfer_reason": "restructuring"}
         exec(transfer_tool["post_process_code"], {"vars": state, "result": {"data": {"ok": True}}})
@@ -684,6 +1003,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("restructuring", state["close_reason"])
         self.assertEqual("yes", state["processing_complete"])
         self.assertEqual({}, json.loads(state["note_reasons"]))
+        self.assertEqual("finalize", workflow["nodes"]["transfer_restructuring"]["passthrough_default_transition"])
 
         # A successful close path has one farewell, one close_call API node,
         # and an end_call terminal. A second dialogue node would let the model
