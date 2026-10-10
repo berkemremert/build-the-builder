@@ -266,7 +266,26 @@ class ValidatorTests(unittest.TestCase):
             "transitions": [transition("close")],
         }
         self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        workflow["nodes"]["account"]["transitions"].insert(0, transition(
+            "confirmation", {"logic": "or", "conditions": [
+                {"variable": "product_count", "operator": "equals", "operand": "1"}]}))
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        workflow["nodes"]["account"]["transitions"][0]["condition"]["conditions"][0]["operand"] = "2"
+        self.check_has(workflow, "combined confirmation is reachable before multi_next=confirm")
+        workflow["nodes"]["account"]["transitions"].pop(0)
         workflow["nodes"]["reducer"]["transitions"][0] = transition("confirmation")
+        self.check_has(workflow, "combined confirmation is reachable before multi_next=confirm")
+
+    def test_generated_multi_product_reducer_cannot_bypass_disposition_gate(self):
+        policy = compile_policy([str(ROOT / "briefs" / "brief-a.md"),
+                                 str(ROOT / "briefs" / "brief-b.md")],
+                                str(ROOT / "tools" / "openapi.json"), None)
+        workflow = build_workflow(policy, OPENAPI)
+        self.assertEqual(qa.validate_workflow(workflow, OPENAPI), [])
+        reducer = workflow["nodes"]["multi_advance"]
+        confirm_route = next(t for t in reducer["transitions"]
+                             if t["target_node"] == "prepare_confirmation")
+        confirm_route["condition"] = {"operator": "always"}
         self.check_has(workflow, "combined confirmation is reachable before multi_next=confirm")
 
     def test_unreachable_or_dead_end_node_is_reported(self):

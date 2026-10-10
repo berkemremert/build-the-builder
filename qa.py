@@ -545,6 +545,38 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         # executable generator tests.
         if re.search(r"read all promises back together.{0,100}one confirmation|combined confirmation",
                      str(workflow.get("system_prompt", "")), re.I | re.S):
+            mentioned_counts = [int(value["operand"]) for _, value in _walk(workflow)
+                                if isinstance(value, dict) and value.get("variable") == "product_count"
+                                and str(value.get("operand", "")).isdigit()]
+            count_domain = frozenset(range(max([2, *mentioned_counts]) + 2))
+
+            def possible_product_counts(condition) -> frozenset[int]:
+                counts = count_domain
+                if not isinstance(condition, dict):
+                    return counts
+                children = condition.get("conditions")
+                if isinstance(children, list) and children:
+                    groups = [possible_product_counts(child) for child in children]
+                    if condition.get("logic") == "and":
+                        return frozenset.intersection(*groups)
+                    if condition.get("logic") == "or":
+                        return frozenset.union(*groups)
+                    return counts
+                if condition.get("variable") != "product_count":
+                    return counts
+                try:
+                    operand = int(condition.get("operand"))
+                except (TypeError, ValueError):
+                    return counts
+                operator = condition.get("operator")
+                if operator == "equals":
+                    return frozenset(n for n in counts if n == operand)
+                if operator == "greater_than":
+                    return frozenset(n for n in counts if n > operand)
+                if operator == "less_than":
+                    return frozenset(n for n in counts if n < operand)
+                return counts
+
             confirmation_turns = {
                 name for name, node in all_nodes.items()
                 if isinstance(node, dict) and node.get("node_type") == "conversation"
@@ -555,13 +587,13 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                         for item in node["extraction_schema"])
             }
             seen_multi = set()
-            pending = deque([(initial, False)])
+            pending = deque([(initial, False, count_domain)])
             while pending:
-                current, disposed = pending.popleft()
-                if (current, disposed) in seen_multi:
+                current, disposed, possible_counts = pending.popleft()
+                if (current, disposed, possible_counts) in seen_multi:
                     continue
-                seen_multi.add((current, disposed))
-                if current in confirmation_turns and not disposed:
+                seen_multi.add((current, disposed, possible_counts))
+                if current in confirmation_turns and not disposed and any(n > 1 for n in possible_counts):
                     errors.append(f"workflow.nodes.{current}: combined confirmation is reachable before multi_next=confirm resolves every product")
                 node = all_nodes.get(current)
                 if not isinstance(node, dict):
@@ -572,13 +604,16 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                         continue
                     target = transition.get("target_node")
                     if target in all_nodes:
+                        allowed = possible_counts & possible_product_counts(transition.get("condition"))
+                        if not allowed:
+                            continue
                         gated = _condition_requires(transition.get("condition"),
                                                     "multi_next", "equals", "confirm")
-                        pending.append((target, disposed or gated))
+                        pending.append((target, disposed or gated, allowed))
                 for field in ("passthrough_default_transition", "max_turn_transition"):
                     target = node.get(field)
                     if target in all_nodes and (field != "passthrough_default_transition" or node.get("passthrough")):
-                        pending.append((target, disposed))
+                        pending.append((target, disposed, possible_counts))
 
         def safe_code_failure_route(start: str) -> bool:
             """A failed computation may only reach fixed speech and closing actions."""

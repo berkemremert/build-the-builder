@@ -352,11 +352,13 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                       "pending_note_reasons_json": "{}", "write_index": "0"})
         advance = _code_node_writing(workflow, "multi_offer_stage")
         offer = _code_node_writing(workflow, "multi_offer_state")
+        self.assertEqual(advance, _first_engine_route(workflow["nodes"]["account_discussion"], state))
         _run_code_node(workflow, advance, state)
         self.assertEqual("offer", state["multi_next"])
         self.assertEqual("p2", state["multi_focus_product_id"])
         self.assertEqual("1", state["multi_offer_stage"],
                          "Saying no to all today must not consume p2's first offer")
+        self.assertEqual(offer, _first_engine_route(workflow["nodes"][advance], state))
         self.assertEqual({"p1"}, set(json.loads(state["multi_terms_json"])))
         self.assertEqual({}, json.loads(state["multi_notes_json"]))
 
@@ -367,15 +369,16 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         ):
             with self.subTest(product=expected_pid, stage=expected_stage):
                 self.assertEqual("offer", state["multi_next"])
-                self.assertEqual("1" if expected_pid == "p3" else expected_stage,
-                                 state["multi_offer_stage"])
+                self.assertEqual(expected_stage, state["multi_offer_stage"])
                 _run_code_node(workflow, offer, state)
                 self.assertEqual("ready", state["multi_offer_state"])
+                self.assertEqual("multi_offer", _first_engine_route(workflow["nodes"][offer], state))
                 self.assertEqual((expected_pid, expected_amount, expected_date),
                                  (state["multi_focus_product_id"],
                                   float(state["multi_offer_amount"]), state["multi_offer_date"]))
                 self.assertIn("can you pay", state["multi_offer_text"].lower())
                 state["multi_offer_action"] = "refused"
+                self.assertEqual(advance, _first_engine_route(workflow["nodes"]["multi_offer"], state))
                 _run_code_node(workflow, advance, state)
                 if expected_pid == "p2" and expected_stage == "1":
                     self.assertEqual("2", state["multi_offer_stage"])
@@ -385,6 +388,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                     self.assertEqual({"p2": "refused"}, json.loads(state["multi_notes_json"]))
 
         self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual("prepare_confirmation", _first_engine_route(workflow["nodes"][advance], state))
         self.assertEqual({"p2": "refused", "p3": "refused"},
                          json.loads(state["multi_notes_json"]))
         self.assertEqual(["p1"], [item["product_id"] for item in json.loads(state["proposed_terms_json"])])
@@ -393,11 +397,14 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("ready", state["proposal_validation_state"])
         self.assertEqual([{"product_id": "p1", "amount": 510.0, "date": "2026-10-15"}],
                          json.loads(state["readback_terms_json"]))
+        self.assertIn("credit card", state["confirmation_readback"].lower())
+        self.assertIn("510.00 on 2026-10-15", state["confirmation_readback"])
         self.assertNotIn("personal loan", state["confirmation_readback"].lower())
         self.assertNotIn("car loan", state["confirmation_readback"].lower())
         self.assertEqual([], json.loads(state["recorded_ids"]))
 
         confirmation = workflow["nodes"][_node_extracting(workflow, "confirmation_status")]
+        self.assertEqual(confirmation["name"], _first_engine_route(workflow["nodes"][preparer], state))
         validator = next(item["target_node"] for item in confirmation["transitions"]
                          if _matches_deterministic_condition(item["condition"],
                                                              {"confirmation_status": "confirmed"}))

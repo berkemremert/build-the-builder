@@ -1093,13 +1093,16 @@ try:
         pid = str(vars.get('multi_focus_product_id') or '')
         action = str(vars.get('multi_offer_action') or 'unclear')
         if phase == 'support':
-            if action == 'proposal' and add_terms(vars.get('multi_reply_terms_json') or '', pid):
-                pass
-            else:
+            if action == 'proposal':
+                add_terms(vars.get('multi_reply_terms_json') or '', pid)
+            if pid not in terms:
                 notes[pid] = __HARDSHIP_REASON__
         elif action == 'accepted' and phase == 'offer':
-            terms[pid] = dict(product_id=pid, amount=vars.get('multi_offer_amount'), date=str(vars.get('multi_offer_date') or ''))
-            notes.pop(pid, None)
+            if str(vars.get('multi_fixed_offer') or '') == 'yes':
+                terms[pid] = dict(product_id=pid, amount=vars.get('multi_offer_amount'), date=str(vars.get('multi_offer_date') or ''))
+                notes.pop(pid, None)
+            elif not add_terms(vars.get('multi_reply_terms_json') or '', pid):
+                next_step = 'clarify'
         elif action == 'proposal':
             common = str(vars.get('multi_reply_common_date_words') or '').strip()
             if common:
@@ -1107,7 +1110,8 @@ try:
                     other = str(item.get('product_id') or '')
                     if other not in terms and other not in notes:
                         terms[other] = dict(product_id=other, amount=item.get('past_due'), date=common)
-            if not add_terms(vars.get('multi_reply_terms_json') or '', pid) and not common:
+            add_terms(vars.get('multi_reply_terms_json') or '', pid)
+            if pid not in terms:
                 next_step = 'clarify'
         elif action == 'paid':
             notes[pid] = __PAID_REASON__
@@ -1119,9 +1123,13 @@ try:
             floor_first.add(pid)
             next_step = 'offer'
         elif phase == 'clarify' and action != 'proposal':
-            next_step = 'offer'
-            vars['multi_offer_stage'] = str(min(int(vars.get('multi_offer_stage') or 1) + 1,
-                                                int(product_by_id.get(pid, dict()).get('attempts') or 1)))
+            stage = int(vars.get('multi_offer_stage') or 1)
+            limit = int(product_by_id.get(pid, dict()).get('attempts') or 1)
+            if stage < limit:
+                next_step = 'offer'
+                vars['multi_offer_stage'] = str(stage + 1)
+            else:
+                notes[pid] = __REFUSAL_REASON__
         else:
             stage = int(vars.get('multi_offer_stage') or 1)
             limit = int(product_by_id.get(pid, dict()).get('attempts') or 1)
@@ -1137,6 +1145,7 @@ try:
     if next_step in ('support', 'clarify'):
         vars['multi_phase'] = next_step
         vars['multi_next'] = next_step
+        vars['multi_offer_action'] = 'unclear'
     elif next_step == 'offer' and pid in product_by_id and pid not in terms and pid not in notes:
         vars['multi_phase'] = 'offer'
         vars['multi_next'] = 'offer'
@@ -1173,13 +1182,18 @@ try:
     else:
         amount = product.get('floor')
         date = str(product.get('deadline') or '')
-    if not date:
+    fixed = __FIXED_MULTI_OFFERS__
+    if fixed and not date:
         raise ValueError('No source-derived offer date')
     vars['multi_offer_amount'] = amount
     vars['multi_offer_date'] = date
     vars['multi_focus_label'] = str(product.get('label') or pid)
-    vars['multi_offer_text'] = ('For ' + vars['multi_focus_label'] + ', can you pay ' +
-                                format(float(amount), '.2f') + ' on ' + date + '?')
+    vars['multi_fixed_offer'] = 'yes' if fixed else 'no'
+    remainder = ('The rest would stay overdue. ' if float(amount) < float(product.get('past_due') or 0)
+                 and pid in floor_first and stage == 1 else '')
+    vars['multi_offer_text'] = ((remainder + 'For ' + vars['multi_focus_label'] + ', can you pay ' +
+                                 format(float(amount), '.2f') + ' on ' + date + '?') if fixed else '')
+    vars['multi_offer_action'] = 'unclear'
     vars['multi_offer_state'] = 'ready'
 except Exception:
     vars['multi_offer_state'] = 'invalid'
@@ -1450,10 +1464,92 @@ except Exception:
                                                  max_target="multi_advance" if multi_enabled else "prepare_notes")
     nodes["account_discussion"]["on_enter_first_entry_only"] = True
 
+    if multi_enabled:
+        multi_advance_code = (_MULTI_ADVANCE_CODE
+                              .replace("__NOTE_CODES__", repr(note_codes))
+                              .replace("__REFUSAL_REASON__", repr(reason_names.get("refused") or "refused"))
+                              .replace("__PAID_REASON__", repr(reason_names.get("paid") or "paid"))
+                              .replace("__DISPUTE_REASON__", repr(reason_names.get("dispute") or "dispute"))
+                              .replace("__HARDSHIP_REASON__", repr(reason_names.get("hardship") or "hardship")))
+        nodes["multi_advance"] = _code_node("multi_advance", multi_advance_code, "service_unavailable")
+        nodes["multi_advance"]["transitions"] = [
+            _eq("prepare_confirmation", "multi_next", "confirm"),
+            _eq("prepare_notes", "multi_next", "notes"),
+            _eq("multi_select_offer", "multi_next", "offer"),
+            _eq("multi_support", "multi_next", "support"),
+            _eq("multi_clarify", "multi_next", "clarify"),
+            _always("service_unavailable"),
+        ]
+        nodes["multi_select_offer"] = _code_node(
+            "multi_select_offer", _MULTI_OFFER_CODE.replace("__FIXED_MULTI_OFFERS__", repr(fixed_multi_offers)),
+            "service_unavailable")
+        nodes["multi_select_offer"]["transitions"] = [
+            _eq("multi_offer", "multi_offer_state", "ready"), _always("service_unavailable"),
+        ]
+        multi_reply_extraction = [
+            _enum("multi_offer_action", ["accepted", "proposal", "refused", "full_too_much", "paid", "dispute", "hardship",
+                                         "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
+                  "Classify only the latest answer about the current product. accepted means yes to the exact fixed offer just spoken. proposal means the caller gave a new exact amount or date. refused includes a flat no or non-answer. full_too_much means the full amount is explicitly too high. Paid, dispute, hardship and transfer requests take priority."),
+            {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.55,
+             "description": "On a fresh proposal, return a JSON array string of product_id, amount, and the caller's RAW date words. Include every product the caller explicitly covered; leave empty otherwise. For an accepted model-generated offer, repeat the exact offered terms."},
+            {"name": "multi_reply_common_date_words", "type": "string", "min_confidence": 0.55,
+             "description": "Copy a date phrase only when the latest answer explicitly applies that ONE date to all remaining products. Otherwise leave empty."},
+        ]
+        transfer_routes = [
+            _eq("transfer_restructuring", "multi_offer_action", "transfer_restructuring"),
+            _eq("transfer_support", "multi_offer_action", "transfer_support"),
+            _eq("transfer_human", "multi_offer_action", "transfer_human"),
+        ]
+        nodes["multi_offer"] = _conversation(
+            "multi_offer",
+            "Discuss only {{multi_focus_label}} at persuasion attempt {{multi_offer_stage}}. Follow the source policy and the supplied product facts. "
+            "If the fixed offer was spoken on entry, wait for the caller's answer without making another offer. "
+            "If no fixed offer was supplied, make exactly this attempt's source-authorized offer and wait. "
+            "Do not claim a promise is recorded. No tool call is allowed in this node.",
+            opening="{{multi_offer_text}}" if fixed_multi_offers else None,
+            extraction=multi_reply_extraction,
+            transitions=transfer_routes + [_always("multi_advance")],
+            max_turns=3, max_target="multi_advance")
+        nodes["multi_support"] = _conversation(
+            "multi_support", "Give one short sentence of sympathy under the source policy, then offer customer support transfer for {{multi_focus_label}}. "
+            "If declined, continue to the next product without a persuasion attempt. If the caller proposes a date or amount, capture it. No tool call is allowed in this node.",
+            extraction=[_enum("multi_offer_action", ["accepted", "proposal", "refused", "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
+                              "Classify only the latest answer to the support transfer offer for the current product. accepted means yes to the support transfer. proposal means the caller gives their own exact payment amount or date. refused means they decline support. Transfer requests take priority."),
+                        *multi_reply_extraction[1:]],
+            transitions=[_eq("transfer_support", "multi_offer_action", "accepted")] + transfer_routes + [_always("multi_advance")],
+            max_turns=2, max_target="multi_advance")
+        nodes["multi_clarify"] = _conversation(
+            "multi_clarify", "Ask for one exact amount and day for {{multi_focus_label}} under the source policy. "
+            "Do not repeat the previous offer or claim a promise is recorded. No tool call is allowed in this node.",
+            extraction=multi_reply_extraction,
+            transitions=transfer_routes + [_always("multi_advance")],
+            max_turns=2, max_target="multi_advance")
+        nodes["multi_correction"] = _conversation(
+            "multi_correction", "The combined read-back needs a correction. Ask for the exact changed product, amount and day; keep all other proposed terms. "
+            "Do not restart the all-products-today question or repeat persuasion offers. No tool call is allowed in this node.",
+            extraction=[{"name": "multi_corrected_terms_json", "type": "string", "min_confidence": 0.55,
+                         "description": "Return a JSON array string containing only corrected product_id, amount and RAW date words from the latest caller answer. Leave empty if none."},
+                        _enum("multi_correction_action", ["transfer_restructuring", "transfer_support", "transfer_human", "continue"],
+                              "Transfer requests take priority; otherwise continue collecting corrected terms.")],
+            transitions=[_eq("transfer_restructuring", "multi_correction_action", "transfer_restructuring"),
+                         _eq("transfer_support", "multi_correction_action", "transfer_support"),
+                         _eq("transfer_human", "multi_correction_action", "transfer_human"),
+                         _always("multi_revise")],
+            max_turns=3, max_target="multi_revise")
+        nodes["multi_revise"] = _code_node("multi_revise", _MULTI_REVISE_CODE, "multi_correction")
+        nodes["multi_revise"]["transitions"] = [
+            _eq("prepare_confirmation", "multi_next", "confirm"), _always("multi_correction"),
+        ]
+
     nodes["prepare_confirmation"] = _code_node(
         "prepare_confirmation", _PREPARE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
     nodes["prepare_confirmation"]["transitions"] = [
         _eq("confirmation", "proposal_validation_state", "ready"),
+        *([_to("multi_correction", "Correct the combined proposal",
+               _when({"logic": "and", "conditions": [
+                   _check("product_count", "greater_than", 1),
+                   _check("proposal_validation_state", "equals", "invalid"),
+               ]}))] if multi_enabled else []),
         _eq("account_discussion", "proposal_validation_state", "invalid"),
         _always("service_unavailable")]
     nodes["confirmation"] = _conversation(
@@ -1470,10 +1566,21 @@ except Exception:
             _eq("transfer_human", "confirmation_status", "transfer_human"),
             _eq("validate_confirmation", "confirmation_status", "confirmed"),
             _eq("clear_confirmation", "confirmation_status", "changed"),
+            *([_to("multi_correction", "Correct declined combined read-back",
+                   _when({"logic": "and", "conditions": [
+                       _check("product_count", "greater_than", 1),
+                       _check("confirmation_status", "equals", "declined"),
+                   ]}))] if multi_enabled else []),
             _eq("prepare_notes", "confirmation_status", "declined"),
         ],
         max_turns=3, max_target="account_discussion")
     nodes["clear_confirmation"] = _code_node("clear_confirmation", _CLEAR_CONFIRMATION_CODE, "account_discussion")
+    if multi_enabled:
+        nodes["clear_confirmation"]["transitions"] = [
+            _to("multi_correction", "Correct changed combined terms",
+                _when(_check("product_count", "greater_than", 1))),
+            _always("account_discussion"),
+        ]
     # Validation also selects the first write, so a confirmed proposal needs
     # one sandbox call between the caller's yes and create_promise.
     validate_and_select_code = (_VALIDATE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays))
@@ -1482,6 +1589,11 @@ except Exception:
         "validate_confirmation", validate_and_select_code, "account_discussion")
     nodes["validate_confirmation"]["transitions"] = [
         _eq("create_promise_call", "write_state", "promise"),
+        *([_to("multi_correction", "Correct invalid combined terms",
+               _when({"logic": "and", "conditions": [
+                   _check("product_count", "greater_than", 1),
+                   _check("write_state", "equals", "invalid"),
+               ]}))] if multi_enabled else []),
         _eq("account_discussion", "write_state", "invalid"),
         _always("prepare_notes"),
     ]
