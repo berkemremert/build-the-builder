@@ -22,6 +22,13 @@ class ReasonCodeMappingsTests(unittest.TestCase):
                   "| Reason | Close code |\n|---|---|\n| failed | R2 |")
         self.assertEqual("R2", explicit_reason_codes(source, [], ["R1", "R2"])[1]["failed"])
 
+    def test_note_table_and_shared_code_list_validate_each_api_enum(self) -> None:
+        source = ("Reason code list: paid=R1, failed=R2.\n"
+                  "| Reason | Note code |\n|---|---|\n| dispute | N1 |")
+        note, close = explicit_reason_codes(source, ["R1", "N1"], ["R2"])
+        self.assertEqual({"paid": "R1", "dispute": "N1"}, note)
+        self.assertEqual({"failed": "R2"}, close)
+
     def test_conflict_and_wrong_enum_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "Ambiguous close reason"):
             explicit_reason_codes("| Reason | Close code |\n|---|---|\n| failed | R1 |\n| failed | R2 |",
