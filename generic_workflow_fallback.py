@@ -237,6 +237,21 @@ def _result_checks(operation: _Operation) -> list[tuple[tuple[str, ...], object]
             continue
         schema = ((response.get("content") or {}).get("application/json") or {}).get("schema") or {}
         walk(schema)
+        description = str(response.get("description") or "")
+        for path in _schema_paths(schema):
+            if "*" in path:
+                continue
+            name = path[-1]
+            match = re.search(r"\b" + re.escape(name) +
+                              r"\s*[:=]?\s*[`\"']?([A-Za-z0-9_-]+)[`\"']?\s+"
+                              r"(?:means?|indicates?)\s+(?:the\s+)?(?:preview\s+is\s+)?"
+                              r"(?:fine|ok|successful?|accepted|completed?)\b",
+                              description, re.I)
+            if match:
+                field = _schema_at_path(schema, path)
+                raw = match.group(1)
+                checks.append((path, int(raw) if field.get("type") == "integer" and raw.isdecimal()
+                               else raw))
     unique = dict(checks)
     return sorted(unique.items())
 

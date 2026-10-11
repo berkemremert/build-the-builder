@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -47,6 +48,20 @@ class GenericRequestValidationTests(unittest.TestCase):
         self.assertTrue(any("outside OpenAPI enum" in error for error in errors))
         self.assertTrue(any("invented" in error and "absent from OpenAPI" in error for error in errors))
 
+    def test_preview_description_success_code_controls_read_evidence(self):
+        operation = self.spec["paths"]["/read"]["post"]
+        response = operation["responses"]["200"]
+        response["description"] = "responseCode 0 means the preview is fine."
+        response["content"]["application/json"]["schema"]["properties"]["data"] = {
+            "type": "object", "properties": {"responseCode": {"type": "integer"}}}
+        workflow = build_generic_workflow(self.policy, self.spec)
+        read = workflow["nodes"]["service"]["tools"][0]
+        for code, expected in ((7, False), (0, True)):
+            state = {"generic_pending_readAccount": "{}"}
+            result = {"status_code": 200, "data": {"data": {"responseCode": code}, "ok": True}}
+            exec(read["post_process_code"], {"result": result, "vars": state})
+            self.assertEqual(expected, "readAccount" in json.loads(state["generic_read_evidence"]))
+
 
 class GenericWriteSafetyTests(unittest.TestCase):
     def test_successful_send_marker_exposes_guarded_write(self):
@@ -78,7 +93,7 @@ class GenericWriteSafetyTests(unittest.TestCase):
 
         for response, accepted in (({"data": {"bucketX": {}, "bucketY": None}}, True),
                                    ({"data": {"bucketX": {}, "bucketY": {}}}, False)):
-            state = {"generic_read_evidence": __import__("json").dumps({"readPortfolio": {
+            state = {"generic_read_evidence": json.dumps({"readPortfolio": {
                 "request": {}, "response": response}}),
                 "explicit_action_confirmation": "yes", "confirmed_write_action": "sendReport"}
             config = {"url": "https://example.test/send", "body": {"data": {"currencyType": "X"}}}
