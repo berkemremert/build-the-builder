@@ -6,7 +6,7 @@ Use this after the final OpenAPI contract, seeded test data, and deployed mock U
 python3 tools/mock_contract_smoke.py \
   --contract /absolute/path/to/final-openapi.json \
   --cases /absolute/path/to/mock-smoke-cases.json \
-  --base-url https://deployed-worker.example/v1
+  --base-url https://deployed-worker.example
 ```
 
 The base URL points to the server prefix before the OpenAPI paths and must

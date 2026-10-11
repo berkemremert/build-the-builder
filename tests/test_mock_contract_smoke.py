@@ -116,8 +116,8 @@ class MockContractSmokeTests(unittest.TestCase):
             ("post", "/v1/promises"), ("get", "/v1/promises/P-01")])
 
     def test_contract_server_prefix_mismatch_is_rejected(self):
-        result = smoke.run(self.contract, CASES, "http://127.0.0.1:8800")
-        self.assertEqual(result, ["scenario 1 step 1: FAIL contract server URL does not match deployed base URL"])
+        with self.assertRaisesRegex(smoke.SmokeError, "contract server URL does not match"):
+            smoke.run(self.contract, CASES, "http://127.0.0.1:8800")
         self.assertEqual(self.calls, [])
 
     def test_origin_url_uses_contract_paths_verbatim(self):
@@ -127,8 +127,15 @@ class MockContractSmokeTests(unittest.TestCase):
         self.assertEqual(self.calls[0][1], "/v1/customers/SYNTHETIC-CUSTOMER-01")
 
     def test_remote_http_url_is_rejected(self):
-        result = smoke.run(self.contract, CASES, "http://example.invalid/v1")
-        self.assertEqual(result, ["scenario 1 step 1: FAIL remote deployed URL must use HTTPS"])
+        with self.assertRaisesRegex(smoke.SmokeError, "remote deployed URL must use HTTPS"):
+            smoke.run(self.contract, CASES, "http://example.invalid/v1")
+        self.assertEqual(self.calls, [])
+
+    def test_later_operation_server_mismatch_is_rejected_before_any_write(self):
+        operation = self.contract["paths"]["/promises"]["post"]
+        operation["servers"] = [{"url": self.base_url + "/wrong"}]
+        with self.assertRaisesRegex(smoke.SmokeError, "contract server URL does not match"):
+            smoke.run(self.contract, CASES, self.base_url)
         self.assertEqual(self.calls, [])
 
     def test_missing_operation_is_rejected_before_requests(self):

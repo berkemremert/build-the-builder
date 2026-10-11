@@ -191,18 +191,26 @@ def _choose_operation(step: dict, operations: dict[tuple[str, str], Operation]) 
     return operations[key]
 
 
-def _target_url(contract: dict, operation: Operation, base_url: str, path_params: dict) -> str:
+def _validate_base_url(contract: dict, operation: Operation, base_url: str):
     parsed = urlsplit(base_url)
     if (parsed.scheme not in {"https", "http"} or not parsed.hostname or
             parsed.username or parsed.password or parsed.query or parsed.fragment):
         raise SmokeError("deployed URL must be an absolute HTTP URL without query or fragment")
     if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise SmokeError("remote deployed URL must use HTTPS")
-    full = urlsplit(operation_url(contract, operation.path, operation.method))
+    try:
+        full = urlsplit(operation_url(contract, operation.path, operation.method))
+    except ValueError as exc:
+        raise SmokeError("contract server URL is invalid") from exc
     server_prefix = full.path.removesuffix(operation.path)
     if (parsed.scheme != full.scheme or parsed.netloc != full.netloc or
             parsed.path.rstrip("/") != server_prefix.rstrip("/")):
         raise SmokeError("contract server URL does not match deployed base URL")
+    return parsed
+
+
+def _target_url(contract: dict, operation: Operation, base_url: str, path_params: dict) -> str:
+    parsed = _validate_base_url(contract, operation, base_url)
     path = operation.path
     for name in re.findall(r"\{([^{}]+)\}", path):
         if name not in path_params:
@@ -279,6 +287,8 @@ def run(contract: dict, cases: dict, base_url: str, *, timeout: float = 10,
         operations = _operations(contract)
     except (KeyError, TypeError, ValueError) as exc:
         raise SmokeError("contract is not supported OpenAPI JSON") from exc
+    for operation in operations.values():
+        _validate_base_url(contract, operation, base_url)
     scenarios = cases.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise SmokeError("cases need at least one scenario")
