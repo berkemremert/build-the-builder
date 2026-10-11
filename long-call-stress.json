@@ -1,0 +1,505 @@
+[
+  {
+    "id": "LONG-01",
+    "source_case": "PUB-11",
+    "brief": "B",
+    "family": "Long-call state",
+    "level": "hard",
+    "stress_tier": "targeted",
+    "title": "Three product promises with a revised loan read-back",
+    "variables": {
+      "first_name": "Sofia",
+      "last_name": "Almeida",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1987-06-03",
+      "phone_last4": "2288"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "2288",
+        "past_due": 220.0,
+        "days_late": 9,
+        "minimum_payment": 66.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 640.0,
+        "days_late": 9,
+        "instalment_amount": 213.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 75.0,
+        "days_late": 3,
+        "instalment_amount": 25.0
+      }
+    ],
+    "target_caller_turns": 14,
+    "planned_caller_turns": [
+      "After the opening, ask who is calling without yet confirming the named person.",
+      "After the agent answers, confirm: \"Yes, I am Sofia Almeida.\"",
+      "When asked for birth date, say \"3 June\" and stop before the year.",
+      "When asked for the missing year, say \"1987.\"",
+      "When asked for the phone digits, say \"twenty-two\" and stop.",
+      "When asked for the rest, say \"eighty-eight.\"",
+      "After all products are stated, ask whether the credit card ends in 2288.",
+      "Ask the agent to repeat the personal-loan past-due amount.",
+      "Say you cannot pay all three today.",
+      "For the credit card, offer the full 220 on Friday 16 October.",
+      "For the personal loan, offer the full 640 on Tuesday 20 October.",
+      "For the car loan, offer the full 75 on Thursday 22 October.",
+      "At the combined read-back, change only the personal-loan amount and date to 320 on Wednesday 21 October; do not confirm the old terms.",
+      "After the corrected combined read-back, clearly say \"Yes, I confirm those three promises.\""
+    ],
+    "script": "Follow these caller moves in order, one per speaking turn when the relevant topic arises. Answer the agent's actual question; do not volunteer later facts early, combine later moves, or invent a different amount or date. The list is a target, not a reason to keep talking after closure.\n1. After the opening, ask who is calling without yet confirming the named person.\n2. After the agent answers, confirm: \"Yes, I am Sofia Almeida.\"\n3. When asked for birth date, say \"3 June\" and stop before the year.\n4. When asked for the missing year, say \"1987.\"\n5. When asked for the phone digits, say \"twenty-two\" and stop.\n6. When asked for the rest, say \"eighty-eight.\"\n7. After all products are stated, ask whether the credit card ends in 2288.\n8. Ask the agent to repeat the personal-loan past-due amount.\n9. Say you cannot pay all three today.\n10. For the credit card, offer the full 220 on Friday 16 October.\n11. For the personal loan, offer the full 640 on Tuesday 20 October.\n12. For the car loan, offer the full 75 on Thursday 22 October.\n13. At the combined read-back, change only the personal-loan amount and date to 320 on Wednesday 21 October; do not confirm the old terms.\n14. After the corrected combined read-back, clearly say \"Yes, I confirm those three promises.\"",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 220.0,
+          "date": "2026-10-16"
+        },
+        {
+          "product_id": "p2",
+          "amount": 320.0,
+          "date": "2026-10-21"
+        },
+        {
+          "product_id": "p3",
+          "amount": 75.0,
+          "date": "2026-10-22"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Wait for complete birth date and phone digits before each verification tool; disclose account facts only after both pass.",
+      "State all three products before asking for payment, and keep their get_account order and separate terms.",
+      "Supersede the first combined read-back, then obtain one clear confirmation before creating exactly three promises with the corrected loan terms.",
+      "Close as promise after recorded writes; do not invent a fourth product or an unagreed amount."
+    ],
+    "rules": [
+      "A 1-4",
+      "A 11",
+      "A 16-19",
+      "A 27-29",
+      "A 34-38",
+      "B 2-7"
+    ],
+    "style": "pieces"
+  },
+  {
+    "id": "LONG-02",
+    "source_case": "PUB-12",
+    "brief": "B",
+    "family": "Long-call state",
+    "level": "hard",
+    "stress_tier": "targeted",
+    "title": "One revised card promise, current loan payment, and car dispute",
+    "variables": {
+      "first_name": "Marcus",
+      "last_name": "Bell",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1983-10-19",
+      "phone_last4": "4410"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "9015",
+        "past_due": 510.0,
+        "days_late": 16,
+        "minimum_payment": 153.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 1320.0,
+        "days_late": 16,
+        "instalment_amount": 440.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 140.0,
+        "days_late": 7,
+        "instalment_amount": 46.0
+      }
+    ],
+    "target_caller_turns": 14,
+    "planned_caller_turns": [
+      "After the opening, ask whether this is Freya Bank's digital assistant.",
+      "Then confirm: \"Yes, I am Marcus Bell.\"",
+      "When asked for birth date, say \"19 October\" without a year.",
+      "When asked for the year, say \"1983.\"",
+      "When asked for phone digits, say \"forty-four\" and stop.",
+      "When asked for the rest, say \"ten.\"",
+      "After all three products are stated, ask which one is the card ending 9015.",
+      "Say you cannot pay all three today.",
+      "For the credit card, propose the full 510 on Thursday 15 October.",
+      "For the personal loan, say you paid this current past-due 1320 this morning; this is a current payment claim, not a historical closed-account claim.",
+      "Ask when that current payment might appear in the bank records.",
+      "For the car loan, say you never had that product and dispute it.",
+      "At the combined read-back, change only the card promise to 400 on Tuesday 20 October; do not confirm the original 510.",
+      "After the revised card read-back, clearly say \"Yes, I confirm the card promise.\""
+    ],
+    "script": "Follow these caller moves in order, one per speaking turn when the relevant topic arises. Answer the agent's actual question; do not volunteer later facts early, combine later moves, or invent a different amount or date. The list is a target, not a reason to keep talking after closure.\n1. After the opening, ask whether this is Freya Bank's digital assistant.\n2. Then confirm: \"Yes, I am Marcus Bell.\"\n3. When asked for birth date, say \"19 October\" without a year.\n4. When asked for the year, say \"1983.\"\n5. When asked for phone digits, say \"forty-four\" and stop.\n6. When asked for the rest, say \"ten.\"\n7. After all three products are stated, ask which one is the card ending 9015.\n8. Say you cannot pay all three today.\n9. For the credit card, propose the full 510 on Thursday 15 October.\n10. For the personal loan, say you paid this current past-due 1320 this morning; this is a current payment claim, not a historical closed-account claim.\n11. Ask when that current payment might appear in the bank records.\n12. For the car loan, say you never had that product and dispute it.\n13. At the combined read-back, change only the card promise to 400 on Tuesday 20 October; do not confirm the original 510.\n14. After the revised card read-back, clearly say \"Yes, I confirm the card promise.\"",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 400.0,
+          "date": "2026-10-20"
+        }
+      ],
+      "notes": [
+        {
+          "product_id": "p2",
+          "reason": "paid"
+        },
+        {
+          "product_id": "p3",
+          "reason": "dispute"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Keep split security disclosures private until complete and verify before any account facts.",
+      "State all products first; keep the current personal-loan payment claim separate from the disputed car loan.",
+      "Read back the revised 400 card promise and get one confirmation before one create_promise.",
+      "Add paid and dispute notes for their own products only; close as promise."
+    ],
+    "rules": [
+      "A 1-4",
+      "A 11",
+      "A 16-17",
+      "A 27",
+      "A 34-40",
+      "B 2",
+      "B 7-9",
+      "B Closing"
+    ],
+    "style": "pieces"
+  },
+  {
+    "id": "LONG-03",
+    "source_case": "PUB-13",
+    "brief": "B",
+    "family": "Long-call state",
+    "level": "hard",
+    "stress_tier": "targeted",
+    "title": "Common date split by deadline, then corrected card date",
+    "variables": {
+      "first_name": "Elena",
+      "last_name": "Rossi",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1991-01-08",
+      "phone_last4": "6604"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "6604",
+        "past_due": 300.0,
+        "days_late": 4,
+        "minimum_payment": 90.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 900.0,
+        "days_late": 20,
+        "instalment_amount": 300.0
+      }
+    ],
+    "target_caller_turns": 14,
+    "planned_caller_turns": [
+      "After the opening, ask if the call can be verified through the bank customer-service number.",
+      "Confirm: \"Yes, I am Elena Rossi.\"",
+      "When asked for birth date, say \"8 January\" without the year.",
+      "When asked for the year, say \"1991.\"",
+      "When asked for phone digits, say \"sixty-six\" and stop.",
+      "When asked for the rest, say \"zero four.\"",
+      "After both products are stated, ask the agent to repeat the card amount.",
+      "Ask the agent to repeat the personal-loan amount.",
+      "Say you cannot pay both today.",
+      "Offer the full amounts for both products on Friday 30 October.",
+      "Ask why the personal loan cannot use 30 October when the agent gives its earlier deadline.",
+      "Accept the loan's 23 October deadline while leaving the card at 30 October for now.",
+      "At the combined read-back, change only the card date to Tuesday 27 October; the loan remains 23 October.",
+      "After the corrected combined read-back, clearly say \"Yes, I confirm both promises.\""
+    ],
+    "script": "Follow these caller moves in order, one per speaking turn when the relevant topic arises. Answer the agent's actual question; do not volunteer later facts early, combine later moves, or invent a different amount or date. The list is a target, not a reason to keep talking after closure.\n1. After the opening, ask if the call can be verified through the bank customer-service number.\n2. Confirm: \"Yes, I am Elena Rossi.\"\n3. When asked for birth date, say \"8 January\" without the year.\n4. When asked for the year, say \"1991.\"\n5. When asked for phone digits, say \"sixty-six\" and stop.\n6. When asked for the rest, say \"zero four.\"\n7. After both products are stated, ask the agent to repeat the card amount.\n8. Ask the agent to repeat the personal-loan amount.\n9. Say you cannot pay both today.\n10. Offer the full amounts for both products on Friday 30 October.\n11. Ask why the personal loan cannot use 30 October when the agent gives its earlier deadline.\n12. Accept the loan's 23 October deadline while leaving the card at 30 October for now.\n13. At the combined read-back, change only the card date to Tuesday 27 October; the loan remains 23 October.\n14. After the corrected combined read-back, clearly say \"Yes, I confirm both promises.\"",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 300.0,
+          "date": "2026-10-27"
+        },
+        {
+          "product_id": "p2",
+          "amount": 900.0,
+          "date": "2026-10-23"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Answer the customer-service verification question without disclosing the debt before identity passes.",
+      "State both products first and apply each product's deadline to the common-date proposal.",
+      "Keep the loan at 23 October when the card moves to 27 October at read-back; obtain one confirmation before two writes.",
+      "Close as promise with no notes or transfer."
+    ],
+    "rules": [
+      "A 1-4",
+      "A 11",
+      "A 16-20",
+      "A 23",
+      "A 34-38",
+      "A 43",
+      "B 2-7"
+    ],
+    "style": "pieces"
+  },
+  {
+    "id": "LONG-04",
+    "source_case": "PUB-11",
+    "brief": "B",
+    "family": "Long-call state",
+    "level": "hard",
+    "stress_tier": "soak",
+    "title": "Three product promises over extended clarification and read-back",
+    "variables": {
+      "first_name": "Sofia",
+      "last_name": "Almeida",
+      "title": "Ms",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1987-06-03",
+      "phone_last4": "2288"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "2288",
+        "past_due": 220.0,
+        "days_late": 9,
+        "minimum_payment": 66.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 640.0,
+        "days_late": 9,
+        "instalment_amount": 213.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 75.0,
+        "days_late": 3,
+        "instalment_amount": 25.0
+      }
+    ],
+    "target_caller_turns": 25,
+    "planned_caller_turns": [
+      "After the opening, ask who is calling.",
+      "After the agent answers, confirm: \"Yes, I am Sofia Almeida.\"",
+      "When asked for birth date, say \"3 June\" only.",
+      "When asked for the rest of that date, say \"1987.\"",
+      "When asked for phone digits, say \"twenty-two\" only.",
+      "When asked for the remaining digits, say \"eighty-eight.\"",
+      "After verification, ask if the bank customer-service number can verify this call.",
+      "After all products are stated, ask the agent to repeat the three product names in their order.",
+      "Ask which credit-card last four digits the agent has.",
+      "Ask what is past due on the personal loan.",
+      "Ask what is past due on the car loan.",
+      "Say you cannot pay all three today.",
+      "For the credit card, offer the full 220 but do not give a date yet.",
+      "When asked for the card date, give one non-answer: \"I need a moment to check my calendar.\" This is the card's first persuasion attempt, not a second offer.",
+      "Accept the agent's Friday 16 October offer for the full 220 on the credit card; do not ask for another offer.",
+      "For the personal loan, offer the full 640 but do not give a date yet.",
+      "When asked for its date, say Tuesday 20 October.",
+      "Ask whether 20 October is a business day for that loan.",
+      "For the car loan, offer the full 75 but do not give a date yet.",
+      "When asked for its date, say Friday 23 October.",
+      "Ask that the combined read-back keep card, personal loan, then car loan order.",
+      "At the first combined read-back, change only the personal-loan date to Wednesday 21 October; do not confirm the old date.",
+      "Ask the agent to repeat the corrected loan date.",
+      "Ask for the complete corrected combined read-back, including all three amounts.",
+      "After the corrected combined read-back, clearly say \"Yes, I confirm those three promises.\""
+    ],
+    "script": "Follow these caller moves in order, one per speaking turn when the relevant topic arises. Answer the agent's actual question; do not volunteer later facts early, combine later moves, or invent a different amount or date. The list is a target, not a reason to keep talking after closure.\n1. After the opening, ask who is calling.\n2. After the agent answers, confirm: \"Yes, I am Sofia Almeida.\"\n3. When asked for birth date, say \"3 June\" only.\n4. When asked for the rest of that date, say \"1987.\"\n5. When asked for phone digits, say \"twenty-two\" only.\n6. When asked for the remaining digits, say \"eighty-eight.\"\n7. After verification, ask if the bank customer-service number can verify this call.\n8. After all products are stated, ask the agent to repeat the three product names in their order.\n9. Ask which credit-card last four digits the agent has.\n10. Ask what is past due on the personal loan.\n11. Ask what is past due on the car loan.\n12. Say you cannot pay all three today.\n13. For the credit card, offer the full 220 but do not give a date yet.\n14. When asked for the card date, give one non-answer: \"I need a moment to check my calendar.\" This is the card's first persuasion attempt, not a second offer.\n15. Accept the agent's Friday 16 October offer for the full 220 on the credit card; do not ask for another offer.\n16. For the personal loan, offer the full 640 but do not give a date yet.\n17. When asked for its date, say Tuesday 20 October.\n18. Ask whether 20 October is a business day for that loan.\n19. For the car loan, offer the full 75 but do not give a date yet.\n20. When asked for its date, say Friday 23 October.\n21. Ask that the combined read-back keep card, personal loan, then car loan order.\n22. At the first combined read-back, change only the personal-loan date to Wednesday 21 October; do not confirm the old date.\n23. Ask the agent to repeat the corrected loan date.\n24. Ask for the complete corrected combined read-back, including all three amounts.\n25. After the corrected combined read-back, clearly say \"Yes, I confirm those three promises.\"",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 220.0,
+          "date": "2026-10-16"
+        },
+        {
+          "product_id": "p2",
+          "amount": 640.0,
+          "date": "2026-10-21"
+        },
+        {
+          "product_id": "p3",
+          "amount": 75.0,
+          "date": "2026-10-23"
+        }
+      ],
+      "notes": [],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Preserve partial identity answers without calling verify_identity until each answer is complete.",
+      "State all three products before the first payment ask; answer product questions from get_account without mixing amounts or IDs.",
+      "Track each product's amount and date through a corrected combined read-back; obtain one clear confirmation before three create_promise calls.",
+      "Make no extra offer in response to clarification questions; close as promise after successful writes.",
+      "Treat the one card-date non-answer as at most the first late-band persuasion attempt; do not repeat a refused offer or exceed the per-product cap."
+    ],
+    "rules": [
+      "A 1-4",
+      "A 11",
+      "A 16-19",
+      "A 24",
+      "A 29",
+      "A 34-38",
+      "A 43",
+      "B 2-7"
+    ],
+    "style": "pieces"
+  },
+  {
+    "id": "LONG-05",
+    "source_case": "PUB-12",
+    "brief": "B",
+    "family": "Long-call state",
+    "level": "hard",
+    "stress_tier": "soak",
+    "title": "Revised card promise alongside paid and disputed products",
+    "variables": {
+      "first_name": "Marcus",
+      "last_name": "Bell",
+      "title": "Mr",
+      "now": "2026-10-14T11:00"
+    },
+    "identity": {
+      "date_of_birth": "1983-10-19",
+      "phone_last4": "4410"
+    },
+    "products": [
+      {
+        "type": "credit_card",
+        "card_last4": "9015",
+        "past_due": 510.0,
+        "days_late": 16,
+        "minimum_payment": 153.0
+      },
+      {
+        "type": "personal_loan",
+        "past_due": 1320.0,
+        "days_late": 16,
+        "instalment_amount": 440.0
+      },
+      {
+        "type": "car_loan",
+        "past_due": 140.0,
+        "days_late": 7,
+        "instalment_amount": 46.0
+      }
+    ],
+    "target_caller_turns": 25,
+    "planned_caller_turns": [
+      "After the opening, ask who is calling.",
+      "After the agent answers, confirm: \"Yes, I am Marcus Bell.\"",
+      "When asked for birth date, say \"19 October\" only.",
+      "When asked for the year, say \"1983.\"",
+      "When asked for phone digits, say \"forty-four\" only.",
+      "When asked for the remaining digits, say \"ten.\"",
+      "After verification, ask whether you are speaking with a digital assistant.",
+      "After all three products are stated, ask the agent to repeat the product list in bank order.",
+      "Ask which product is the credit card ending 9015.",
+      "Ask what is past due on that credit card.",
+      "Ask how many days late that credit card is, using the account information already stated.",
+      "Say you cannot pay all three products today.",
+      "For the card, propose the full 510, without a date yet.",
+      "When asked for its date, say Friday 16 October.",
+      "Ask whether 16 October is before the card deadline.",
+      "For the personal loan, say you paid the current overdue amount this morning.",
+      "Clarify that this is the current 1320 past-due amount on the personal loan.",
+      "Ask whether that payment could take one business day to appear.",
+      "For the car loan, say the product is not yours.",
+      "Clarify that you never had that car loan; you dispute it.",
+      "Ask the agent to keep the paid loan and disputed car loan separate.",
+      "At the first combined read-back, change only the card amount to 400; do not confirm 510.",
+      "On the revised read-back, change the card date to Tuesday 20 October; do not confirm 16 October.",
+      "Ask the agent to repeat the final card terms and state that the other two products are not promises; do not yet agree to the card terms.",
+      "After that final corrected read-back, clearly say \"Yes, I confirm the card promise.\""
+    ],
+    "script": "Follow these caller moves in order, one per speaking turn when the relevant topic arises. Answer the agent's actual question; do not volunteer later facts early, combine later moves, or invent a different amount or date. The list is a target, not a reason to keep talking after closure.\n1. After the opening, ask who is calling.\n2. After the agent answers, confirm: \"Yes, I am Marcus Bell.\"\n3. When asked for birth date, say \"19 October\" only.\n4. When asked for the year, say \"1983.\"\n5. When asked for phone digits, say \"forty-four\" only.\n6. When asked for the remaining digits, say \"ten.\"\n7. After verification, ask whether you are speaking with a digital assistant.\n8. After all three products are stated, ask the agent to repeat the product list in bank order.\n9. Ask which product is the credit card ending 9015.\n10. Ask what is past due on that credit card.\n11. Ask how many days late that credit card is, using the account information already stated.\n12. Say you cannot pay all three products today.\n13. For the card, propose the full 510, without a date yet.\n14. When asked for its date, say Friday 16 October.\n15. Ask whether 16 October is before the card deadline.\n16. For the personal loan, say you paid the current overdue amount this morning.\n17. Clarify that this is the current 1320 past-due amount on the personal loan.\n18. Ask whether that payment could take one business day to appear.\n19. For the car loan, say the product is not yours.\n20. Clarify that you never had that car loan; you dispute it.\n21. Ask the agent to keep the paid loan and disputed car loan separate.\n22. At the first combined read-back, change only the card amount to 400; do not confirm 510.\n23. On the revised read-back, change the card date to Tuesday 20 October; do not confirm 16 October.\n24. Ask the agent to repeat the final card terms and state that the other two products are not promises; do not yet agree to the card terms.\n25. After that final corrected read-back, clearly say \"Yes, I confirm the card promise.\"",
+    "expected": {
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 400.0,
+          "date": "2026-10-20"
+        }
+      ],
+      "notes": [
+        {
+          "product_id": "p2",
+          "reason": "paid"
+        },
+        {
+          "product_id": "p3",
+          "reason": "dispute"
+        }
+      ],
+      "callbacks": [],
+      "transfers": []
+    },
+    "checks": [
+      "Preserve split security answers until complete and reveal no account facts before both checks pass.",
+      "State all three products before asking for payment; keep the current payment claim and car-loan dispute attached to their own products.",
+      "Treat both card read-back changes as superseding, and obtain one clear confirmation only after the final 400 on 20 October terms.",
+      "Create one card promise and add only the paid and dispute notes; close as promise."
+    ],
+    "rules": [
+      "A 1-4",
+      "A 11",
+      "A 16-19",
+      "A 24",
+      "A 27",
+      "A 34-40",
+      "B 2",
+      "B 7-9",
+      "B Closing"
+    ],
+    "style": "pieces"
+  }
+]
