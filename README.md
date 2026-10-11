@@ -7,8 +7,8 @@ The original version 3 kit README and challenge rules are preserved verbatim in 
 ## Requirements and credentials
 
 - Python **3.10 or newer**. The builder, Freya client, public runner, and offline tests use the Python standard library; there is no package installation step for this builder.
-- `OPENAI_API_KEY` with access to `gpt-6-sol`. **Every builder run**, including `--no-live`, sends the supplied brief text and complete OpenAPI JSON directly to the OpenAI Responses API for policy extraction. The request is billed to this key. The builder requests medium reasoning, JSON output, and `store=false`; it fails if extraction is unavailable or invalid.
-- `FREYA_API_KEY` for live save and export. Set a stable `FREYA_BANK_TEAM_KEY` of at least 16 characters for public practice simulations. Freya supplies the phone agent's model, configured in [freya.py](freya.py); OpenAI is used by the builder for policy extraction.
+- `OPENROUTER_API_KEY` for policy extraction. **Every builder run**, including `--no-live`, sends the supplied brief text and complete OpenAPI JSON to OpenRouter's chat completions API. The default model is `openai/gpt-6-sol`; set `OPENROUTER_MODEL` to override it. The builder requests medium reasoning and JSON output. It does not use `OPENAI_API_KEY` or call the direct OpenAI API.
+- `FREYA_API_KEY` for live save and export. Set a stable `FREYA_BANK_TEAM_KEY` of at least 16 characters for public practice simulations. Freya supplies the phone agent's model, configured in [freya.py](freya.py).
 
 From the repository root, copy the example shell settings and fill in your own keys locally:
 
@@ -35,7 +35,7 @@ python3 builder.py --brief briefs/brief-a.md --openapi tools/openapi.json --slot
 python3 builder.py --brief briefs/brief-a.md --brief briefs/brief-b.md --openapi tools/openapi.json --slot public-b --out out/public-b
 ```
 
-Live mode validates with Freya, saves and publishes the agent, exports it, and automatically runs the matching public practice cases when `FREYA_BANK_TEAM_KEY` is set. The builder enforces a 30-minute limit per run. `--no-test` skips that automatic simulation while retaining live save and export. `--no-live` creates local artifacts without contacting Freya; it **still calls OpenAI**, and its workflow JSON is not a Freya export. Without `FREYA_API_KEY`, the builder likewise writes local output without a live export. Run `python3 builder.py --help` for the current options.
+Live mode validates with Freya, saves and publishes the agent, exports it, and automatically runs the matching public practice cases when `FREYA_BANK_TEAM_KEY` is set. The builder enforces a 30-minute limit per run. `--no-test` skips that automatic simulation while retaining live save and export. `--no-live` creates local artifacts without contacting Freya; it **still calls OpenRouter**, and its workflow JSON is not a Freya export. Without `FREYA_API_KEY`, the builder likewise writes local output without a live export. Run `python3 builder.py --help` for the current options.
 
 The builder prints a JSON summary with paths and, in live mode, `workflow_id` and `agent_id`. In `{output_dir}`, look for:
 
@@ -51,7 +51,7 @@ The `out/` directory is ignored by Git. Copy the chosen live exports and traces 
 
 ## Verify locally and on the public cases
 
-Offline tests make no OpenAI or Freya calls:
+Offline tests make no OpenRouter or Freya calls:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v

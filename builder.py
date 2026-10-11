@@ -40,9 +40,7 @@ from policy_compiler import compile_policy
 
 MAX_BUILD_SECONDS = 30 * 60
 MODEL_TIMEOUT_SECONDS = 900
-OPENAI_URL = "https://api.openai.com/v1/responses"
-OPENAI_MODEL = "gpt-6-sol"
-OPENAI_MAX_OUTPUT_TOKENS = 25_000
+MODEL_MAX_OUTPUT_TOKENS = 25_000
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = "openai/gpt-6-sol"
 KIT = Path(__file__).resolve().parent
@@ -51,8 +49,7 @@ _SECRET_PATTERN = re.compile(r"(?:\bfak_[A-Za-z0-9_-]+\b|\bsk-[A-Za-z0-9_-]+\b|\
 
 def redact(value: Any) -> Any:
     if isinstance(value, str):
-        for key in ("FREYA_API_KEY", "FREYA_BANK_TEAM_KEY", "OPENAI_API_KEY",
-                    "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        for key in ("FREYA_API_KEY", "FREYA_BANK_TEAM_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
             secret = os.environ.get(key)
             if secret:
                 value = value.replace(secret, "[REDACTED]")
@@ -450,21 +447,6 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _openai_response(payload: dict[str, Any], key: str, timeout: float) -> dict[str, Any]:
-    request = urllib.request.Request(
-        OPENAI_URL,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + key,
-            "Content-Type": "application/json",
-            "User-Agent": "build-the-builder/1.0",
-        },
-        method="POST",
-    )
-    with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
-        return json.load(response)
-
-
 def _openrouter_response(payload: dict[str, Any], key: str, timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(
         OPENROUTER_URL,
@@ -486,25 +468,16 @@ class _ModelResponseError(RuntimeError):
         self.status = status
 
 
-class _PrimaryUnavailable(RuntimeError):
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason = reason
-
-
-def _openrouter_fallback(trace: Trace, started: float, prompt: str, purpose: str,
-                         reason: str) -> str:
+def _openrouter_call(trace: Trace, started: float, prompt: str, purpose: str) -> str:
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not key:
         trace.write("model_unavailable", provider="openrouter", reason="OPENROUTER_API_KEY is missing")
-        raise RuntimeError("OPENROUTER_API_KEY is required when the primary policy model is unavailable")
+        raise RuntimeError("OPENROUTER_API_KEY is required for policy extraction")
     model = os.environ.get("OPENROUTER_MODEL", "").strip() or OPENROUTER_MODEL
-    trace.write("model_fallback", primary_provider="openai", provider="openrouter",
-                reason=reason, requested_model=model)
     begun = time.monotonic()
     trace.write("model_call_start", model=model, requested_model=model, provider="openrouter",
-                purpose=purpose, max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
-                reasoning_effort="medium", fallback_reason=reason)
+                purpose=purpose, max_output_tokens=MODEL_MAX_OUTPUT_TOKENS,
+                reasoning_effort="medium")
     status = "failed"
     actual_model = None
     response_id = None
@@ -517,7 +490,7 @@ def _openrouter_fallback(trace: Trace, started: float, prompt: str, purpose: str
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
             "reasoning": {"effort": "medium"},
-            "max_completion_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+            "max_completion_tokens": MODEL_MAX_OUTPUT_TOKENS,
             "stream": False,
         }
         response = _openrouter_response(payload, key, min(MODEL_TIMEOUT_SECONDS, _remaining(started)))
@@ -559,7 +532,7 @@ def _openrouter_fallback(trace: Trace, started: float, prompt: str, purpose: str
         output_details = (usage.get("completion_tokens_details")
                           if isinstance(usage.get("completion_tokens_details"), dict) else {})
         trace.write("model_call_end", model=model, requested_model=model, actual_model=actual_model,
-                    provider="openrouter", purpose=purpose, status=status, fallback_reason=reason,
+                    provider="openrouter", purpose=purpose, status=status,
                     seconds=round(time.monotonic() - begun, 3), response_id=response_id,
                     finish_reason=finish_reason, http_status=http_status,
                     input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
@@ -567,104 +540,11 @@ def _openrouter_fallback(trace: Trace, started: float, prompt: str, purpose: str
 
 
 def _model_caller(trace: Trace, started: float):
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
-
+    """Use OpenRouter exclusively for source and policy model calls."""
     def call(prompt: str, *, purpose: str) -> str:
-        begun = time.monotonic()
-        trace.write("model_call_start", model=OPENAI_MODEL, requested_model=OPENAI_MODEL,
-                    provider="openai", purpose=purpose, max_output_tokens=OPENAI_MAX_OUTPUT_TOKENS,
-                    reasoning_effort="medium")
-        actual_model = None
-        response_id = None
-        response_status = None
-        incomplete_reason = None
-        usage: dict[str, Any] = {}
-        status = "failed"
-        http_status = None
-        try:
-            payload = {
-                "model": OPENAI_MODEL,
-                "input": [{"role": "user", "content": prompt}],
-                "text": {"format": {"type": "json_object"}},
-                "reasoning": {"effort": "medium"},
-                "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
-                "store": False,
-                "stream": False,
-            }
-            response = _openai_response(payload, key, min(MODEL_TIMEOUT_SECONDS, _remaining(started)))
-            if not isinstance(response, dict) or response.get("error"):
-                raise _ModelResponseError("invalid_response", "OpenAI returned an error or invalid response")
-            response_id = response.get("id") if isinstance(response.get("id"), str) else None
-            actual_model = response.get("model")
-            if not isinstance(actual_model, str) or not actual_model:
-                raise _ModelResponseError("invalid_response", "OpenAI did not identify the model")
-            usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
-            response_status = response.get("status")
-            details = response.get("incomplete_details")
-            if isinstance(details, dict):
-                incomplete_reason = details.get("reason")
-            if response_status != "completed":
-                raise _ModelResponseError("incomplete", f"OpenAI policy response did not complete ({response_status or 'unknown'}; {incomplete_reason or 'no reason'})")
-            output = response.get("output")
-            if not isinstance(output, list):
-                raise _ModelResponseError("invalid_response", "OpenAI returned no output items")
-            parts = []
-            for item in output:
-                if not isinstance(item, dict) or item.get("type") != "message":
-                    continue
-                for content in item.get("content") or []:
-                    if isinstance(content, dict) and content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                        parts.append(content["text"])
-            text = "".join(parts)
-            if not text.strip():
-                raise _ModelResponseError("empty", "OpenAI returned no policy text")
-            status = "ok"
-            return text
-        except _ModelResponseError as error:
-            status = error.status
-            raise
-        except urllib.error.HTTPError as error:
-            status = "http_error"
-            http_status = error.code
-            error.close()
-            if error.code == 429 or 500 <= error.code <= 599:
-                raise _PrimaryUnavailable(f"openai_http_{error.code}",
-                                          f"OpenAI HTTP {error.code} during policy extraction") from error
-            raise RuntimeError(f"OpenAI HTTP {error.code} during policy extraction") from error
-        except (TimeoutError, ConnectionError) as error:
-            status = "timeout" if isinstance(error, TimeoutError) else "network_error"
-            raise _PrimaryUnavailable(f"openai_{status}", f"OpenAI policy request {status}") from error
-        except urllib.error.URLError as error:
-            status = "network_error"
-            raise _PrimaryUnavailable("openai_network_error",
-                                      "OpenAI policy request failed on the network") from error
-        except (ValueError, TypeError) as error:
-            status = "invalid_response"
-            raise RuntimeError("OpenAI returned malformed response JSON") from error
-        finally:
-            output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
-            trace.write("model_call_end", model=OPENAI_MODEL, requested_model=OPENAI_MODEL,
-                        actual_model=actual_model, provider="openai", purpose=purpose, status=status,
-                        seconds=round(time.monotonic() - begun, 3), response_id=response_id,
-                        response_status=response_status, incomplete_reason=incomplete_reason,
-                        http_status=http_status, input_tokens=usage.get("input_tokens"),
-                        output_tokens=usage.get("output_tokens"),
-                        reasoning_tokens=output_details.get("reasoning_tokens"))
+        return _openrouter_call(trace, started, prompt, purpose)
 
-    def call_with_backup(prompt: str, *, purpose: str) -> str:
-        if not key:
-            trace.write("model_unavailable", provider="openai", reason="OPENAI_API_KEY is missing")
-            if not os.environ.get("OPENROUTER_API_KEY", "").strip():
-                raise RuntimeError("OPENAI_API_KEY or OPENROUTER_API_KEY is required for policy extraction")
-            return _openrouter_fallback(trace, started, prompt, purpose, "openai_key_missing")
-        try:
-            return call(prompt, purpose=purpose)
-        except _PrimaryUnavailable as error:
-            if not os.environ.get("OPENROUTER_API_KEY", "").strip():
-                raise RuntimeError(str(error)) from error
-            return _openrouter_fallback(trace, started, prompt, purpose, error.reason)
-
-    return call_with_backup
+    return call
 
 
 def _practice_brief(paths: list[Path]) -> str | None:

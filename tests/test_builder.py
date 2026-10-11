@@ -220,60 +220,59 @@ class BuilderAcceptanceTests(unittest.TestCase):
                       (Path(args.out) / "invalid-contract.trace.jsonl").read_text().splitlines()]
             self.assertEqual("failed", events[-1]["status"])
 
-    def test_openai_trace_and_request_do_not_expose_prompt_or_key(self) -> None:
+    def test_openrouter_trace_and_request_do_not_expose_prompt_or_key(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-model-trace-") as directory:
             trace = builder.Trace(Path(directory) / "trace.jsonl", time.monotonic())
-            key = "sk-OFFLINE_TEST_SECRET"
-            response = {"id": "resp_offline", "model": "gpt-6-sol", "status": "completed",
-                        "output": [{"type": "reasoning"}, {"type": "message", "content": [
-                            {"type": "output_text", "text": "{\"global_rules\": \"ok\"}"}]}],
-                        "usage": {"input_tokens": 12, "output_tokens": 30,
-                                  "output_tokens_details": {"reasoning_tokens": 10}}}
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": key}, clear=True), \
-                 mock.patch.object(builder, "_openai_response", return_value=response) as api:
+            key = "sk-or-OFFLINE_TEST_SECRET"
+            response = {"id": "gen_offline", "model": "openai/gpt-6-sol",
+                        "choices": [{"message": {"content": "{\"global_rules\": \"ok\"}"},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 30,
+                                  "completion_tokens_details": {"reasoning_tokens": 10}}}
+            with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": key,
+                                              "OPENAI_API_KEY": "unused-direct-key"}, clear=True), \
+                 mock.patch.object(builder, "_openrouter_response", return_value=response) as api:
                 caller = builder._model_caller(trace, trace.started)
                 self.assertEqual('{"global_rules": "ok"}', caller("private prompt text", purpose="compile bank brief"))
             payload, sent_key, timeout = api.call_args.args
             self.assertEqual(key, sent_key)
-            self.assertEqual("gpt-6-sol", payload["model"])
+            self.assertEqual("openai/gpt-6-sol", payload["model"])
             self.assertEqual({"effort": "medium"}, payload["reasoning"])
-            self.assertEqual({"format": {"type": "json_object"}}, payload["text"])
-            self.assertEqual(25000, payload["max_output_tokens"])
-            self.assertIs(False, payload["store"])
+            self.assertEqual({"type": "json_object"}, payload["response_format"])
+            self.assertEqual(25000, payload["max_completion_tokens"])
             self.assertIs(False, payload["stream"])
-            self.assertEqual("private prompt text", payload["input"][0]["content"])
+            self.assertEqual("private prompt text", payload["messages"][0]["content"])
             self.assertEqual(900, timeout)
             trace_text = trace.path.read_text(encoding="utf-8")
             self.assertNotIn("private prompt text", trace_text)
             self.assertNotIn(key, trace_text)
             rows = [json.loads(line) for line in trace_text.splitlines()]
             self.assertEqual(["model_call_start", "model_call_end"], [row["event"] for row in rows])
-            self.assertEqual("compile bank brief", rows[0]["purpose"])
-            self.assertEqual("gpt-6-sol", rows[1]["requested_model"])
-            self.assertEqual("gpt-6-sol", rows[1]["actual_model"])
+            self.assertEqual("openrouter", rows[1]["provider"])
+            self.assertEqual("openai/gpt-6-sol", rows[1]["actual_model"])
             self.assertEqual("ok", rows[1]["status"])
             self.assertEqual((12, 30, 10), (rows[1]["input_tokens"], rows[1]["output_tokens"], rows[1]["reasoning_tokens"]))
 
-    def test_openai_transport_uses_direct_responses_endpoint(self) -> None:
-        payload = {"model": "gpt-6-sol", "input": "offline"}
+    def test_openrouter_transport_uses_only_chat_completions_endpoint(self) -> None:
+        payload = {"model": "openai/gpt-6-sol", "messages": [{"role": "user", "content": "offline"}]}
         opener = mock.Mock()
-        opener.open.return_value = io.BytesIO(b'{"status":"completed"}')
+        opener.open.return_value = io.BytesIO(b'{"choices":[]}')
         with mock.patch.object(builder.urllib.request, "build_opener", return_value=opener):
-            result = builder._openai_response(payload, "sk-offline", 900)
-        self.assertEqual("completed", result["status"])
+            result = builder._openrouter_response(payload, "sk-or-offline", 900)
+        self.assertEqual([], result["choices"])
         request = opener.open.call_args.args[0]
-        self.assertEqual("https://api.openai.com/v1/responses", request.full_url)
+        self.assertEqual("https://openrouter.ai/api/v1/chat/completions", request.full_url)
         self.assertEqual("POST", request.get_method())
         self.assertEqual(payload, json.loads(request.data))
-        self.assertEqual("Bearer sk-offline", request.get_header("Authorization"))
+        self.assertEqual("Bearer sk-or-offline", request.get_header("Authorization"))
         self.assertEqual(900, opener.open.call_args.kwargs["timeout"])
 
-    def test_missing_both_model_keys_fails_without_cli_fallback(self) -> None:
+    def test_missing_openrouter_key_fails_without_cli_fallback(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-no-key-") as directory:
             out = Path(directory) / "out"
             env = os.environ.copy()
             env["PATH"] = ""
-            env.pop("OPENAI_API_KEY", None)
+            env["OPENAI_API_KEY"] = "unused-direct-key"
             env.pop("OPENROUTER_API_KEY", None)
             command = [sys.executable, str(ROOT / "builder.py"), "--brief", str(ROOT / "briefs/brief-a.md"),
                        "--openapi", str(ROOT / "tools/openapi.json"), "--slot", "missing-key",
@@ -281,7 +280,7 @@ class BuilderAcceptanceTests(unittest.TestCase):
             completed = subprocess.run(command, cwd=ROOT, env=env, capture_output=True,
                                        text=True, timeout=30, check=False)
             self.assertEqual(1, completed.returncode)
-            self.assertIn("OPENAI_API_KEY or OPENROUTER_API_KEY is required", completed.stderr)
+            self.assertIn("OPENROUTER_API_KEY is required", completed.stderr)
             rows = [json.loads(line) for line in (out / "missing-key.trace.jsonl").read_text().splitlines()]
             self.assertIn("model_unavailable", [row["event"] for row in rows])
             self.assertEqual("failed", rows[-1]["status"])
@@ -317,35 +316,34 @@ class BuilderAcceptanceTests(unittest.TestCase):
                 self.assertIn("workflow_written", {row["event"] for row in events})
                 self.assertIn("freya_skipped", {row["event"] for row in events})
 
-    def test_incomplete_and_empty_openai_responses_fail_clearly(self) -> None:
+    def test_incomplete_and_empty_openrouter_responses_fail_clearly(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-model-errors-") as directory:
             for label, response, expected in (
-                ("incomplete", {"model": "gpt-6-sol", "status": "incomplete",
-                                "incomplete_details": {"reason": "max_output_tokens"}, "output": []},
-                 "did not complete"),
-                ("empty", {"model": "gpt-6-sol", "status": "completed", "output": []},
-                 "no policy text"),
+                ("incomplete", {"model": "openai/gpt-6-sol", "choices": [{
+                    "message": {"content": "{}"}, "finish_reason": "length"}]}, "token limit"),
+                ("empty", {"model": "openai/gpt-6-sol", "choices": [{
+                    "message": {"content": ""}, "finish_reason": "stop"}]}, "no policy text"),
             ):
                 trace = builder.Trace(Path(directory) / f"{label}.trace.jsonl", time.monotonic())
-                with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-offline"}, clear=True), \
-                     mock.patch.object(builder, "_openai_response", return_value=response) as api:
+                with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-offline"}, clear=True), \
+                     mock.patch.object(builder, "_openrouter_response", return_value=response) as api:
                     caller = builder._model_caller(trace, trace.started)
                     with self.assertRaisesRegex(RuntimeError, expected):
                         caller("private prompt", purpose="compile bank brief")
                 api.assert_called_once()
                 rows = [json.loads(line) for line in trace.path.read_text().splitlines()]
                 self.assertEqual(label, rows[-1]["status"])
-                self.assertEqual("gpt-6-sol", rows[-1]["actual_model"])
+                self.assertEqual("openai/gpt-6-sol", rows[-1]["actual_model"])
 
-    def test_openai_http_error_trace_does_not_expose_key(self) -> None:
+    def test_openrouter_http_error_trace_does_not_expose_key(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-http-error-") as directory:
             trace = builder.Trace(Path(directory) / "trace.jsonl", time.monotonic())
-            key = "sk-OFFLINE_HTTP_SECRET"
-            error = urllib.error.HTTPError(builder.OPENAI_URL, 403, key, None, io.BytesIO(b""))
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": key}, clear=True), \
-                 mock.patch.object(builder, "_openai_response", side_effect=error):
+            key = "sk-or-OFFLINE_HTTP_SECRET"
+            error = urllib.error.HTTPError(builder.OPENROUTER_URL, 403, key, None, io.BytesIO(b""))
+            with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": key}, clear=True), \
+                 mock.patch.object(builder, "_openrouter_response", side_effect=error):
                 caller = builder._model_caller(trace, trace.started)
-                with self.assertRaisesRegex(RuntimeError, "OpenAI HTTP 403"):
+                with self.assertRaisesRegex(RuntimeError, "OpenRouter HTTP 403"):
                     caller("private prompt", purpose="compile bank brief")
             error.close()
             text = trace.path.read_text()
@@ -361,11 +359,10 @@ class BuilderAcceptanceTests(unittest.TestCase):
             args = argparse.Namespace(brief=[str(ROOT / "briefs/brief-a.md")],
                                       openapi=str(ROOT / "tools/openapi.json"),
                                       slot="invalid", out=str(out), no_live=True, no_test=True)
-            response = {"model": "gpt-6-sol", "status": "completed",
-                        "output": [{"type": "message", "content": [
-                            {"type": "output_text", "text": "{\"global_rules\": \"only one key\"}"}]}]}
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-offline"}, clear=True), \
-                 mock.patch.object(builder, "_openai_response", return_value=response):
+            response = {"model": "openai/gpt-6-sol", "choices": [{"message": {
+                "content": "{\"global_rules\": \"only one key\"}"}, "finish_reason": "stop"}]}
+            with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-offline"}, clear=True), \
+                 mock.patch.object(builder, "_openrouter_response", return_value=response):
                 with self.assertRaisesRegex(ValueError, "omitted keys"):
                     builder.run(args)
             self.assertFalse((out / "invalid.policy.json").exists())
