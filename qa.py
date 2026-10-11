@@ -6,6 +6,7 @@ preflight check, not a substitute for the API dry run or a scored simulation.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -106,6 +107,50 @@ def _condition_variables(condition) -> set[str]:
         return set().union(*(_condition_variables(child) for child in children))
     variable = condition.get("variable")
     return {variable} if isinstance(variable, str) else set()
+
+
+def _enum_code_write_errors(nodes: dict) -> list[str]:
+    """Catch literal code writes that violate an extracted variable's enum."""
+    enums: dict[str, set[str]] = {}
+    for node in nodes.values():
+        if not isinstance(node, dict):
+            continue
+        schema = node.get("extraction_schema", [])
+        for field in schema if isinstance(schema, list) else []:
+            if isinstance(field, dict) and isinstance(field.get("name"), str) and field.get("enum_values"):
+                enums.setdefault(field["name"], set()).update(str(value) for value in field["enum_values"])
+    errors = []
+    for name, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        actions = node.get("pre_actions", [])
+        for action in actions if isinstance(actions, list) else []:
+            fn = action.get("function") if isinstance(action, dict) else None
+            if not isinstance(fn, dict) or fn.get("handler") != "__function__:code_exec":
+                continue
+            params = fn.get("parameters")
+            props = params.get("properties") if isinstance(params, dict) else None
+            code_field = props.get("code") if isinstance(props, dict) else None
+            code = code_field.get("default") if isinstance(code_field, dict) else None
+            if not isinstance(code, str):
+                continue
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                continue  # Existing code syntax validation reports this separately.
+            for statement in ast.walk(tree):
+                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Constant):
+                    continue
+                value = statement.value.value
+                if not isinstance(value, str):
+                    continue
+                for target in statement.targets:
+                    if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and
+                            target.value.id == "vars" and isinstance(target.slice, ast.Constant)):
+                        key = target.slice.value
+                        if key in enums and value not in enums[key]:
+                            errors.append(f"workflow.nodes.{name}: code writes {key}={value!r} outside extraction enum {sorted(enums[key])}")
+    return errors
 
 
 def _condition_requires(condition, variable: str, operator: str, operand: str) -> bool:
@@ -223,6 +268,7 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
     for name in nodes.keys() & globals_.keys():
         errors.append(f"node {name!r} appears in both nodes and global_nodes")
     all_nodes = {**nodes, **globals_}
+    errors.extend(_enum_code_write_errors(all_nodes))
 
     for key in ("system_prompt",):
         if key in workflow and not isinstance(workflow[key], str):

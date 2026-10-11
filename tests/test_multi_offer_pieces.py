@@ -191,6 +191,48 @@ class MultiOfferPiecesTests(unittest.TestCase):
                          (terms["p1"]["amount"], terms["p2"]["amount"], terms["p3"]["amount"]))
         self.assertEqual({}, json.loads(state["multi_partial_terms_json"]))
 
+    def test_invalid_extracted_amount_retains_caller_date_for_full_amount_offer(self) -> None:
+        state = self.prepared()
+        # Caller: "I will pay the credit card tomorrow." The extractor's
+        # amount field contains the PRODUCT LABEL, not a payment amount.
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"credit card",'
+                                                '"date":"tomorrow"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(("p1", "1", "clarify"),
+                         (state["multi_focus_product_id"], state["multi_offer_stage"], state["multi_next"]))
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertEqual({"product_id": "p1", "date": "tomorrow"},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertIn("510.00", state["multi_clarify_prompt"])
+        self.assertIn("tomorrow", state["multi_clarify_prompt"])
+        self.assertEqual("no", state["multi_reply_date_spoken"])
+        self.assertEqual("no", state["multi_fixed_offer_accepted"])
+        self.assertNotIn("pending_promises_json", state)
+
+        # The assistant proposes the full account amount on the retained day.
+        # Only the caller's clear acceptance advances to combined confirmation.
+        state.update({"multi_offer_action": "accepted", "multi_fixed_offer_accepted": "yes",
+                      "multi_reply_date_spoken": "no", "multi_reply_terms_json": ""})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("p2", state["multi_focus_product_id"])
+        self.assertEqual({"product_id": "p1", "amount": 510.0, "date": "tomorrow"},
+                         json.loads(state["multi_terms_json"])["p1"])
+        self.assertNotIn("pending_promises_json", state)
+
+    def test_date_slot_can_merge_a_later_valid_customer_amount(self) -> None:
+        state = self.prepared()
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"credit card",'
+                                                '"date":"tomorrow"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "no",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":400}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual({"product_id": "p1", "amount": 400.0, "date": "tomorrow"},
+                         json.loads(state["multi_terms_json"])["p1"])
+        self.assertEqual("p2", state["multi_focus_product_id"])
+
     def test_paid_claim_wins_over_same_turn_question(self) -> None:
         state = self.prepared()
         state.update({"multi_offer_action": "paid", "multi_offer_fact_question": "yes",

@@ -1598,15 +1598,21 @@ try:
             pid = resolve_pid(item.get('product_id'), fallback_pid)
             if pid not in product_by_id or pid in notes:
                 continue
-            date = str(item.get('date_phrase') or item.get('date_words') or item.get('raw_date') or item.get('date') or '').strip()
+            saved = partial.get(pid, {})
+            spoken_date = str(item.get('date_phrase') or item.get('date_words') or item.get('raw_date') or item.get('date') or '').strip()
             if latest_reply and str(vars.get('multi_reply_date_spoken') or '') != 'yes':
-                date = ''
+                spoken_date = ''
+            date = spoken_date or str(saved.get('date') or '')
             supplied_amount = item.get('amount')
             if supplied_amount is None or str(supplied_amount).strip() == '':
-                amount = partial.get(pid, {}).get('amount', float(product_by_id[pid].get('past_due') or 0))
+                amount = saved.get('amount')
+                if amount is None and not latest_reply:
+                    amount = float(product_by_id[pid].get('past_due') or 0)
             else:
                 amount = resolve_amount(supplied_amount, product_by_id[pid])
             if amount is None:
+                if spoken_date:
+                    partial[pid] = dict(product_id=pid, date=spoken_date)
                 continue
             if not date:
                 if supplied_amount is not None and str(supplied_amount).strip():
@@ -1707,7 +1713,13 @@ try:
             elif not add_terms(vars.get('multi_reply_terms_json') or '', pid, True):
                 next_step = 'clarify'
         elif action == 'accepted' and phase == 'clarify' and str(vars.get('multi_reply_date_spoken') or '') != 'yes':
-            next_step = 'clarify'
+            saved = partial.get(pid, {})
+            if (saved.get('date') and str(vars.get('multi_fixed_offer_accepted') or '') == 'yes'):
+                due = float(product_by_id[pid].get('past_due') or 0)
+                terms[pid] = dict(product_id=pid, amount=due, date=saved['date'])
+                partial.pop(pid, None)
+            else:
+                next_step = 'clarify'
         elif action in ('proposal', 'accepted'):
             common = str(vars.get('multi_reply_common_date_words') or '').strip()
             if common and str(vars.get('multi_reply_date_spoken') or '') == 'yes':
@@ -1759,8 +1771,8 @@ try:
         vars['multi_reply_notes_json'] = ''
         vars['multi_reply_common_date_words'] = ''
         vars['multi_reply_product_id'] = ''
-        vars['multi_reply_date_spoken'] = ''
-        vars['multi_fixed_offer_accepted'] = ''
+        vars['multi_reply_date_spoken'] = 'no'
+        vars['multi_fixed_offer_accepted'] = 'no'
     unresolved = [(index, str(item.get('product_id') or '')) for index, item in enumerate(products)
                   if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
     if next_step == 'service_error':
@@ -1770,8 +1782,12 @@ try:
         vars['multi_next'] = next_step
         if next_step == 'clarify' and pid in product_by_id:
             label = str(product_by_id[pid].get('label') or pid)
-            vars['multi_clarify_prompt'] = ('What exact day would you pay ' + label + '?' if pid in partial else
-                                            'What exact day would you make this payment for ' + label + '?')
+            saved = partial.get(pid, {})
+            vars['multi_clarify_prompt'] = (
+                'Can you pay the full ' + format(float(product_by_id[pid].get('past_due') or 0), '.2f') +
+                ' for ' + label + ' on ' + str(saved['date']) + '?' if saved.get('date') and 'amount' not in saved else
+                'What exact day would you pay ' + label + '?' if saved.get('amount') is not None else
+                'What exact day would you make this payment for ' + label + '?')
         if next_step != 'disclosure':
             vars['multi_offer_action'] = 'unclear'
     elif next_step == 'offer' and pid in product_by_id and pid not in terms and pid not in notes:
@@ -1787,7 +1803,12 @@ try:
         if focus in partial:
             vars['multi_phase'] = 'clarify'
             vars['multi_next'] = 'clarify'
-            vars['multi_clarify_prompt'] = 'What exact day would you pay ' + str(product_by_id[focus].get('label') or focus) + '?'
+            saved = partial[focus]
+            label = str(product_by_id[focus].get('label') or focus)
+            vars['multi_clarify_prompt'] = (
+                'Can you pay the full ' + format(float(product_by_id[focus].get('past_due') or 0), '.2f') +
+                ' for ' + label + ' on ' + str(saved['date']) + '?' if saved.get('date') and 'amount' not in saved else
+                'What exact day would you pay ' + label + '?')
         if phase == 'initial' and not terms and not notes and disclosure in ('incomplete', 'hardship'):
             vars['multi_focus_label'] = str(product_by_id[focus].get('label') or focus)
             vars['multi_phase'] = 'disclosure' if disclosure == 'incomplete' else 'support'
@@ -2688,13 +2709,13 @@ except Exception:
         multi_reply_extraction = [
             _enum("multi_offer_action", ["accepted", "proposal", "refused", "full_too_much", "paid", "dispute", "hardship",
                                          "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
-                  "Classify only the latest answer about the current product. accepted means a clear yes to the entire fixed amount AND date just spoken, never an amount-only statement or a bare date fragment. proposal means the caller gives an exact amount OR payment date, even if the other part is missing; an amount-only proposal is not a refusal. refused means a flat no or genuine non-answer, never a factual question or unfinished date question. full_too_much means the full amount is explicitly too high. Paid, dispute, hardship and transfer requests take priority."),
+                  "Classify only the latest answer about the current product. accepted means a clear yes to the entire amount AND date just spoken by the assistant, including a full-amount clarification that retains the caller's date; never an amount-only statement or a bare date fragment. proposal means the caller gives an exact amount OR payment date, even if the other part is missing; an amount-only proposal is not a refusal. refused means a flat no or genuine non-answer, never a factual question or unfinished date question. full_too_much means the full amount is explicitly too high. Paid, dispute, hardship and transfer requests take priority."),
             {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.45,
              "description": "On a fresh proposal, return a JSON array string of product_id and only the amount and RAW date words actually spoken in the latest answer. Include amount-only and date-only fragments for the current focused product; omit the missing field instead of copying the offered day or amount. Include every product the caller explicitly covered; leave empty for a factual question or genuine refusal. For a clear yes accepting the entire fixed offer, repeat its exact terms."},
             _enum("multi_reply_date_spoken", ["yes", "no"],
                   "yes only if the latest caller answer itself explicitly names an exact payment day, including a date-only continuation. no for an amount-only promise, bare yes to the entire fixed offer, factual question, or non-answer. Do not copy the earlier offer's date into an amount-only answer."),
             _enum("multi_fixed_offer_accepted", ["yes", "no"],
-                  "yes only when the caller clearly accepts the exact fixed amount AND date already offered, such as a bare yes to that complete offer. no when they name only an amount, name only a date, ask a question, or refuse."),
+                  "yes only when the caller clearly accepts the exact complete amount AND date just offered by the assistant, including a full past-due amount proposed for the caller's retained date in multi_clarify. no when they name only an amount, name only a date, ask a question, or refuse."),
             _enum("multi_offer_fact_question", ["yes", "no"],
                   "yes if the latest caller reply is a factual product or deadline question, including an unfinished question fragment such as 'Is 16 October before the'. A question is never acceptance, refusal, or a non-answer and does not consume an offer attempt. no for a genuine non-answer such as needing a moment to check a calendar, a flat refusal, or a payment proposal."),
             _enum("multi_offer_fact_kind", ["deadline", "past_due", "days_late", "card_suffix", "list", "other", "none"],
@@ -2734,7 +2755,7 @@ except Exception:
             transitions=[_eq("transfer_support", "multi_offer_action", "accepted")] + transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_clarify"] = _conversation(
-            "multi_clarify", "Ask for the missing exact day for {{multi_focus_label}} under the source policy. "
+            "multi_clarify", "Use the prepared clarification prompt for {{multi_focus_label}}: if the caller supplied a day but no valid amount, propose the full past-due amount on that retained day and wait for a clear answer; if the caller supplied only an amount, ask for the exact day. "
             "Do not repeat the previous offer or claim a promise is recorded. No tool call is allowed in this node.",
             opening="{{multi_clarify_prompt}}",
             extraction=multi_reply_extraction,
