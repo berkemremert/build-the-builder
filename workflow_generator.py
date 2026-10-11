@@ -1432,6 +1432,8 @@ try:
         reason = str(value or '').strip().lower().replace(' ', '_')
         if reason in ('paid', 'already_paid', 'previously_paid', 'paid_already'):
             reason = __PAID_REASON__
+        elif reason in ('dispute', 'disputed', 'not_mine', 'never_had_product'):
+            reason = __DISPUTE_REASON__
         return reason if reason in __NOTE_CODES__ else ''
     def parsed(value):
         if isinstance(value, str):
@@ -1491,7 +1493,29 @@ try:
     else:
         pid = str(vars.get('multi_focus_product_id') or '')
         action = str(vars.get('multi_offer_action') or 'unclear')
-        if phase == 'identify':
+        if phase == 'disclosure_completion':
+            raw_claims = vars.get('multi_reply_notes_json') or '{}'
+            claims = json.loads(raw_claims) if isinstance(raw_claims, str) else raw_claims
+            resolved_claims = []
+            if isinstance(claims, dict):
+                for raw_pid, raw_reason in claims.items():
+                    target = resolve_pid(raw_pid)
+                    reason = note_reason(raw_reason)
+                    if target and reason in (__PAID_REASON__, __DISPUTE_REASON__):
+                        resolved_claims.append((target, reason))
+                    else:
+                        next_step = 'disclosure'
+                        break
+            if next_step == 'disclosure':
+                rounds = int(vars.get('multi_disclosure_rounds') or 0) + 1
+                vars['multi_disclosure_rounds'] = str(rounds)
+                next_step = 'disclosure' if rounds < 2 else 'service_error'
+            else:
+                for target, reason in resolved_claims:
+                    terms.pop(target, None)
+                    notes[target] = reason
+                add_terms(vars.get('multi_reply_terms_json') or '', pid)
+        elif phase == 'identify':
             target = resolve_pid(vars.get('multi_reply_product_id'))
             claim = str(vars.get('multi_claim_action') or '')
             if target and claim in ('paid', 'dispute'):
@@ -1561,16 +1585,18 @@ try:
             else:
                 notes[pid] = __REFUSAL_REASON__
         vars['multi_reply_terms_json'] = ''
+        vars['multi_reply_notes_json'] = ''
         vars['multi_reply_common_date_words'] = ''
         vars['multi_reply_product_id'] = ''
     unresolved = [(index, str(item.get('product_id') or '')) for index, item in enumerate(products)
                   if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
     if next_step == 'service_error':
         vars['multi_next'] = 'service_error'
-    elif next_step in ('support', 'clarify', 'identify'):
+    elif next_step in ('support', 'clarify', 'identify', 'disclosure'):
         vars['multi_phase'] = next_step
         vars['multi_next'] = next_step
-        vars['multi_offer_action'] = 'unclear'
+        if next_step != 'disclosure':
+            vars['multi_offer_action'] = 'unclear'
     elif next_step == 'offer' and pid in product_by_id and pid not in terms and pid not in notes:
         vars['multi_phase'] = 'offer'
         vars['multi_next'] = 'offer'
@@ -1602,23 +1628,43 @@ except Exception:
 _MULTI_DISCLOSURE_RESOLVE_CODE = """import json
 try:
     answer = str(vars.get('multi_disclosure_followup') or 'incomplete')
+    claim_present = str(vars.get('multi_disclosure_claim_present') or 'no') == 'yes'
+    raw_terms = str(vars.get('multi_reply_terms_json') or '').strip()
+    raw_claims = str(vars.get('multi_reply_notes_json') or '').strip()
+    try:
+        has_terms = bool(json.loads(raw_terms)) if raw_terms else False
+    except (TypeError, ValueError):
+        has_terms = False
+    try:
+        decoded_claims = json.loads(raw_claims) if raw_claims else {}
+        has_claims = isinstance(decoded_claims, dict) and bool(decoded_claims)
+    except (TypeError, ValueError):
+        has_claims = False
     if answer == 'hardship':
+        vars['multi_reply_terms_json'] = ''
+        vars['multi_reply_notes_json'] = ''
         vars['multi_phase'] = 'support'
         vars['multi_next'] = 'support'
-    elif answer == 'proposal' and str(vars.get('multi_reply_terms_json') or '').strip():
-        vars['multi_phase'] = 'offer'
-        vars['multi_offer_action'] = 'proposal'
+    elif ((answer == 'proposal' and has_terms and (not claim_present or has_claims)) or
+          (answer == 'claim' and has_claims)):
+        vars['multi_phase'] = 'disclosure_completion'
         vars['multi_next'] = 'advance'
-    elif answer == 'unrelated':
+    elif answer == 'unrelated' and not claim_present:
+        vars['multi_reply_terms_json'] = ''
+        vars['multi_reply_notes_json'] = ''
         vars['multi_phase'] = 'offer'
         vars['multi_next'] = 'offer'
     elif answer == 'full_too_much':
+        vars['multi_reply_terms_json'] = ''
+        vars['multi_reply_notes_json'] = ''
         floor_first = set(json.loads(str(vars.get('multi_floor_first_json') or '[]')))
         floor_first.add(str(vars.get('multi_focus_product_id') or ''))
         vars['multi_floor_first_json'] = json.dumps(sorted(floor_first))
         vars['multi_phase'] = 'offer'
         vars['multi_next'] = 'offer'
     else:
+        vars['multi_reply_terms_json'] = ''
+        vars['multi_reply_notes_json'] = ''
         rounds = int(vars.get('multi_disclosure_rounds') or 0) + 1
         vars['multi_disclosure_rounds'] = str(rounds)
         vars['multi_phase'] = 'disclosure'
@@ -1740,7 +1786,10 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
         r"\bproducts? one by one\b|\beach product.{0,35}\border\b",
         str(policy.get("verified_call") or "") + "\n" + product_limits, re.I,
     ))
-    offer_source = str(policy.get("verified_call") or "") or source_policy
+    # Extracted summaries can omit the source's exact offer schedule. Keep the
+    # source text in the decision so an authorized offer can be spoken as fixed
+    # TTS, without a free-form model turn before the bank write.
+    offer_source = "\n".join(str(policy.get(key) or "") for key in ("raw_brief", "verified_call"))
     fixed_multi_offers = ("last business day of this week" in offer_source.lower() and
                           bool(re.search(r"attempt\s*2.{0,100}floor.{0,100}deadline", offer_source, re.I)))
 
@@ -1803,8 +1852,13 @@ except Exception:
         transitions=[_eq("finish_wrong_number", "opening_role", "wrong_number"),
                      _eq("finish_deceased", "opening_role", "deceased"),
                      _eq("identity_dob", "opening_role", "self"),
-                     _eq("third_party", "opening_role", "third_party")],
-        max_turns=2, max_target="finish_unclear")
+                     _eq("third_party", "opening_role", "third_party"),
+                     _to("finish_unclear", "Second identity ask remained unclear",
+                         _when({"logic": "and", "conditions": [
+                             _check("opening_role", "equals", "unclear"),
+                             _check("opening.current_turns", "greater_than", 1),
+                         ]}))],
+        max_turns=3, max_target="finish_unclear")
 
     nodes["third_party"] = _conversation(
         "third_party", identity_base +
@@ -2146,10 +2200,15 @@ except Exception:
             "multi_disclosure_clarify",
             "The caller's last statement was unfinished. The neutral request to finish was spoken on entry. Wait for the caller's completion. Do not infer hardship, make a payment offer, ask for a payment date, or change product while their meaning is unclear. If the answer is still incomplete, briefly ask them to finish again. No tool call is allowed.",
             opening="Sorry, I didn't catch the end of that. Could you finish what you were saying?",
-            extraction=[_enum("multi_disclosure_followup", ["hardship", "unrelated", "full_too_much", "proposal", "incomplete", "transfer_restructuring", "transfer_support", "transfer_human"],
-                              "Classify the caller's completion together with the unfinished preceding statement. hardship only if the completed meaning clearly reports illness, death in the family, or job loss. proposal if the caller gives their own payment amount or date; do not count it as a refusal or persuasion attempt. full_too_much only if they explicitly say the current product's full past-due amount is too high; do not infer it from inability to pay right now. unrelated if it completes an ordinary payment refusal or another matter without a hardship fact, including a lost card. incomplete if the meaning remains cut off or ambiguous; do not guess hardship from an unfinished fragment. Use transfer actions only for an explicit request."),
+            extraction=[_enum("multi_disclosure_followup", ["hardship", "unrelated", "full_too_much", "proposal", "claim", "incomplete", "transfer_restructuring", "transfer_support", "transfer_human"],
+                              "Classify the caller's completion together with the unfinished preceding statement. hardship only if the completed meaning clearly reports illness, death in the family, or job loss. proposal if the caller gives their own payment amount or date, EVEN WHEN the same answer also says another product was paid or disputed; extract every intent separately and do not count a proposal as a refusal. claim if there is a paid or dispute claim but no proposal. full_too_much only if they explicitly say the current product's full past-due amount is too high; do not infer it from inability to pay right now. unrelated if it completes an ordinary payment refusal or another matter without a hardship fact, including a lost card. incomplete if the meaning remains cut off or ambiguous; do not guess hardship from an unfinished fragment. Use transfer actions only for an explicit request."),
+                        {**_enum("multi_disclosure_claim_present", ["yes", "no"],
+                                 "Independently of any payment proposal, yes if this completed answer explicitly claims the CURRENT past-due amount on any product was already paid or disputes that a product belongs to the caller. A lost card, an old payment, or unfinished words without a completed claim are no. If yes, map every such claim in multi_reply_notes_json; never silently drop it."),
+                         "min_confidence": 0.55},
                         {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.45,
-                         "description": "If the latest completed answer gives a fresh payment proposal, return a JSON array string of product_id, amount, and RAW date words for each product explicitly covered. Leave empty otherwise."}],
+                         "description": "If the latest completed answer gives a fresh payment proposal, return a JSON array string of product_id, amount, and RAW date words for each product explicitly covered. Extract this independently of paid or dispute claims on other products. Leave empty otherwise."},
+                        {"name": "multi_reply_notes_json", "type": "string", "min_confidence": 0.45,
+                         "description": "For EACH product explicitly claimed paid or disputed in the completed answer, return a JSON object string mapping its exact product_id or unambiguous product label from {{account_facts}} to paid or dispute. Paid means the CURRENT past-due amount was already paid; a product closed or paid off in the past is a dispute. Extract this independently of any payment proposal on another product. Do not infer a claim from an unfinished phrase or a lost card. Leave empty if there is no completed claim."}],
             transitions=[_eq("transfer_restructuring", "multi_disclosure_followup", "transfer_restructuring"),
                          _eq("transfer_support", "multi_disclosure_followup", "transfer_support"),
                          _eq("transfer_human", "multi_disclosure_followup", "transfer_human"),
