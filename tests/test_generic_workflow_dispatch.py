@@ -54,6 +54,13 @@ class GenericWorkflowDispatchTests(unittest.TestCase):
         invalid["nodes"]["ask"]["tools"][0]["function"]["name"] = "inventedTool"
         self.assertTrue(any("operation name" in error for error in validate_generic_workflow(invalid, api)))
 
+    def test_qa_rejects_missing_contract_tool(self) -> None:
+        api = builder._mock_openapi(contract(), "https://mock.example")
+        missing = workflow()
+        missing["nodes"]["ask"].pop("tools")
+        self.assertTrue(any("readStatement" in error and "not exposed" in error
+                            for error in validate_generic_workflow(missing, api)))
+
     def test_case_folder_dispatches_when_practice_operations_are_absent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-generic-dispatch-") as directory:
             folder = Path(directory) / "case"

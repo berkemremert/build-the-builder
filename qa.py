@@ -1283,6 +1283,7 @@ def validate_generic_workflow(workflow: dict, openapi: dict) -> list[str]:
             errors.append(f"{path}: remove embedded secret")
     edges = {}
     tool_names = set()
+    tool_urls = set()
     for key, node in nodes.items():
         location = f"workflow.nodes.{key}"
         if not isinstance(node, dict):
@@ -1324,6 +1325,7 @@ def validate_generic_workflow(workflow: dict, openapi: dict) -> list[str]:
                 if fn.get("name") != expected_name or method != expected_method:
                     errors.append(f"{where}: operation name or HTTP method differs from OpenAPI")
                 tool_names.add(expected_name)
+                tool_urls.add(url)
                 schema = (operation.get("requestBody") or {}).get("content", {}).get("application/json", {}).get("schema") or {}
                 body = props.get("body") or {}
                 leaves = body.get("properties") or {}
@@ -1365,6 +1367,8 @@ def validate_generic_workflow(workflow: dict, openapi: dict) -> list[str]:
             errors.append("workflow: no reachable end_call node")
         for name in nodes.keys() - reached:
             errors.append(f"workflow.nodes.{name}: unreachable from initial_node")
+    for url in sorted(operations.keys() - tool_urls):
+        errors.append(f"workflow: callable contract operation {operations[url][0]!r} is not exposed")
     return errors
 
 
