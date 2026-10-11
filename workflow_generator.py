@@ -1440,6 +1440,43 @@ except Exception:
 """
 
 
+_MULTI_ACCOUNT_FACT_CODE = """import json
+import re
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    kind = str(vars.get('multi_account_fact_kind') or '').strip()
+    requested = str(vars.get('multi_account_fact_product_id') or '').strip().lower()
+    matches = [item for item in products if requested and requested in (
+        str(item.get('product_id') or '').lower(), str(item.get('label') or '').lower())]
+    if not matches and kind == 'card_suffix':
+        matches = [item for item in products if 'card' in str(item.get('label') or '').lower()]
+    if kind == 'list':
+        answer = 'The products, in order, are ' + ', '.join(str(item.get('label') or '') for item in products) + '.'
+    elif kind == 'digital_assistant':
+        answer = 'Yes, I am a digital assistant.'
+    elif len(matches) != 1:
+        answer = 'Which product do you mean?' if kind in ('card_suffix', 'past_due', 'days_late') else 'I do not have that information.'
+    else:
+        item = matches[0]
+        label = str(item.get('label') or '')
+        if kind == 'card_suffix':
+            answer = 'The product is ' + label + '.' if re.search(r'ending \\d{4}\\b', label) else 'I do not have a card suffix for that product.'
+        elif kind == 'past_due':
+            answer = 'The past-due amount on the ' + label + ' is ' + format(float(item['past_due']), '.2f') + '.'
+        elif kind == 'days_late':
+            answer = 'The ' + label + ' is ' + str(int(item['days_late'])) + ' days late.'
+        else:
+            answer = 'I do not have that information.'
+    vars['multi_account_fact_answer'] = answer
+except Exception:
+    vars['multi_account_fact_answer'] = 'I cannot confirm that account detail right now.'
+finally:
+    vars['multi_account_fact_question'] = 'no'
+    vars['multi_account_fact_kind'] = 'none'
+    vars['multi_account_fact_product_id'] = ''
+"""
+
+
 _MULTI_ADVANCE_CODE = """import json
 import re
 try:
@@ -2106,6 +2143,7 @@ except Exception:
         "Honor the source policy's attempt limits and order. Never invent figures, dates, reasons, discounts or concessions. "
         "For a single product, after the initial today question, stop speaking on a flat no with no date or amount; the workflow will make the counted dated offer. Do not improvise a persuasion offer in this node. "
         "For more than one product, state all products before an ask and follow the source policy's product order and combined confirmation rules. "
+        "After verification, a question asking to repeat product facts must be answered from get_account before moving to a persuasion offer. Stop after the question so the workflow can speak the exact fact; do not treat the question as a refusal. "
         "When the caller has proposed specific terms, stop after acknowledging them. The next step will read them back for confirmation. Do not say they are recorded yet. "
         "If a prior read-back was corrected or validation failed, clarify the changed product, amount or date before offering another read-back. On a date validation error, ask for the exact day; a bare yes to the old read-back is not a new proposal. "
         "For a flat refusal, paid claim, dispute, or hardship with no promise, finish the discussion under the source policy. "
@@ -2149,6 +2187,11 @@ except Exception:
                                    _check("single_floor_stage", "equals", "0"),
                                ]})))
     if multi_enabled:
+        transitions.append(_to("multi_account_fact_answer", "Answer a verified account-fact question before negotiating",
+                               _when({"logic": "and", "conditions": [
+                                   _check("product_count", "greater_than", 1),
+                                   _check("multi_account_fact_question", "equals", "yes"),
+                               ]})))
         transitions.append(_to("multi_advance", "Begin ordered product discussion after the all-today answer",
                                _when(_check("product_count", "greater_than", 1))))
         single = lambda action: _when({"logic": "and", "conditions": [
@@ -2187,11 +2230,17 @@ except Exception:
                                                      {"name": "proposed_date_words", "type": "string", "min_confidence": 0.55,
                                                       "description": "For a one-product proposal only, copy the exact date phrase spoken in the LATEST caller answer, verbatim, such as 'this Friday'. Do not convert it to a date. Leave empty if the latest answer contains no date phrase, including a bare yes/I confirm."},
                                                      {"name": "pending_note_reasons_json", "type": "string", "min_confidence": 0.55,
-                                                      "description": "For each product the caller has finally refused, disputed, said already paid, or declined after hardship, return a JSON object string mapping product_id to the correct add_note reason from the source policy and API. Leave empty if still discussing."},
+                                                      "description": "For each product the caller has finally refused, disputed, said already paid, or declined after hardship, return a JSON object string mapping product_id to the correct add_note reason from the source policy and API. Leave empty for a factual question and for 'I cannot pay all of them today', which only rejects paying every product today; no individual product has been finally refused."},
                                                      _enum("single_product_reason", note_codes or ["paid", "dispute", "hardship", "refused", "service_error"],
                                                            "For a one-product account only, classify a final paid, dispute, hardship, or refused result; do not fill while negotiating a promise."),
-                                                     *([_enum("all_today_status", ["yes", "no", "other"],
-                                                              "Only for a multi-product account: yes if the latest caller answer accepts paying ALL products today; no if it rejects paying all today; other otherwise."),
+                                                     *([_enum("multi_account_fact_question", ["yes", "no"],
+                                                              "For a verified multi-product account: yes if the LATEST caller answer asks to repeat the product list or asks a factual question about a product name, card suffix, past-due amount, or days late. Keep yes after several such questions; a product question is not a payment refusal and must not consume a persuasion attempt. Also yes for a direct digital-assistant question. no for a payment answer, including 'I cannot pay all three today'."),
+                                                        _enum("multi_account_fact_kind", ["list", "card_suffix", "past_due", "days_late", "digital_assistant", "other", "none"],
+                                                              "For the latest verified account-fact question, identify the requested fact. list means repeat all product names in get_account order. card_suffix means identify the card ending digits or which product is the named card. past_due means the exact overdue amount. days_late means the number of days late. digital_assistant means whether you are a digital assistant. other means an unrelated question; none means no question. Never turn a payment answer into a question."),
+                                                        {"name": "multi_account_fact_product_id", "type": "string", "min_confidence": 0.55,
+                                                         "description": "For a question about one product, return its exact product ID from {{account_facts}} only when the caller identifies it unambiguously by type, label, or card suffix. Leave empty for a product-list question, no question, or an ambiguous product. Do not infer a product from the current offer."},
+                                                        _enum("all_today_status", ["yes", "no", "other"],
+                                                              "Only for a multi-product account: yes if the latest caller answer accepts paying ALL products today; no if it rejects paying all today, including 'I cannot pay all three today'; other for factual product questions or unrelated replies. A no here is only the timing answer and does not finally refuse any individual product."),
                                                         _enum("multi_disclosure_state", ["incomplete", "hardship", "none"],
                                                               "For a multi-product account, classify ONLY the latest caller answer. hardship only when the caller clearly mentions illness, a death in the family, or job loss. incomplete when the caller trails off mid-disclosure and the missing words could determine whether a hardship rule applies; do not infer hardship or an ordinary refusal from an unfinished subject or clause. none when the answer is complete, including an ordinary no to paying all today or an unrelated statement such as losing a card. Do not treat inability to pay right now alone as hardship.",
                                                               min_confidence=0.55),
@@ -2201,9 +2250,22 @@ except Exception:
                                                          "description": "For a multi-product account only, return a JSON array of product IDs for which the caller explicitly says that product's FULL past-due amount is too high or unaffordable. 'I cannot pay all of them today' or 'I cannot pay all three of those today' only refuses the timing of the all-today question; neither says any product's full amount is too much, so return [] unless the caller separately names an unaffordable product or amount. Do not infer that every product needs its floor from a no-to-all-today answer."}]
                                                        if multi_enabled else []),
                                                  ],
-                                                 max_turns=2 if multi_enabled else 40,
+                                                 max_turns=40,
                                                  max_target="multi_advance" if multi_enabled else "prepare_notes")
     nodes["account_discussion"]["on_enter_first_entry_only"] = True
+    if multi_enabled:
+        nodes["multi_account_fact_answer"] = _code_node(
+            "multi_account_fact_answer", _MULTI_ACCOUNT_FACT_CODE, "multi_account_followup")
+        nodes["multi_account_followup"] = _conversation(
+            "multi_account_followup",
+            "The fixed answer to the caller's verified account question was spoken on entry from get_account facts. "
+            "Wait for the caller's latest reply. Answer another factual product question before any payment offer. "
+            "A no to paying all products today begins the ordered per-product discussion; it does not refuse any individual product. "
+            "Do not make a persuasion offer in this node. No tool call is allowed.",
+            opening="{{multi_account_fact_answer}} Can you pay all of these products today?",
+            extraction=nodes["account_discussion"]["extraction_schema"],
+            transitions=transitions,
+            max_turns=40, max_target="multi_advance")
 
     nodes["single_robot_route"] = _code_node("single_robot_route", _SINGLE_ROBOT_ROUTE_CODE, "single_robot_answer")
     nodes["single_robot_answer"] = _conversation(
