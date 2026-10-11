@@ -151,8 +151,14 @@ def validate_export(workflow_path: Path, trace_path: Path,
             raise SubmissionError(f"Export {field} does not match the published version")
     if not (rows.index(start) < rows.index(saved) < rows.index(exported) < rows.index(end)):
         raise SubmissionError("Trace events are not in build order")
-    if Path(str(exported.get("path") or "")).name != workflow_path.name:
+    source_export = Path(str(exported.get("path") or ""))
+    if source_export.name != workflow_path.name:
         raise SubmissionError("Trace export filename does not match the workflow artifact")
+    if source_export.is_file():
+        if hashlib.sha256(source_export.read_bytes()).digest() != hashlib.sha256(workflow_path.read_bytes()).digest():
+            raise SubmissionError("Workflow artifact differs from the export recorded by the trace")
+    elif any(row.get("event") == "case_discovered" for row in rows):
+        raise SubmissionError("Traced original export is unavailable for artifact identity check")
     if Path(str(end.get("trace") or "")).name != trace_path.name:
         raise SubmissionError("Trace end event does not identify this trace")
     return workflow_id, agent_id

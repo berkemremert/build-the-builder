@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -130,6 +131,16 @@ class FinalSubmissionTests(unittest.TestCase):
         self._write_trace()
         with self.assertRaisesRegex(submission.SubmissionError, "Export version"):
             submission.validate_export(self.workflow, self.trace)
+
+    def test_same_ids_from_different_export_are_rejected(self) -> None:
+        other = Path(self.temp.name) / "other" / self.workflow.name
+        other.parent.mkdir()
+        shutil.copy2(self.workflow, other)
+        alternate = json.loads(other.read_text())
+        alternate["workflow"]["nodes"]["start"]["prompt"] = "different published version"
+        other.write_text(json.dumps(alternate))
+        with self.assertRaisesRegex(submission.SubmissionError, "differs from the export"):
+            submission.validate_export(other, self.trace)
 
 
 if __name__ == "__main__":
