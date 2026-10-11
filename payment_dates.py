@@ -13,14 +13,26 @@ import re
 def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
     """Resolve a specific spoken date; leave policy and business-day checks to the caller."""
     phrase = str(raw).strip().lower()
+    corrections = list(re.finditer(
+        r"\b(?:sorry(?:\s*,?\s*i\s+mean)?|i\s+meant?|actually|rather|instead|"
+        r"correction|make\s+that|wait(?:\s*,?\s*no)?|no(?:\s*,?\s*i\s+mean)?)\b",
+        phrase))
+    if corrections:
+        phrase = phrase[corrections[-1].end():].strip(" ,.;:")
+        if not phrase:
+            raise ValueError("Corrected payment date missing")
+    if re.search(r"\bor\b", phrase):
+        raise ValueError("Ambiguous payment dates")
     if phrase in {"today", "now"}:
         return today
     if phrase == "tomorrow":
         return today + datetime.timedelta(days=1)
 
-    iso = re.search(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", phrase)
-    if iso:
-        return datetime.date.fromisoformat(iso.group())
+    iso_matches = list(re.finditer(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", phrase))
+    if len(iso_matches) > 1:
+        raise ValueError("Ambiguous payment dates")
+    if iso_matches:
+        return datetime.date.fromisoformat(iso_matches[0].group())
     phrase = re.sub(r"[\s-]+", " ", phrase)
 
     months = ("january", "february", "march", "april", "may", "june",
@@ -35,17 +47,24 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
     month_pattern = "|".join(months)
     day_pattern = "|".join(re.escape(name) for name in sorted(named_days, key=len, reverse=True))
     day_pattern += r"|[0-3]?\d(?:st|nd|rd|th)?"
-    month_match = re.search(r"\b(" + month_pattern + r")\b", phrase)
-    weekday_match = re.search(r"\b(" + "|".join(weekdays) + r")\b", phrase)
+    month_matches = list(re.finditer(r"\b(" + month_pattern + r")\b", phrase))
+    weekday_matches = list(re.finditer(r"\b(" + "|".join(weekdays) + r")\b", phrase))
+    if len({match.group() for match in month_matches}) > 1 or len({match.group() for match in weekday_matches}) > 1:
+        raise ValueError("Conflicting payment dates")
+    month_match = month_matches[0] if month_matches else None
+    weekday_match = weekday_matches[0] if weekday_matches else None
     month = months.index(month_match.group()) + 1 if month_match else None
     weekday = weekdays.index(weekday_match.group()) if weekday_match else None
 
     day_match = None
     if month_match:
-        day_match = (re.search(r"\b(?:the\s+)?(?P<day>" + day_pattern +
-                               r")(?:\s+of)?\s+(?:" + month_pattern + r")\b", phrase) or
-                     re.search(r"\b(?:" + month_pattern + r")\s+(?:the\s+)?(?P<day>" +
-                               day_pattern + r")\b", phrase))
+        date_matches = (list(re.finditer(r"\b(?:the\s+)?(?P<day>" + day_pattern +
+                                         r")(?:\s+of)?\s+(?:" + month_pattern + r")\b", phrase)) +
+                        list(re.finditer(r"\b(?:" + month_pattern + r")\s+(?:the\s+)?(?P<day>" +
+                                         day_pattern + r")\b", phrase)))
+        if len(date_matches) > 1:
+            raise ValueError("Ambiguous payment dates")
+        day_match = date_matches[0] if date_matches else None
     elif weekday_match:
         day_match = re.search(r"\b(?:the\s+)?(?P<day>" + day_pattern + r")\b", phrase)
 

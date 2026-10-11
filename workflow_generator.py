@@ -6,11 +6,16 @@ All HTTP calls are derived from the supplied OpenAPI document.
 
 from __future__ import annotations
 
+import inspect
 import re
 from typing import Any
 
 from api_bindings import (account_response_collection, identity_response_fields,
                           note_request_fields, promise_request_fields)
+from payment_dates import parse_payment_date
+
+
+_PAYMENT_DATE_SOURCE = inspect.getsource(parse_payment_date)
 
 
 def _check(variable: str, operator: str, operand: Any = "") -> dict:
@@ -880,6 +885,7 @@ except Exception:
 _PREPARE_CONFIRMATION_CODE = """import json
 import datetime
 import re
+__PAYMENT_DATE_PARSER__
 try:
     vars['proposal_validation_state'] = 'invalid'
     vars['validation_state'] = 'invalid'
@@ -936,56 +942,7 @@ try:
                 date_raw = spoken
         if not date_raw:
             raise ValueError('Payment date missing')
-        if date_raw in ('today', 'now'):
-            day = today
-        elif date_raw == 'tomorrow':
-            day = today + datetime.timedelta(days=1)
-        else:
-            match = re.search(r'\\d{4}-\\d{2}-\\d{2}', date_raw)
-            if match:
-                day = datetime.date.fromisoformat(match.group())
-            else:
-                months = ('january','february','march','april','may','june','july','august','september','october','november','december')
-                month = next((index + 1 for index, word in enumerate(months) if word in date_raw), None)
-                number = re.search(r'(?<!\\d)([0-3]?\\d)(?:st|nd|rd|th)?(?!\\d)', date_raw)
-                named_days = dict((name, index + 1) for index, name in enumerate((
-                    'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
-                    'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth',
-                    'eighteenth', 'nineteenth', 'twentieth', 'twenty first', 'twenty second', 'twenty third',
-                    'twenty fourth', 'twenty fifth', 'twenty sixth', 'twenty seventh', 'twenty eighth',
-                    'twenty ninth', 'thirtieth', 'thirty first')))
-                spoken_day = None
-                if month or any(word in date_raw for word in ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')):
-                    normalized = re.sub(r'[-\\s]+', ' ', date_raw)
-                    day_pattern = '|'.join(re.escape(name) for name in sorted(named_days, key=len, reverse=True))
-                    month_pattern = '|'.join(months)
-                    before = re.search(r'\\b(?:the\\s+)?(' + day_pattern + r')(?:\\s+of)?\\s+(?:' + month_pattern + r')\\b', normalized) if month else None
-                    after = re.search(r'\\b(?:' + month_pattern + r')\\s+(?:the\\s+)?(' + day_pattern + r')\\b', normalized) if month else None
-                    spoken = before or after or (re.search(r'\\b(?:the\\s+)?(' + day_pattern + r')\\b', normalized) if not month else None)
-                    if spoken:
-                        spoken_day = named_days[spoken.group(1)]
-                weekdays = ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')
-                weekday = next((index for index, word in enumerate(weekdays) if word in date_raw), None)
-                if (number or spoken_day) and (month or weekday is not None):
-                    day_number = spoken_day or int(number.group(1))
-                    chosen_month = month or today.month
-                    chosen_year = today.year
-                    day = datetime.date(chosen_year, chosen_month, day_number)
-                    if day < today and not month:
-                        chosen_month = 1 if today.month == 12 else today.month + 1
-                        chosen_year += 1 if today.month == 12 else 0
-                        day = datetime.date(chosen_year, chosen_month, day_number)
-                    if weekday is not None and day.weekday() != weekday:
-                        raise ValueError('Day and weekday disagree')
-                elif weekday is not None:
-                    if date_raw.startswith('next '):
-                        day = today + datetime.timedelta(days=(7 - today.weekday()) + weekday)
-                    elif date_raw.startswith('this '):
-                        day = today + datetime.timedelta(days=weekday - today.weekday())
-                    else:
-                        day = today + datetime.timedelta(days=(weekday - today.weekday()) % 7)
-                else:
-                    raise ValueError('Payment date missing')
+        day = parse_payment_date(date_raw, today)
         deadline_raw = str(product.get('deadline') or '')
         if day < today:
             raise ValueError('Date outside approved range')
@@ -2408,7 +2365,9 @@ except Exception:
         ]
 
     nodes["prepare_confirmation"] = _code_node(
-        "prepare_confirmation", _PREPARE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
+        "prepare_confirmation", _PREPARE_CONFIRMATION_CODE
+        .replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)
+        .replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
     nodes["prepare_confirmation"]["transitions"] = [
         _eq("confirmation", "proposal_validation_state", "ready"),
         *([_to("service_unavailable", "Correction attempts exhausted without valid terms",
