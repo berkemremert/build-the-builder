@@ -282,11 +282,15 @@ def _close_tool(openapi: dict, close: _Operation, source: str, rule: str,
             action_outcomes[operation.name] = codes[role]
     tool = _tool(openapi, close, rule, fixed={outcome_field: "{{generic_close_outcome}}"})
     tool["pre_process_code"] = (
+        "def deny(message):\n"
+        "    config['url'] = ''\n"
+        "    config['body'] = {}\n"
+        "    raise ValueError(message)\n"
         "body = config.get('body')\n"
         "if not isinstance(body, dict):\n"
-        "    raise ValueError('Close request body is unavailable')\n"
+        "    deny('Close request body is unavailable')\n"
         "if vars.get('generic_close_attempted') == 'true':\n"
-        "    raise ValueError('Close already attempted')\n"
+        "    deny('Close already attempted')\n"
         f"codes = {codes!r}\n"
         f"action_outcomes = {action_outcomes!r}\n"
         f"allowed_reasons = dict((key, set(values)) for key, values in {[(key, sorted(values)) for key, values in reasons.items()]!r})\n"
@@ -299,7 +303,7 @@ def _close_tool(openapi: dict, close: _Operation, source: str, rule: str,
         "else:\n"
         "    outcome = codes['not_reached']\n"
         "if not outcome:\n"
-        "    raise ValueError('Cannot determine truthful close outcome')\n"
+        "    deny('Cannot determine truthful close outcome')\n"
         "reason = str(vars.get('generic_close_reason') or '')\n"
         "if not reason and outcome == codes['not_reached']:\n"
         "    role = str(vars.get('caller_role') or '')\n"
@@ -312,7 +316,7 @@ def _close_tool(openapi: dict, close: _Operation, source: str, rule: str,
         "if outcome not in allowed_reasons:\n"
         "    reason = ''\n"
         "if outcome in allowed_reasons and reason not in allowed_reasons[outcome]:\n"
-        "    raise ValueError('Cannot determine source-approved close reason')\n"
+        "    deny('Cannot determine source-approved close reason')\n"
         f"body[{outcome_field!r}] = outcome\n"
         + (f"if reason:\n    body[{reason_field!r}] = reason\nelse:\n    body.pop({reason_field!r}, None)\n"
            if reason_field else "") +

@@ -116,15 +116,19 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         exec(source, {"config": {"body": body}, "vars": state})
         self.assertEqual({"outcome": "promise"}, body)
         self.assertEqual("true", state["generic_close_attempted"])
+        duplicate_config = {"url": "https://bank.example.test/interaction-end", "body": {}}
         with self.assertRaisesRegex(ValueError, "already attempted"):
-            exec(source, {"config": {"body": {}}, "vars": state})
+            exec(source, {"config": duplicate_config, "vars": state})
+        self.assertEqual("", duplicate_config["url"])
 
     def test_close_request_rejects_unknown_reason(self):
         workflow = build_generic_workflow(_policy(), _spec())
         source = workflow["nodes"]["closing"]["pre_actions"][0]["pre_process_code"]
         state = {"caller_role": "customer", "generic_identity_verified": "true"}
+        config = {"url": "https://bank.example.test/interaction-end", "body": {}}
         with self.assertRaisesRegex(ValueError, "source-approved close reason"):
-            exec(source, {"config": {"body": {}}, "vars": state})
+            exec(source, {"config": config, "vars": state})
+        self.assertEqual("", config["url"])
 
     def test_unsupported_required_query_operation_is_omitted(self):
         spec = copy.deepcopy(_spec())
