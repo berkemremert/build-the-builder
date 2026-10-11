@@ -58,6 +58,16 @@ class GenericRequestValidationTests(unittest.TestCase):
             exec(read["pre_process_code"], {"config": invalid, "vars": {"customerNumber": "42"}})
         self.assertEqual({}, invalid["body"])
 
+    def test_operation_scoped_model_arguments_fill_missing_config_body(self):
+        read = self.workflow["nodes"]["service"]["tools"][0]
+        config = {}
+        state = {"customerNumber": "42", "readAccount_args.body.customerNo": "42"}
+        exec(read["pre_process_code"], {"config": config, "vars": state})
+        self.assertEqual({"data": {"customerNo": "42", "channel": "IVR"}}, config["body"])
+        missing = {}
+        with self.assertRaisesRegex(ValueError, "body is unavailable"):
+            exec(read["pre_process_code"], {"config": missing, "vars": {"customerNumber": "42"}})
+
     def test_explicit_post_literal_is_bound_and_enforced(self):
         self.spec["paths"]["/read"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["data"]["properties"]["channel"]["enum"] = ["IVR", "WEB"]
         self.policy["tool_policy"]["readAccount"] = 'POST with data.channel = "IVR" for this flow.'
