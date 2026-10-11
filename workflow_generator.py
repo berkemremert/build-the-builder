@@ -1009,6 +1009,7 @@ try:
     vars['multi_correction_turns'] = '0'
     vars['multi_correction_parts_json'] = '{}'
     vars['multi_correction_prompt'] = 'Please tell me which product you want to change, its amount, and the exact day and month you want to pay.'
+    vars['multi_confirmation_fragment'] = 'no'
     vars['proposed_terms_json'] = ''
     vars['proposed_date_words'] = ''
 except Exception as error:
@@ -1620,7 +1621,17 @@ try:
                 spoken_date = ''
             date = spoken_date or str(saved.get('date') or '')
             supplied_amount = item.get('amount')
-            if supplied_amount is None or str(supplied_amount).strip() == '':
+            amount_tail = (str(vars.get('multi_reply_amount_tail_words') or '').strip()
+                           if latest_reply and pid == fallback_pid else '')
+            if saved.get('amount_open') and amount_tail:
+                if amount_tail.lower().startswith('and '):
+                    amount_tail = amount_tail[4:].strip()
+                try:
+                    combined_amount = float(saved['amount']) + parse_payment_amount(amount_tail)
+                except (KeyError, TypeError, ValueError):
+                    combined_amount = None
+                amount = resolve_amount(combined_amount, product_by_id[pid]) if combined_amount is not None else None
+            elif supplied_amount is None or str(supplied_amount).strip() == '':
                 amount = saved.get('amount')
                 if amount is None and not latest_reply:
                     amount = float(product_by_id[pid].get('past_due') or 0)
@@ -1632,8 +1643,16 @@ try:
                                     if allowed_partial_day(spoken_date, product_by_id[pid]) else
                                     dict(product_id=pid, invalid_date=spoken_date))
                 continue
+            if (latest_reply and pid == fallback_pid and
+                    str(vars.get('multi_reply_amount_unfinished') or '') == 'yes'):
+                partial[pid] = dict(product_id=pid, amount=amount, amount_open=True)
+                if spoken_date:
+                    partial[pid]['date' if allowed_partial_day(spoken_date, product_by_id[pid]) else 'invalid_date'] = spoken_date
+                continue
             if not date:
                 if supplied_amount is not None and str(supplied_amount).strip():
+                    partial[pid] = dict(product_id=pid, amount=amount)
+                elif saved.get('amount_open') and amount_tail:
                     partial[pid] = dict(product_id=pid, amount=amount)
                 continue
             terms[pid] = dict(product_id=pid, amount=amount, date=date)
@@ -1759,7 +1778,18 @@ try:
         elif phase == 'identify':
             target = resolve_pid(vars.get('multi_reply_product_id'))
             claim = str(vars.get('multi_claim_action') or '')
-            if target and claim in ('paid', 'dispute'):
+            intent = str(vars.get('multi_identify_intent') or '')
+            if intent == 'payment_correction':
+                corrected = resolve_pid(vars.get('multi_correction_product'))
+                vars['multi_claim_action'] = ''
+                vars['multi_claim_attempts'] = '0'
+                vars['multi_correction_parts_json'] = '{}'
+                if corrected and corrected in terms:
+                    vars['multi_correction_product'] = corrected
+                else:
+                    vars['multi_correction_product'] = ''
+                next_step = 'correction'
+            elif intent == 'claim_target' and target and claim in ('paid', 'dispute'):
                 terms.pop(target, None)
                 partial.pop(target, None)
                 notes[target] = __PAID_REASON__ if claim == 'paid' else __DISPUTE_REASON__
@@ -1771,6 +1801,7 @@ try:
                 attempts = int(vars.get('multi_claim_attempts') or 0) + 1
                 vars['multi_claim_attempts'] = str(attempts)
                 next_step = 'identify' if attempts < 2 else 'service_error'
+            vars['multi_identify_intent'] = 'other'
         elif phase == 'support':
             if action == 'proposal':
                 add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
@@ -1849,17 +1880,22 @@ try:
         vars['multi_reply_product_id'] = ''
         vars['multi_reply_date_spoken'] = 'no'
         vars['multi_fixed_offer_accepted'] = 'no'
+        vars['multi_reply_amount_unfinished'] = 'no'
+        vars['multi_reply_amount_tail_words'] = ''
     unresolved = [(index, str(item.get('product_id') or '')) for index, item in enumerate(products)
                   if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
     if next_step == 'service_error':
         vars['multi_next'] = 'service_error'
-    elif next_step in ('support', 'clarify', 'identify', 'date_identify', 'disclosure', 'question'):
+    elif next_step in ('support', 'clarify', 'identify', 'date_identify', 'disclosure', 'question', 'correction'):
         vars['multi_phase'] = next_step
         vars['multi_next'] = next_step
         if next_step == 'clarify' and pid in product_by_id:
             label = str(product_by_id[pid].get('label') or pid)
             saved = partial.get(pid, {})
             vars['multi_clarify_prompt'] = (
+                'Please finish the payment amount for ' + label +
+                ('.' if saved.get('date') else ' and give the exact day you would pay.')
+                if saved.get('amount_open') else
                 'What exact business day on or before ' + str(product_by_id[pid].get('deadline')) +
                 ' would you pay ' + label + '?' if saved.get('invalid_date') and product_by_id[pid].get('deadline') else
                 'What exact business day would you pay ' + label + '?' if saved.get('invalid_date') else
@@ -1885,6 +1921,9 @@ try:
             saved = partial[focus]
             label = str(product_by_id[focus].get('label') or focus)
             vars['multi_clarify_prompt'] = (
+                'Please finish the payment amount for ' + label +
+                ('.' if saved.get('date') else ' and give the exact day you would pay.')
+                if saved.get('amount_open') else
                 'What exact business day on or before ' + str(product_by_id[focus].get('deadline')) +
                 ' would you pay ' + label + '?' if saved.get('invalid_date') and product_by_id[focus].get('deadline') else
                 'What exact business day would you pay ' + label + '?' if saved.get('invalid_date') else
@@ -2192,6 +2231,7 @@ finally:
     vars['multi_correction_product'] = ''
     vars['multi_correction_amount_words'] = ''
     vars['multi_correction_date_words'] = ''
+    vars['multi_confirmation_fragment'] = 'no'
 """
 
 
@@ -2757,6 +2797,7 @@ except Exception:
             _eq("multi_initial_date_identify", "multi_next", "date_identify"),
             _eq("multi_offer_fact_answer", "multi_next", "question"),
             _eq("multi_identify", "multi_next", "identify"),
+            _eq("multi_revise", "multi_next", "correction"),
             _always("service_unavailable"),
         ]
         nodes["multi_disclosure_clarify"] = _conversation(
@@ -2804,6 +2845,10 @@ except Exception:
                   "yes only if the latest caller answer itself explicitly names an exact payment day, including a date-only continuation. no for an amount-only promise, bare yes to the entire fixed offer, factual question, or non-answer. Do not copy the earlier offer's date into an amount-only answer."),
             _enum("multi_fixed_offer_accepted", ["yes", "no"],
                   "yes only when the caller clearly accepts the exact complete amount AND date just offered by the assistant, including a full past-due amount proposed for the caller's retained date in multi_clarify. no when they name only an amount, name only a date, ask a question, or refuse."),
+            _enum("multi_reply_amount_unfinished", ["yes", "no"],
+                  "yes only when the latest proposed amount ends mid-phrase, such as 'five hundred and', so the caller may continue it next turn. no for a complete amount or any non-proposal."),
+            {"name": "multi_reply_amount_tail_words", "type": "string", "min_confidence": 0.55,
+             "description": "Only when the previous caller amount was unfinished and the latest answer starts by finishing it, copy the NEW amount words alone. For 'five hundred and' followed by 'ten, Friday 16 October', return 'ten'. Leave empty for a new standalone amount, date words, account figures, or a paid/dispute claim."},
             _enum("multi_offer_fact_question", ["yes", "no"],
                   "yes if the latest caller reply is a factual product or deadline question, including an unfinished question fragment such as 'Is 16 October before the'. A question is never acceptance, refusal, or a non-answer and does not consume an offer attempt. no for a genuine non-answer such as needing a moment to check a calendar, a flat refusal, or a payment proposal."),
             _enum("multi_offer_fact_kind", ["deadline", "past_due", "days_late", "card_suffix", "list", "other", "none"],
@@ -2843,7 +2888,7 @@ except Exception:
             transitions=[_eq("transfer_support", "multi_offer_action", "accepted")] + transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_clarify"] = _conversation(
-            "multi_clarify", "Use the prepared clarification prompt for {{multi_focus_label}}: if the caller supplied a day but no valid amount, propose the full past-due amount on that retained day and wait for a clear answer; if the caller supplied only an amount, ask for the exact day. "
+            "multi_clarify", "Use the prepared clarification prompt for {{multi_focus_label}}: if the caller supplied a day but no valid amount, propose the full past-due amount on that retained day and wait for a clear answer; if the caller supplied only an amount, ask for the exact day. If the caller stopped mid-amount, wait for the amount continuation before treating the amount as complete. "
             "Do not repeat the previous offer or claim a promise is recorded. No tool call is allowed in this node.",
             opening="{{multi_clarify_prompt}}",
             extraction=multi_reply_extraction,
@@ -2863,12 +2908,20 @@ except Exception:
             max_turns=5, max_target="multi_advance")
         nodes["multi_identify"] = _conversation(
             "multi_identify", "The question was spoken on entry. Wait for the caller to identify the product for their paid or dispute claim. "
-            "Do not make an offer or assume it concerns {{multi_focus_label}}. No tool call is allowed in this node.",
+            "If the caller instead starts changing a promise, treat that as a new correction and discard the unresolved claim. Do not make an offer or assume it concerns {{multi_focus_label}}. No tool call is allowed in this node.",
             opening="Which product do you mean?",
             extraction=[_enum("multi_offer_action", ["transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
                               "Transfer requests take priority; otherwise classify as unclear."),
+                        _enum("multi_identify_intent", ["claim_target", "payment_correction", "other"],
+                              "claim_target only when the latest answer identifies which product was already paid or disputed in the prior claim. payment_correction when the caller instead starts changing a payment promise, including an unfinished phrase such as 'Actually, for the card, I can only'. other if neither meaning is clear. Never attach a prior dispute to a newly mentioned product in a payment correction."),
                         {"name": "multi_reply_product_id", "type": "string", "min_confidence": 0.55,
-                         "description": "The caller is identifying the product for the paid or dispute claim made immediately before this question. Map their latest answer to the exact product ID in {{account_facts}}. A known card suffix or exact product label is also accepted. Leave empty if the answer does not identify one product."}],
+                         "description": "Only when multi_identify_intent is claim_target, map the product the latest answer explicitly identifies for the prior paid or dispute claim to the exact ID in {{account_facts}}. Leave empty for a payment correction, even if it names a different product."},
+                        {"name": "multi_correction_product", "type": "string", "min_confidence": 0.55,
+                         "description": "Only when multi_identify_intent is payment_correction, return the exact ID or unambiguous label of the product whose promise is being changed. Leave empty for a paid or dispute claim."},
+                        {"name": "multi_correction_amount_words", "type": "string", "min_confidence": 0.55,
+                         "description": "For a payment correction only, copy a new amount explicitly spoken in the latest answer. Leave empty for an unfinished amount phrase or a claim."},
+                        {"name": "multi_correction_date_words", "type": "string", "min_confidence": 0.55,
+                         "description": "For a payment correction only, copy a new payment day explicitly spoken in the latest answer. Leave empty for a claim or no date."}],
             transitions=transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_initial_date_identify"] = _conversation(
@@ -2957,9 +3010,18 @@ except Exception:
         opening="{{confirmation_readback}} " + _confirmation_question(policy),
         extraction=[
             _enum("confirmation_status", ["confirmed", "changed", "declined", "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
-                  "Classify ONLY the latest answer to the immediately preceding read-back. confirmed requires a clear yes to all stated product, amount and date terms. changed if any amount or date is corrected. declined if caller rejects the read-back. Transfer requests take priority over confirmation. An earlier yes elsewhere in the conversation is not confirmation."),
+                  "Classify ONLY the latest answer to the immediately preceding read-back. confirmed requires a clear yes to all stated product, amount and date terms. changed if an amount or date is corrected or the caller clearly starts an unfinished correction for a named promised product. declined if caller rejects the read-back. Transfer requests take priority over confirmation. An earlier yes elsewhere in the conversation is not confirmation."),
             {"name": "single_corrected_terms_json", "type": "string", "min_confidence": 0.55,
              "description": "For a one-product read-back correction only, return one JSON object with the changed amount and/or the changed date as the caller's raw words in date. Omit any unchanged field; do not infer consent to the prior amount/date. Examples: {\"date\":\"Monday the 19th of October\"}, {\"amount\":\"minimum payment\",\"date\":\"Monday the 19th of October\"}. Leave empty for a bare yes, decline, or transfer request."},
+            *([_enum("multi_confirmation_fragment", ["yes", "no"],
+                     "yes only when the latest answer explicitly starts changing a promise in the combined read-back, including an unfinished amount or date correction for a named product. no for a paid/dispute claim, account question, decline, or confirmation."),
+               {"name": "multi_correction_product", "type": "string", "min_confidence": 0.55,
+                "description": "For a combined-read-back correction, copy only the promised product explicitly named in the latest answer; otherwise leave empty."},
+               {"name": "multi_correction_amount_words", "type": "string", "min_confidence": 0.55,
+                "description": "For a combined-read-back correction, copy only a complete NEW payment amount explicitly spoken in the latest answer. Leave empty for an unfinished amount or account balance."},
+               {"name": "multi_correction_date_words", "type": "string", "min_confidence": 0.55,
+                "description": "For a combined-read-back correction, copy only a NEW payment day explicitly spoken in the latest answer. Leave empty when absent."}]
+              if multi_enabled else []),
         ],
         transitions=[
             _eq("transfer_restructuring", "confirmation_status", "transfer_restructuring"),
@@ -2979,7 +3041,8 @@ except Exception:
                    ]}))] if multi_enabled else []),
             _eq("prepare_notes", "confirmation_status", "declined"),
         ],
-        max_turns=3, max_target="account_discussion")
+        max_turns=8 if multi_enabled else 3,
+        max_target="clear_confirmation" if multi_enabled else "account_discussion")
     nodes["single_revise"] = _code_node("single_revise", _SINGLE_REVISE_CODE, "single_clarify")
     nodes["single_revise"]["transitions"] = [
         _eq("service_unavailable", "single_revision_state", "exhausted"),
@@ -2996,6 +3059,7 @@ except Exception:
     nodes["clear_confirmation"] = _code_node("clear_confirmation", _CLEAR_CONFIRMATION_CODE, "account_discussion")
     if multi_enabled:
         nodes["clear_confirmation"]["transitions"] = [
+            _eq("multi_revise", "multi_confirmation_fragment", "yes"),
             _to("multi_correction", "Correct changed combined terms",
                 _when(_check("product_count", "greater_than", 1))),
             _always("account_discussion"),

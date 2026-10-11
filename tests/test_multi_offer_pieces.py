@@ -282,6 +282,73 @@ class MultiOfferPiecesTests(unittest.TestCase):
         self.assertEqual({"p2": "paid"}, json.loads(state["multi_notes_json"]))
         self.assertNotEqual("question", state["multi_next"])
 
+    def test_unfinished_amount_then_tail_and_day_stays_on_card(self) -> None:
+        state = self.prepared()
+        run_code(self.workflow, "multi_select_offer", state)
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "no",
+                      "multi_reply_amount_unfinished": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"five hundred"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual({"product_id": "p1", "amount": 500.0, "amount_open": True},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertIn("finish the payment amount", state["multi_clarify_prompt"])
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_amount_tail_words": "ten", "multi_reply_amount_unfinished": "no",
+                      "multi_reply_terms_json": '[{"product_id":"p1","date":"Friday 16 October"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("p2", state["multi_focus_product_id"])
+        self.assertEqual({"product_id": "p1", "amount": 510.0, "date": "Friday 16 October"},
+                         json.loads(state["multi_terms_json"])["p1"])
+        self.assertEqual({}, json.loads(state["multi_partial_terms_json"]))
+
+    def test_new_card_correction_cannot_inherit_prior_car_dispute(self) -> None:
+        state = self.prepared()
+        original = {"p1": {"product_id": "p1", "amount": 510.0, "date": "Friday 16 October"}}
+        state.update({"multi_terms_json": json.dumps(original),
+                      "multi_notes_json": '{"p2":"paid","p3":"dispute"}',
+                      "multi_phase": "identify", "multi_focus_product_id": "p3",
+                      "multi_claim_action": "dispute", "multi_claim_attempts": "1",
+                      "multi_identify_intent": "payment_correction",
+                      "multi_reply_product_id": "p1", "multi_correction_product": "p1"})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("correction", state["multi_next"])
+        self.assertEqual("", state["multi_claim_action"])
+        self.assertEqual(original, json.loads(state["multi_terms_json"]))
+        self.assertEqual({"p2": "paid", "p3": "dispute"}, json.loads(state["multi_notes_json"]))
+
+        run_code(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual({"product_id": "p1"}, json.loads(state["multi_correction_parts_json"]))
+        state["multi_correction_amount_words"] = "400"
+        run_code(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        state["multi_correction_date_words"] = "Tuesday 20 October"
+        run_code(self.workflow, "multi_revise", state)
+        self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual(400.0, json.loads(state["multi_terms_json"])["p1"]["amount"])
+        self.assertEqual({"p2": "paid", "p3": "dispute"}, json.loads(state["multi_notes_json"]))
+        run_code(self.workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        self.assertIn("400.00 on 2026-10-20", state["confirmation_readback"])
+        self.assertEqual("unclear", state["confirmation_status"])
+
+    def test_clear_confirmation_routes_named_fragment_to_revision(self) -> None:
+        state = self.prepared()
+        state.update({"multi_terms_json": '{"p1":{"product_id":"p1","amount":510,'
+                                          '"date":"Friday 16 October"}}',
+                      "multi_confirmation_fragment": "yes", "multi_correction_product": "p1",
+                      "confirmation_status": "changed"})
+        run_code(self.workflow, "clear_confirmation", state)
+        targets = [edge["target_node"] for edge in self.workflow["nodes"]["clear_confirmation"]["transitions"]]
+        self.assertLess(targets.index("multi_revise"), targets.index("multi_correction"))
+        run_code(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual({"product_id": "p1"}, json.loads(state["multi_correction_parts_json"]))
+        self.assertEqual("no", state["multi_confirmation_fragment"])
+
 
 if __name__ == "__main__":
     unittest.main()

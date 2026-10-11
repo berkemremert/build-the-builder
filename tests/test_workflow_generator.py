@@ -593,7 +593,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("identify", state["multi_next"])
         self.assertEqual({}, json.loads(state["multi_notes_json"]))
         self.assertEqual("multi_identify", _first_engine_route(workflow["nodes"]["multi_advance"], state))
-        state.update({"multi_offer_action": "unclear", "multi_reply_product_id": "car loan"})
+        state.update({"multi_offer_action": "unclear", "multi_identify_intent": "claim_target",
+                      "multi_reply_product_id": "car loan"})
         _run_code_node(workflow, "multi_advance", state)
         self.assertEqual({"p2": "dispute"}, json.loads(state["multi_notes_json"]))
         self.assertNotIn("p1", json.loads(state["multi_notes_json"]))
