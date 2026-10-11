@@ -123,6 +123,30 @@ class ChangedBriefGeneralityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "R9.*close_call"):
             build_workflow(policy, api)
 
+    def test_reason_table_drives_close_and_note_codes(self) -> None:
+        policy = synthetic_policy()
+        policy["raw_brief"] += ("\n| Reason | Close code |\n|---|---|\n"
+                                "| failed | R1 |\n| declined | R2 |\n"
+                                "| wrong number | R3 |\n| service error | R4 |\n"
+                                "| refused | R5 |\n"
+                                "| Reason | Note code |\n|---|---|\n| refused | R5 |\n")
+        workflow = build_workflow(policy, synthetic_api())
+        self.assertEqual([], validate_workflow(workflow, synthetic_api()))
+        self.assertIn("'R1'", _code(workflow, "finish_identity_failed"))
+        self.assertIn("'R3'", _code(workflow, "finish_wrong_number"))
+        self.assertIn("'R5'", _code(workflow, "prepare_notes"))
+
+    def test_changed_success_sentence_is_used_and_missing_sentence_is_silent(self) -> None:
+        policy = synthetic_policy()
+        no_source = build_workflow(policy, synthetic_api())
+        self.assertEqual("silent", no_source["nodes"]["promise_success_notice"]["on_enter"]["type"])
+        policy["raw_brief"] += ('\nAfter recording the promise, tell the customer verbatim: '
+                                '"A written confirmation will follow."\n')
+        workflow = build_workflow(policy, synthetic_api())
+        self.assertEqual({"type": "tts", "text": "A written confirmation will follow."},
+                         workflow["nodes"]["promise_success_notice"]["on_enter"])
+        self.assertEqual([], validate_workflow(workflow, synthetic_api()))
+
     def test_same_sentence_holiday_revoke_and_add_are_independent(self) -> None:
         policy = {"raw_brief": (
             "2031-04-18 is a bank holiday. Later memo: 2031-04-18 is no longer a bank holiday, "

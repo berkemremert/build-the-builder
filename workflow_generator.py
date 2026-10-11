@@ -21,6 +21,8 @@ from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
 from source_code_mappings import explicit_code_mappings
+from reason_code_mappings import explicit_reason_codes
+from success_messages import exact_success_sentence
 from policy_capabilities import requires_multi_product
 
 
@@ -421,12 +423,10 @@ def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str
     reason_field = close_request_fields(close_schema)["reason"]
     close_enum = [str(value) for value in ((close_schema.get("properties") or {}).get(reason_field) or {}).get("enum") or []]
     note_schema = _api_spec(openapi, "add_note")[2]
-    note_enum = [str(value) for value in ((note_schema.get("properties") or {}).get("reason") or {}).get("enum") or []]
-    source = str(policy.get("raw_brief") or "") + "\n" + str(policy.get("tool_policy") or "")
-    explicit_codes = {}
-    for code_list in re.finditer(r"reason\s+code\s+list\s*:\s*([^\n.]+)", source, re.I):
-        for match in re.finditer(r"\b([a-z_]+)\s*[:=]\s*([A-Za-z0-9_-]+)", code_list.group(1), re.I):
-            explicit_codes[match.group(1).lower()] = match.group(2)
+    note_reason_field = note_request_fields(note_schema)["reason"]
+    note_enum = [str(value) for value in ((note_schema.get("properties") or {}).get(note_reason_field) or {}).get("enum") or []]
+    source = str(policy.get("raw_brief") or policy.get("tool_policy") or "")
+    note_explicit, close_explicit = explicit_reason_codes(source, note_enum, close_enum)
     aliases = {
         "refused": ("refused", "declined", "refusal"),
         "hardship": ("hardship", "vulnerable", "difficulty"),
@@ -449,7 +449,8 @@ def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str
     for role, hints in aliases.items():
         replacements = re.findall(r"replace\s+(?:the\s+)?(?:refusal\s+code\s+)?" + re.escape(role) +
                                   r"\s+with\s+([a-z0-9_-]+)", source, flags=re.IGNORECASE)
-        for allowed, target in ((note_enum, result), (close_enum, close_result)):
+        for allowed, target, explicit_codes in ((note_enum, result, note_explicit),
+                                                (close_enum, close_result, close_explicit)):
             explicit = explicit_codes.get(role)
             if replacements and (not allowed or replacements[-1] in allowed):
                 target[role] = replacements[-1]
@@ -589,8 +590,7 @@ def _deadline_bands(policy: dict) -> list[dict]:
 
 def _success_sentence(policy: dict) -> str:
     source = str(policy.get("raw_brief") or "")
-    matches = re.findall(r"(?:after a recorded promise|promise is recorded)[^\n]{0,100}(?:say this sentence|say exactly)\s*:\s*[\"“]([^\"”]+)[\"”]", source, flags=re.IGNORECASE)
-    return matches[-1] if matches else "You will receive a text message confirming this promise."
+    return exact_success_sentence(source) or ""
 
 
 def _confirmation_question(policy: dict) -> str:
@@ -2531,10 +2531,12 @@ except Exception:
     nodes["mark_promise_success"] = _code_node(
         "mark_promise_success", _ADVANCE_PROMISE_CODE + "\n" + select_promise_code,
         "promise_success_notice")
+    success_sentence = _success_sentence(policy)
     nodes["promise_success_notice"] = {
         "name": "promise_success_notice", "node_type": "conversation",
-        "on_enter": {"type": "tts", "text": _success_sentence(policy)},
-        "task_message": "Say the fixed confirmation of a successfully recorded promise. No tool call is allowed in this turn.",
+        "on_enter": {"type": "tts" if success_sentence else "silent", "text": success_sentence},
+        "task_message": ("Say the fixed confirmation of a successfully recorded promise. No tool call is allowed in this turn."
+                         if success_sentence else "Continue silently. Do not invent a confirmation message or call a tool."),
         "passthrough": True, "passthrough_default_transition": "service_unavailable",
         "transitions": [
             _eq("create_promise_call", "write_state", "promise"),
