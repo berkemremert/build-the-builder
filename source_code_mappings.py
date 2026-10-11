@@ -20,12 +20,15 @@ _ROLES = {
         "promise": "promise", "paid": "paid", "transfer": "transferred",
         "transferred": "transferred", "no promise": "no_promise",
         "no_promise": "no_promise", "identity failure": "not_verified",
+        "identity failed": "not_verified", "identity_failure": "not_verified",
         "not verified": "not_verified", "not_verified": "not_verified",
         "not reached": "not_reached", "not_reached": "not_reached",
     },
 }
 _AMENDMENT = re.compile(r"\b(?:later memo|amendment|updated? policy|supersed\w*|overrid\w*|replac\w*)\b", re.I)
-_ASSIGNMENT = re.compile(r"(?<![\w])([A-Za-z][A-Za-z_ -]{0,30}?)\s*[:=]\s*`?([A-Za-z0-9_-]+)`?(?=\W|$)")
+# Look ahead so a lead-in such as "Queue codes: `support`=`Q2`" does not
+# consume the label of the assignment that follows it.
+_ASSIGNMENT = re.compile(r"(?=(?<![\w])`?([A-Za-z][A-Za-z_ -]{0,30}?)`?\s*[:=]\s*`?([A-Za-z0-9_-]+)`?(?=\W|$))")
 
 
 def _normalize(value: str) -> str:

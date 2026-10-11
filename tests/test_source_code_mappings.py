@@ -28,6 +28,13 @@ class SourceCodeMappingsTests(unittest.TestCase):
         self.assertEqual("Q2", explicit_code_mappings(source, "queue", ["Q1", "Q2", "Q3"])["support"])
         self.assertEqual("C2", explicit_code_mappings(source, "outcome", ["C1", "C2"])["promise"])
 
+    def test_code_list_accepts_backticked_labels_and_values(self) -> None:
+        source = "Queue codes: `support`=`Q2`, `human`:`Q3`. Outcome codes: `identity_failure`=`C6`."
+        self.assertEqual({"support": "Q2", "human": "Q3"},
+                         explicit_code_mappings(source, "queue", ["Q2", "Q3"]))
+        self.assertEqual({"not_verified": "C6"},
+                         explicit_code_mappings(source, "outcome", ["C6"]))
+
     def test_conflicting_or_invalid_source_codes_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "Ambiguous queue code"):
             explicit_code_mappings("support=Q1; support=Q2", "queue", ["Q1", "Q2"])
