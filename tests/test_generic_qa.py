@@ -100,8 +100,10 @@ class GenericRequestValidationTests(unittest.TestCase):
             "Normal goodbye, thanks, nothing else: “Sizi ana menüye yönlendiriyorum.” "
             "No eligible card: “Another specific phrase.”"}
         workflow = build_generic_workflow(self.policy, self.spec)
-        self.assertEqual("Teşekkür ederiz. Sizi ana menüye yönlendiriyorum.",
-                         workflow["nodes"]["farewell"]["on_enter"]["text"])
+        farewell = workflow["nodes"]["farewell"]
+        self.assertEqual("llm", farewell["on_enter"]["type"])
+        self.assertIn("acknowledge that briefly in the source language", farewell["task_message"])
+        self.assertIn("Sizi ana menüye yönlendiriyorum.", farewell["task_message"])
         self.policy["outcomes"]["main_menu"] = (
             "Normal completion and no eligible card. No eligible card: “Different phrase.” "
             "Normal completion: “Sizi ana menüye yönlendiriyorum.”")

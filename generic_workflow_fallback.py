@@ -186,6 +186,18 @@ def _identity_completion_field(operation: _Operation) -> str | None:
     return next(iter(candidates)) if not full and len(candidates) == 1 else None
 
 
+def _required_exit_state(rule: str) -> str | None:
+    """Extract one exact exit state from an operation's positive success clause."""
+    values = set()
+    for match in re.finditer(r"\bdata\.exitState\s*(?:=|is|equal\s+to)?\s*[`\"']([A-Za-z0-9_-]+)[`\"']", rule, re.I):
+        clause = rule[max(0, match.start() - 180):match.start()]
+        if re.search(r"\b(?:success|requires?|required|only\s+on|confirmed)\b", clause, re.I):
+            values.add(match.group(1))
+    if len(values) > 1:
+        raise ValueError("Source gives conflicting success exitState values")
+    return next(iter(values)) if values else None
+
+
 def _result_checks(operation: _Operation, rule: str = "", source: str = "") -> list[tuple[tuple[str, ...], object]]:
     """Read explicit success markers from a 2xx JSON response schema."""
     checks: list[tuple[tuple[str, ...], object]] = []
@@ -269,10 +281,9 @@ def _result_checks(operation: _Operation, rule: str = "", source: str = "") -> l
     if (('data', 'responseCode') in _schema_paths(response_schema) and
             re.search(r"\bresponseCode\b\s*(?:[`\"']?0[`\"']?|(?:equal\s+to|=|is)\s*[`\"']?0[`\"']?)", rule, re.I)):
         checks.append((('data', 'responseCode'), 0))
-    if ('data', 'exitState') in _schema_paths(response_schema):
-        match = re.search(r"\b(?:success\s+requires?|require)\b.{0,180}?\bdata\.exitState\s*(?:=|is|equal\s+to)?\s*[`\"']([A-Za-z0-9_-]+)[`\"']", rule, re.I)
-        if match:
-            checks.append((('data', 'exitState'), match.group(1)))
+    exit_value = _required_exit_state(rule)
+    if ('data', 'exitState') in _schema_paths(response_schema) and exit_value:
+        checks.append((('data', 'exitState'), exit_value))
     unique = dict(checks)
     if operation.role in {"read", "write"}:
         global_code = re.search(r"\bsuccess\s*=\s*HTTP\s*200\b.{0,80}\breturnCode\b.{0,30}[`\"']1[`\"']",
@@ -280,9 +291,8 @@ def _result_checks(operation: _Operation, rule: str = "", source: str = "") -> l
         scoped_code = re.search(r"\breturnCode\b\s*(?:=|is|equal\s+to|[\"'`])\s*[`\"']?1\b", rule, re.I)
         if (global_code or scoped_code) and unique.get(('result', 'returnCode')) != '1':
             raise ValueError(f"{operation.name}: source requires result.returnCode '1' but response schema cannot prove it")
-        exit_value = re.search(r"\b(?:success\s+requires?|require)\b.{0,180}?\bdata\.exitState\s*(?:=|is|equal\s+to)?\s*[`\"']([A-Za-z0-9_-]+)[`\"']", rule, re.I)
-        if exit_value and unique.get(('data', 'exitState')) != exit_value.group(1):
-            raise ValueError(f"{operation.name}: source requires data.exitState {exit_value.group(1)!r} but response schema cannot prove it")
+        if exit_value and unique.get(('data', 'exitState')) != exit_value:
+            raise ValueError(f"{operation.name}: source requires data.exitState {exit_value!r} but response schema cannot prove it")
         response_zero = re.search(r"\bresponseCode\b\s*(?:[`\"']?0[`\"']?|(?:equal\s+to|=|is)\s*[`\"']?0[`\"']?)", rule, re.I)
         if response_zero and unique.get(('data', 'responseCode')) != 0:
             raise ValueError(f"{operation.name}: source requires data.responseCode 0 but response schema cannot prove it")
@@ -976,10 +986,7 @@ def _normal_completion_utterance(policy: dict) -> str:
         ):
             match = re.search(pattern, menu, re.I | re.S)
             if match:
-                phrase = match.group(1).strip()
-                if re.search(r"\bthanks\b", menu, re.I) and phrase.startswith("Sizi ana menüye"):
-                    return "Teşekkür ederiz. " + phrase
-                return phrase
+                return match.group(1).strip()
     return "Thank you. Goodbye."
 
 
@@ -1078,10 +1085,17 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
         "If a required tool is unavailable or its result is ambiguous, explain that the action cannot be confirmed. "
         "Never retry an uncertain write. Use only tools available in the current stage.\n\nSOURCE POLICY:\n" + source
     )
+    normal_completion = _normal_completion_utterance(policy)
+    outcomes = policy.get("outcomes") or {}
+    main_menu_rule = outcomes.get("main_menu") if isinstance(outcomes, dict) else ""
+    courtesy_on_thanks = isinstance(main_menu_rule, str) and bool(re.search(r"\bthanks\b", main_menu_rule, re.I))
+    farewell_message = ("If the caller just thanked you, acknowledge that briefly in the source language. "
+                        "Then say the source-defined normal completion phrase exactly: " + normal_completion + " "
+                        "Do not claim an action succeeded unless the bank confirmed it.")
     nodes = {
         "farewell": {"name": "farewell", "node_type": "conversation",
-                     "on_enter": {"type": "tts", "text": _normal_completion_utterance(policy)},
-                     "task_message": "Speak the source-defined normal completion phrase. Do not claim an action succeeded unless the bank confirmed it.",
+                     "on_enter": {"type": "llm"} if courtesy_on_thanks else {"type": "tts", "text": normal_completion},
+                     "task_message": farewell_message,
                      "passthrough": True,
                      "passthrough_default_transition": "closing" if close_tool else "ended",
                      "transitions": [_always("closing" if close_tool else "ended")]},
@@ -1140,7 +1154,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     if verified or upstream_verified:
         nodes["service"] = _conversation(
             "service", "Use the source-confirmed identity context. Follow the source policy for account discussion, calculations, "
-            "offers, and exceptions. For a debt reading, state every present debt currency using its full Turkish name, "
+            "offers, and exceptions. For a debt reading, state every present debt currency using its full source-defined name, "
             "then name all present no-debt currency blocks in one sentence; a missing block is not zero. "
             "Ask about another eligible card before any other offer. Use read tools only when their policy conditions hold. Before a bank write, "
             "state the exact proposed action and obtain the customer's explicit confirmation. If no action is "
