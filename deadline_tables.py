@@ -117,9 +117,10 @@ def parse_deadline_tables(source: str) -> list[tuple[int, dict]]:
         if any(columns[role] is None for role in ("age", "deadline", "attempts")):
             index += 1
             continue
-        if index + 1 >= len(lines) or not _separator(_cells(lines[index + 1]) or []):
-            raise ValueError("Overdue deadline table needs a Markdown separator row")
-        index += 2
+        if index + 1 >= len(lines) or _cells(lines[index + 1]) is None:
+            raise ValueError("Overdue deadline table has no data rows")
+        # Plain-text bank extracts sometimes omit Markdown's separator row.
+        index += 2 if _separator(_cells(lines[index + 1]) or []) else 1
         rows = 0
         while index < len(lines):
             cells = _cells(lines[index])

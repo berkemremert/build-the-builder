@@ -14,6 +14,8 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           identity_selector_field, note_request_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
+from account_item_bindings import product_item_fields
+from deadline_tables import parse_deadline_tables
 from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
@@ -508,15 +510,7 @@ def _deadline_bands(policy: dict) -> list[dict]:
     source = str(policy.get("raw_brief") or "")
     if not source:
         source = "\n".join(str(policy.get(key) or "") for key in ("verified_call", "global_rules"))
-    found: list[tuple[int, dict]] = []
-    table = re.compile(
-        r"\|\s*(\d+)\s+to\s+(\d+)\s*\|\s*([^|]+)\|\s*the\s+(\d+)(?:st|nd|rd|th)\s+business day[^|]*\|\s*(\d+)\s*\|",
-        re.IGNORECASE,
-    )
-    for match in table.finditer(source):
-        low, high, label, days, attempts = match.groups()
-        found.append((match.start(), {"low": int(low), "high": int(high), "label": label.strip(),
-                     "business_days": int(days), "attempts": int(attempts)}))
+    found: list[tuple[int, dict]] = parse_deadline_tables(source)
     range_pattern = re.compile(
         r"\b(?P<low>\d+)\s*(?:to|through|[-–])\s*(?P<high>\d+)\s+days?\b"
         r"(?:\s+(?:late|overdue))?|"
@@ -719,15 +713,14 @@ except Exception:
 """
 
 
-def _prepare_code(holidays: list[str], item_fields: dict, bands: list[dict],
+def _prepare_code(holidays: list[str], item_bindings: dict, bands: list[dict],
                   offer_last_business_day: bool, collection_field: str) -> str:
-    amount_field = "past_due" if "past_due" in item_fields else next(
-        (k for k in item_fields if "due" in k or "balance" in k), "past_due")
-    days_field = "days_late" if "days_late" in item_fields else next(
-        (k for k in item_fields if "late" in k or "overdue_days" in k), "days_late")
-    floor_fields = [k for k in item_fields if any(x in k for x in ("minimum", "instalment", "installment", "floor"))]
-    if not floor_fields:
-        floor_fields = ["minimum_payment", "instalment_amount"]
+    id_field = item_bindings["product_id"]
+    kind_field = item_bindings["kind"]
+    amount_field = item_bindings["past_due"]
+    days_field = item_bindings["days_late"]
+    floor_fields = item_bindings["floors"]
+    card_field = item_bindings["card_last4"]
     return f"""import json
 import datetime
 try:
@@ -767,18 +760,23 @@ try:
     lines = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            continue
-        kind = str(item.get('type') or 'product')
+            raise ValueError('Malformed account product')
+        for required_field in ({id_field!r}, {kind_field!r}, {amount_field!r}, {days_field!r}):
+            if item.get(required_field) is None or item.get(required_field) == '':
+                raise ValueError('Missing required account product field')
+        kind = str(item[{kind_field!r}])
         label = kind.replace('_', ' ')
-        if 'card' in kind and item.get('card_last4'):
-            label += ' ending ' + str(item.get('card_last4'))
-        amount = float(item.get({amount_field!r}) or 0)
-        days = int(float(item.get({days_field!r}) or 0))
+        if 'card' in kind and {card_field!r} and item.get({card_field!r}):
+            label += ' ending ' + str(item.get({card_field!r}))
+        amount = float(item[{amount_field!r}])
+        days = int(float(item[{days_field!r}]))
         floors = [float(item.get(field) or 0) for field in {floor_fields!r}]
-        floor = next((value for value in floors if value > 0), amount)
+        floor = next((value for value in floors if value > 0), None)
+        if amount <= 0 or days < 0 or floor is None or floor > amount:
+            raise ValueError('Invalid account product amounts or age')
         band = next((rule for rule in reversed({bands!r}) if rule['low'] <= days <= rule['high']), None)
         deadline = nth(today, band['business_days']) if band else None
-        entry = dict(product_id=str(item.get('product_id') or ''), label=label,
+        entry = dict(product_id=str(item[{id_field!r}]), label=label,
                      past_due=amount, floor=floor, days_late=days,
                      band=band['label'] if band else '', deadline=deadline.isoformat() if deadline else '',
                      attempts=band['attempts'] if band else 0)
@@ -1831,7 +1829,8 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     account_path, account_method, _ = _api_spec(openapi, "get_account")
     account_operation = openapi["paths"][account_path][account_method.lower()]
     collection_field, response_schema = account_response_collection(account_operation)
-    item_fields = response_schema.get("properties", {}).get(collection_field, {}).get("items", {}).get("properties", {})
+    item_schema = response_schema.get("properties", {}).get(collection_field, {}).get("items", {})
+    item_bindings = product_item_fields(item_schema)
     identity_path, identity_method, _ = _api_spec(openapi, "verify_identity")
     identity_response = identity_response_fields(openapi["paths"][identity_path][identity_method.lower()])
     holidays = _holiday_dates(policy)
@@ -2026,7 +2025,7 @@ except Exception:
         "pre_actions": [account], "response_mapping": [{"path": "data." + collection_field, "variable": "account_products"}],
         "transitions": [_always("prepare_account")],
     }
-    nodes["prepare_account"] = _code_node("prepare_account", _prepare_code(holidays, item_fields, bands, offer_last_business_day, collection_field), "account_discussion")
+    nodes["prepare_account"] = _code_node("prepare_account", _prepare_code(holidays, item_bindings, bands, offer_last_business_day, collection_field), "account_discussion")
     nodes["prepare_account"]["transitions"] = [
         _eq("account_unavailable", "product_count", "0"), _always("account_discussion")]
     nodes["account_unavailable"] = _conversation(
