@@ -24,6 +24,7 @@ import builder  # noqa: E402
 import freya  # noqa: E402
 from policy_compiler import compile_policy  # noqa: E402
 from qa import validate_workflow  # noqa: E402
+from api_servers import operation_url  # noqa: E402
 
 
 def _fixture_model_call(prompt: str, *, purpose: str) -> dict:
@@ -95,6 +96,17 @@ class BuilderAcceptanceTests(unittest.TestCase):
         for url in ("https://user:password@mock.example", "https://mock.example/?token=secret", "file:///tmp/mock"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 builder._mock_openapi({"paths": {}}, url)
+
+    def test_mock_origin_and_optional_prefix_match_worker_convention(self) -> None:
+        api = {"openapi": "3.0.0", "paths": {"/v1/account": {"post": {"responses": {"200": {}}}}}}
+        origin = builder._mock_openapi(api, "https://worker.example")
+        prefixed = builder._mock_openapi(api, "https://worker.example/mock")
+        self.assertEqual("https://worker.example/v1/account",
+                         operation_url(origin, "/v1/account", "post"))
+        self.assertEqual("https://worker.example/mock/v1/account",
+                         operation_url(prefixed, "/v1/account", "post"))
+        with self.assertRaisesRegex(ValueError, "repeats a path prefix"):
+            builder._mock_openapi(api, "https://worker.example/v1")
 
     def test_prose_service_contract_uses_model_then_validates_workflow(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-prose-contract-") as directory:

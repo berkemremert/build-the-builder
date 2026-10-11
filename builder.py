@@ -334,8 +334,15 @@ def _mock_openapi(openapi: dict[str, Any], mock_url: str) -> dict[str, Any]:
     """Route every operation to the organizer's mock service, including overrides."""
     url = mock_url.rstrip("/")
     parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or
+            parsed.query or parsed.fragment or any(char.isspace() for char in url)):
         raise ValueError("Mock URL must be an absolute HTTP(S) base URL without credentials, query, or fragment")
+    base_path = parsed.path.rstrip("/")
+    api_paths = list((openapi.get("paths") or {}).keys())
+    if base_path and api_paths and all(isinstance(path, str) and
+                                       (path == base_path or path.startswith(base_path + "/"))
+                                       for path in api_paths):
+        raise ValueError("Mock URL repeats a path prefix already present in every OpenAPI endpoint")
     result = json.loads(json.dumps(openapi))
     result["servers"] = [{"url": url}]
     for path_item in (result.get("paths") or {}).values():
@@ -649,7 +656,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("case_folder", nargs="?", help="Case folder supplied by the organizer")
-    parser.add_argument("mock_url", nargs="?", help="Mock bank service base URL for case-folder mode")
+    parser.add_argument("mock_url", nargs="?", help="Mock service base URL; endpoint paths from the contract are appended")
     parser.add_argument("--brief", action="append", help="Brief path; repeat in precedence order")
     parser.add_argument("--openapi", help="Bank tool OpenAPI JSON")
     parser.add_argument("--slot", help="Reusable Freya workflow slot")
