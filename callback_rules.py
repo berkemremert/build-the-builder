@@ -21,13 +21,29 @@ def callback_window(source: str) -> dict[str, object] | None:
     end: str | None = None
     inclusive = False
     seen_rule = False
+    in_callback_section = False
     for line in source.splitlines():
-        if not re.search(r"\bcallbacks?\b", line, re.I):
+        stripped = line.strip()
+        if not stripped:
+            in_callback_section = False
+            continue
+        mentions_callback = bool(re.search(r"\bcallbacks?\b", line, re.I))
+        if mentions_callback:
+            in_callback_section = True
+        elif in_callback_section and not stripped.startswith(("-", "|")):
+            in_callback_section = False
+        if not mentions_callback and not in_callback_section:
+            continue
+        if re.fullmatch(r"\|?\s*(?:[-:]+\s*\|\s*)+[-:]+\s*\|?", stripped):
             continue
         horizon = _HORIZON.search(line)
         hours = _HOURS.search(line) or _HOURS_SHORT.search(line)
         if not horizon and not hours:
             if re.search(r"\b(?:window|hours?|business\s+days?|today|tomorrow)\b", line, re.I):
+                if re.fullmatch(r"(?:#+\s*)?callbacks?\s+(?:window|hours?|rules?)\s*:|"
+                                r"\|\s*(?:rule|field|callback(?:\s+window)?)\s*\|[^\n]*\|", stripped, re.I):
+                    seen_rule = True
+                    continue
                 raise ValueError("Cannot establish callback window from source")
             continue
         seen_rule = True
@@ -40,6 +56,8 @@ def callback_window(source: str) -> dict[str, object] | None:
                 r"\b(?:both\s+(?:included|inclusive)|inclusive(?:\s+at\s+both\s+ends)?)\b", line, re.I))
         if days is not None and (days < 1 or days > 7) or (start and end and start >= end):
             raise ValueError("Invalid callback day horizon or time window in source")
+        if days is not None and start and end and not stripped.startswith(("-", "|")):
+            in_callback_section = False
     if not seen_rule:
         return None
     if days is None or start is None or end is None:

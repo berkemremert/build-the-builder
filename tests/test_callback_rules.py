@@ -47,6 +47,17 @@ class CallbackRulesTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "endpoints"):
             callback_window("Callbacks are for today or the next business day, from 10:00 to 19:00.")
 
+    def test_heading_list_and_table_window(self):
+        for source in (
+            "Callback window:\n- Today or the next business day\n- Hours: 10:00 to 19:00, both included",
+            "| Rule | Callback window |\n|---|---|\n"
+            "| Date | Today or the next business day |\n"
+            "| Hours | 10:00 to 19:00, both included |",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual({"business_days": 1, "start": "10:00", "end": "19:00"},
+                                 callback_window(source))
+
     def test_request_fields_and_generated_guard(self):
         fields = callback_request_fields({"properties": {
             "customer_id": {"type": "string"}, "callback_day": {"type": "string", "format": "date"},
