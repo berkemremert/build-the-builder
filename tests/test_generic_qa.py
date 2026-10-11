@@ -107,6 +107,7 @@ class GenericRequestValidationTests(unittest.TestCase):
         farewell = workflow["nodes"]["farewell"]
         self.assertEqual("llm", farewell["on_enter"]["type"])
         self.assertIn("acknowledge that briefly in the source language", farewell["task_message"])
+        self.assertIn("Do not ask a question, offer another action", farewell["task_message"])
         self.assertIn("Sizi ana menüye yönlendiriyorum.", farewell["task_message"])
         self.policy["outcomes"]["main_menu"] = (
             "Normal completion and no eligible card. No eligible card: “Different phrase.” "

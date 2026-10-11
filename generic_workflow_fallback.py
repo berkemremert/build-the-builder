@@ -1090,8 +1090,10 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     outcomes = policy.get("outcomes") or {}
     main_menu_rule = outcomes.get("main_menu") if isinstance(outcomes, dict) else ""
     courtesy_on_thanks = isinstance(main_menu_rule, str) and bool(re.search(r"\bthanks\b", main_menu_rule, re.I))
-    farewell_message = ("If the caller just thanked you, acknowledge that briefly in the source language. "
-                        "Then say the source-defined normal completion phrase exactly: " + normal_completion + " "
+    farewell_message = ("This is the final spoken turn. Do not ask a question, offer another action, or imply the caller can respond. "
+                        "If a bank write was confirmed, state only its source-defined confirmation using verified bank values. "
+                        "If the caller just thanked you, acknowledge that briefly in the source language. "
+                        "Finish by saying the source-defined normal completion phrase exactly: " + normal_completion + " "
                         "Do not claim an action succeeded unless the bank confirmed it.")
     nodes = {
         "farewell": {"name": "farewell", "node_type": "conversation",
