@@ -607,13 +607,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         contract_names = _contract_operation_names(openapi)
         generic_workflow = bool(case_folder and not _PRACTICE_OPERATIONS.issubset(contract_names))
+        if not generic_workflow:
+            try:
+                workflow = build_workflow(policy, openapi)
+            except ValueError as error:
+                if not case_folder:
+                    raise
+                generic_workflow = True
+                trace.write("deterministic_generator_incompatible", error_type=type(error).__name__,
+                            reason=str(error)[:250])
         if generic_workflow:
             from generic_workflow_fallback import build_generic_workflow
             workflow = build_generic_workflow(policy, openapi)
             trace.write("workflow_generator_selected", kind="contract_driven",
                         operation_names=sorted(contract_names))
         else:
-            workflow = build_workflow(policy, openapi)
             trace.write("workflow_generator_selected", kind="deterministic",
                         operation_names=sorted(contract_names))
         if not isinstance(workflow, dict):

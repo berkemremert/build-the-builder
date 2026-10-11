@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 import builder  # noqa: E402
 from qa import validate_generic_workflow  # noqa: E402
+from policy_compiler import compile_policy  # noqa: E402
 
 
 def contract() -> dict:
@@ -81,6 +82,30 @@ class GenericWorkflowDispatchTests(unittest.TestCase):
             self.assertIn({"event": "workflow_generator_selected", "kind": "contract_driven"},
                           [{"event": row["event"], "kind": row.get("kind")}
                            for row in trace if row["event"] == "workflow_generator_selected"])
+
+    def test_case_folder_falls_back_when_named_contract_shape_is_incompatible(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="btb-generic-shape-") as directory:
+            folder = Path(directory) / "case"
+            folder.mkdir()
+            (folder / "BRIEF.md").write_text("Use source-only bank rules.", encoding="utf-8")
+            source = ROOT / "tools/openapi.json"
+            (folder / "openapi.json").write_bytes(source.read_bytes())
+            module = types.ModuleType("generic_workflow_fallback")
+            generic = mock.Mock(return_value=workflow())
+            module.build_generic_workflow = generic
+            extracted = compile_policy([str(ROOT / "briefs/brief-a.md")], str(source), None)
+            extracted["constraints"]["extraction_status"] = "model"
+            args = argparse.Namespace(case_folder=str(folder), mock_url="https://mock.example",
+                                      brief=None, openapi=None, slot="shape", out=str(Path(directory) / "out"),
+                                      no_live=True, no_test=True)
+            with mock.patch.dict(sys.modules, {"generic_workflow_fallback": module}), \
+                 mock.patch.object(builder, "_model_caller", return_value=lambda *_a, **_kw: extracted), \
+                 mock.patch("workflow_generator.build_workflow", side_effect=ValueError("incompatible schema")), \
+                 mock.patch("qa.validate_generic_workflow", return_value=[]):
+                result = builder.run(args)
+            generic.assert_called_once()
+            events = [json.loads(line) for line in Path(result["trace"]).read_text().splitlines()]
+            self.assertIn("deterministic_generator_incompatible", [row["event"] for row in events])
 
 
 if __name__ == "__main__":
