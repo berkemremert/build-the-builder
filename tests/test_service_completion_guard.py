@@ -73,6 +73,12 @@ class ServiceCompletionGuardTests(unittest.TestCase):
         self.assertEqual("yes", state["generic_prereq_ready_change"])
         self.assertNotIn("confirmed_write_action", state)
 
+    def test_failed_write_tool_exits_commit_without_retry(self):
+        commit = self.nodes["commit"]
+        self.assertEqual(["farewell"], _matching_targets(
+            commit, {"saveArrangement_response.status": "error"}))
+        self.assertNotIn("commit", [edge["target_node"] for edge in commit["transitions"]])
+
 
 if __name__ == "__main__":
     unittest.main()

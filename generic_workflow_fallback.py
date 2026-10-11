@@ -1326,7 +1326,10 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                 "flag before you say it succeeded. Never retry an ambiguous response. End after one confirmed or "
                 "uncertain result.", tools=write_tools,
                 transitions=[_when("generic_write_result", "confirmed", "farewell", "Write confirmed"),
-                             _when("generic_write_result", "unknown", "farewell", "Write unconfirmed")],
+                             _when("generic_write_result", "unknown", "farewell", "Write unconfirmed")]
+                + [_when(tool["function"]["name"] + "_response.status", "error", "farewell",
+                         "Bank write tool failed before or during the request; do not retry or claim success")
+                   for tool in write_tools],
                 turns=3)
     if close_tool:
         nodes["closing"] = {
