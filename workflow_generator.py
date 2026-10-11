@@ -25,6 +25,7 @@ from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
 from source_code_mappings import explicit_code_mappings
+from write_result_fields import write_success_field
 from reason_code_mappings import explicit_reason_codes
 from success_messages import exact_success_sentence
 from policy_capabilities import requires_multi_product
@@ -1869,6 +1870,16 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     note_fields = note_request_fields(_api_spec(openapi, "add_note")[2])
     transfer_fields = transfer_request_fields(_api_spec(openapi, "transfer_to_agent")[2])
     close_fields = close_request_fields(_api_spec(openapi, "close_call")[2])
+    write_flags = {}
+    for operation_name in ("add_note", "transfer_to_agent", "schedule_callback"):
+        path, method, _ = _api_spec(openapi, operation_name)
+        write_flags[operation_name] = write_success_field(
+            openapi["paths"][path][method.lower()], operation_name)
+    note_hook = _NOTE_HOOK.replace("data.get('ok')", f"data.get({write_flags['add_note']!r})")
+    callback_hook = _CALLBACK_HOOK.replace(
+        "data.get('ok')", f"data.get({write_flags['schedule_callback']!r})")
+    transfer_hook = _TRANSFER_HOOK.replace(
+        "data.get('ok')", f"data.get({write_flags['transfer_to_agent']!r})")
     promise_bindings = {promise_fields["product"]: "{{pending_product_id}}",
                         promise_fields["amount"]: "{{pending_amount}}",
                         promise_fields["date"]: "{{pending_date}}"}
@@ -1898,7 +1909,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
                            description=f"Check the customer's {identity_fields[0].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
     verify_phone = _api_tool(openapi, "verify_identity", fixed={identity_selector: identity_fields[1]},
                              description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
-    callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=_CALLBACK_HOOK)
+    callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=callback_hook)
     callback_schema = _api_spec(openapi, "schedule_callback")[2]
     callback_date_fields = [field for field, spec in (callback_schema.get("properties") or {}).items()
                             if isinstance(spec, dict) and (spec.get("format") == "date" or
@@ -1918,9 +1929,9 @@ if day > today and (day.weekday() not in {weekdays!r} or day.isoformat() in {hol
 """
     account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")
     promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
-    note = _api_tool(openapi, "add_note", description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=_NOTE_HOOK)
-    transfer_hook = _TRANSFER_HOOK.replace("transfer_to_agent_args.queue",
-                                           "transfer_to_agent_args." + transfer_fields["queue"])
+    note = _api_tool(openapi, "add_note", description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=note_hook)
+    transfer_hook = transfer_hook.replace("transfer_to_agent_args.queue",
+                                          "transfer_to_agent_args." + transfer_fields["queue"])
     transfer = _api_tool(openapi, "transfer_to_agent", description="Transfer only for accepted support, persistent human request, or restructuring. Never add notes on a transfer.", post_code=transfer_hook)
     promise["pre_process_code"] = """try:
     body = config.get('body')
@@ -2603,7 +2614,7 @@ except Exception:
         _eq("add_note_call", "note_write_state", "notes"), _always("finalize")]
     note_engine = _api_tool(openapi, "add_note", fixed={
         note_fields["product"]: "{{pending_note_product_id}}", note_fields["reason"]: "{{pending_note_reason}}"},
-        description="Record one deferred non-promise reason after the discussion has ended and no transfer is pending.", post_code=_NOTE_HOOK)
+        description="Record one deferred non-promise reason after the discussion has ended and no transfer is pending.", post_code=note_hook)
     note_engine["pre_process_code"] = note["pre_process_code"]
     for node_name, failure_target in (("add_note_call", "retry_note_call"),
                                       ("retry_note_call", "note_write_failed")):
@@ -2611,7 +2622,7 @@ except Exception:
             "name": node_name, "node_type": "api_request", "on_enter": {"type": "silent"},
             "passthrough": True, "passthrough_default_transition": failure_target,
             "pre_actions": [note_engine],
-            "transitions": [_bool("advance_note", node_name + "_response.data.ok", "Note API confirmed success"),
+            "transitions": [_bool("advance_note", node_name + "_response.data." + write_flags["add_note"], "Note API confirmed success"),
                             _always(failure_target)],
         }
     nodes["advance_note"] = _code_node("advance_note", _ADVANCE_NOTE_CODE, "select_note")
@@ -2619,7 +2630,7 @@ except Exception:
     for suffix in ("restructuring", "support", "human"):
         queue = _queue_for(openapi, suffix, policy)
         t = _api_tool(openapi, "transfer_to_agent", fixed={transfer_fields["queue"]: queue},
-                      description=f"Transfer to {queue} now; no notes on any transfer.", post_code=_TRANSFER_HOOK)
+                      description=f"Transfer to {queue} now; no notes on any transfer.", post_code=transfer_hook)
         t["pre_process_code"] = (
             "try:\n"
             f"    vars['pending_transfer_queue'] = {queue!r}\n"

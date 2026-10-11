@@ -22,6 +22,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
 from api_parameters import required_header_bindings
 from api_servers import operation_url
 from openapi_resolver import normalize_openapi
+from write_result_fields import write_success_field
 
 
 ROOT = Path(__file__).resolve().parent
@@ -366,6 +367,16 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         expected_name = operation.get("operationId") or api_path.rstrip("/").split("/")[-1]
         if name != expected_name:
             errors.append(f"{location}: function.name {name!r} must match OpenAPI operation {expected_name!r} at {api_path!r}")
+        if name in {"add_note", "transfer_to_agent", "schedule_callback"}:
+            try:
+                flag = write_success_field(operation, name)
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                hook = tool.get("post_process_code")
+                if hook is not None and (not isinstance(hook, str) or
+                                         f"data.get({flag!r}) is True" not in hook):
+                    errors.append(f"{location}.post_process_code: bind OpenAPI write-success field {flag!r}")
         try:
             expected_headers = required_header_bindings(openapi, api_path, api_method)
         except ValueError as exc:
@@ -508,6 +519,31 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         task_message = node.get("task_message", "")
         raw_transitions = node.get("transitions", [])
         callable_transitions = raw_transitions if isinstance(raw_transitions, list) else []
+        if name in {"add_note_call", "retry_note_call"}:
+            matches = [(path, method, operation) for path, path_item in (openapi.get("paths") or {}).items()
+                       for method, operation in path_item.items()
+                       if isinstance(operation, dict) and
+                       (operation.get("operationId") or path.rstrip("/").split("/")[-1]) == "add_note"]
+            if len(matches) == 1:
+                try:
+                    flag = write_success_field(matches[0][2], "add_note")
+                except ValueError as exc:
+                    errors.append(f"{loc}: {exc}")
+                else:
+                    expected_variable = name + "_response.data." + flag
+                    successes = [edge for edge in callable_transitions if isinstance(edge, dict)
+                                 and edge.get("target_node") == "advance_note"]
+                    def uses_result_flag(condition) -> bool:
+                        if not isinstance(condition, dict):
+                            return False
+                        children = condition.get("conditions")
+                        if isinstance(children, list):
+                            return bool(children) and all(uses_result_flag(child) for child in children)
+                        return (condition.get("variable") == expected_variable and
+                                condition.get("operator") == "equals" and
+                                str(condition.get("operand", "")).lower() == "true")
+                    if len(successes) != 1 or not uses_result_flag(successes[0].get("condition")):
+                        errors.append(f"{loc}.transitions: bind OpenAPI write-success field {flag!r}")
         if (kind == "conversation" and isinstance(task_message, str) and
                 re.search(r"\bno\s+tool\s+calls?\s+(?:is|are)\s+allowed\b", task_message, re.I) and
                 (tools or any(isinstance(t, dict) and t.get("is_tool_call") for t in callable_transitions))):
