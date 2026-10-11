@@ -17,7 +17,8 @@ from pathlib import Path
 
 from api_bindings import (account_response_collection, identity_response_fields,
                           identity_selector_field, note_request_fields,
-                          promise_request_fields)
+                          promise_request_fields, transfer_request_fields,
+                          close_request_fields)
 from openapi_resolver import normalize_openapi
 
 
@@ -433,6 +434,25 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                     field = semantic_fields[role]
                     default = (body_props.get(field) or {}).get("default")
                     if default != "{{" + variable + "}}":
+                        errors.append(f"{location}.body.properties.{field}.default: bind {role} to {{{{{variable}}}}}")
+        if name == "transfer_to_agent" and placement == "pre_action" and ".nodes.transfer_" in location:
+            try:
+                field = transfer_request_fields(schema)["queue"]
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                default = (body_props.get(field) or {}).get("default")
+                if default == "{{" + field + "}}":
+                    errors.append(f"{location}.body.properties.{field}.default: bind transfer queue to a source-derived value")
+        if name == "close_call" and placement == "pre_action" and ".nodes.close_call." in location:
+            try:
+                fields = close_request_fields(schema)
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                for role, variable in (("outcome", "close_outcome"), ("reason", "close_reason")):
+                    field = fields[role]
+                    if field and (body_props.get(field) or {}).get("default") != "{{" + variable + "}}":
                         errors.append(f"{location}.body.properties.{field}.default: bind {role} to {{{{{variable}}}}}")
 
     edges: dict[str, list[tuple[str, bool, bool]]] = {}

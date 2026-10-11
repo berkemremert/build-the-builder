@@ -93,6 +93,43 @@ def note_request_fields(schema: dict) -> dict[str, str]:
     return {role: names[0] for role, names in found.items()}
 
 
+def transfer_request_fields(schema: dict) -> dict[str, str]:
+    """Find the transfer destination field, including renamed routing codes."""
+    found = []
+    for field, spec in (schema.get("properties") or {}).items():
+        name = re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_")
+        words = set(name.split("_"))
+        description = str(spec.get("description") or "").lower() if isinstance(spec, dict) else ""
+        if words & {"queue", "routing", "route", "destination", "department"} or re.search(
+                r"\b(?:transfer|routing)\s+(?:queue|destination|code)\b", description):
+            found.append(field)
+    if len(found) != 1:
+        raise ValueError(f"transfer_to_agent request needs one unambiguous queue field: {found!r}")
+    return {"queue": found[0]}
+
+
+def close_request_fields(schema: dict) -> dict[str, str | None]:
+    """Find close outcome and optional reason fields from names/descriptions."""
+    found: dict[str, list[str]] = {"outcome": [], "reason": []}
+    for field, spec in (schema.get("properties") or {}).items():
+        name = re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_")
+        words = set(name.split("_"))
+        description = str(spec.get("description") or "").lower() if isinstance(spec, dict) else ""
+        if name == "customer_id" or name.startswith("customer_"):
+            continue
+        if words & {"outcome", "result", "disposition"} or "call outcome" in description:
+            found["outcome"].append(field)
+        elif words & {"reason", "detail", "cause"} or re.search(
+                r"\b(?:close|outcome)\s+reason\b", description):
+            found["reason"].append(field)
+    if len(found["outcome"]) != 1 or len(found["reason"]) > 1 or (
+            not found["reason"] and any(name != "customer_id" and name != found["outcome"][0]
+                                        for name in schema.get("required") or [])):
+        raise ValueError(f"close_call request needs one outcome and at most one reason field: {found!r}")
+    return {"outcome": found["outcome"][0],
+            "reason": found["reason"][0] if found["reason"] else None}
+
+
 def account_collection_field(response_schema: dict) -> str:
     """Find the account's single product collection in an OpenAPI response."""
     properties = response_schema.get("properties") or {}

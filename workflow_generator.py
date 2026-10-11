@@ -12,7 +12,8 @@ from typing import Any
 
 from api_bindings import (account_response_collection, identity_response_fields,
                           identity_selector_field, note_request_fields,
-                          promise_request_fields)
+                          promise_request_fields, transfer_request_fields,
+                          close_request_fields)
 from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
@@ -334,7 +335,7 @@ def _holiday_dates(policy: dict) -> list[str]:
 
 def _queue_for(openapi: dict, role: str, policy: dict) -> str:
     schema = _api_spec(openapi, "transfer_to_agent")[2]
-    queue_spec = (schema.get("properties") or {}).get("queue") or {}
+    queue_spec = (schema.get("properties") or {}).get(transfer_request_fields(schema)["queue"]) or {}
     values = [str(value) for value in queue_spec.get("enum") or []]
     if not values:
         return role
@@ -375,7 +376,8 @@ def _identity_fields(openapi: dict, policy: dict) -> list[str]:
 
 def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
     schema = _api_spec(openapi, "close_call")[2]
-    values = [str(value) for value in ((schema.get("properties") or {}).get("outcome") or {}).get("enum") or []]
+    outcome_field = close_request_fields(schema)["outcome"]
+    values = [str(value) for value in ((schema.get("properties") or {}).get(outcome_field) or {}).get("enum") or []]
     if not values:
         return {role: role for role in ("promise", "paid", "transferred", "no_promise", "not_verified", "not_reached")}
     aliases = {
@@ -411,7 +413,8 @@ def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
 
 def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str, str], list[str], list[str]]:
     close_schema = _api_spec(openapi, "close_call")[2]
-    close_enum = [str(value) for value in ((close_schema.get("properties") or {}).get("reason") or {}).get("enum") or []]
+    reason_field = close_request_fields(close_schema)["reason"]
+    close_enum = [str(value) for value in ((close_schema.get("properties") or {}).get(reason_field) or {}).get("enum") or []]
     note_schema = _api_spec(openapi, "add_note")[2]
     note_enum = [str(value) for value in ((note_schema.get("properties") or {}).get("reason") or {}).get("enum") or []]
     source = str(policy.get("raw_brief") or "") + "\n" + str(policy.get("tool_policy") or "")
@@ -1839,6 +1842,8 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     promise_success_codes, promise_result_flag, promise_false_codes, promise_no_write_codes = _promise_response_contract(openapi)
     promise_fields = promise_request_fields(_api_spec(openapi, "create_promise")[2])
     note_fields = note_request_fields(_api_spec(openapi, "add_note")[2])
+    transfer_fields = transfer_request_fields(_api_spec(openapi, "transfer_to_agent")[2])
+    close_fields = close_request_fields(_api_spec(openapi, "close_call")[2])
     promise_bindings = {promise_fields["product"]: "{{pending_product_id}}",
                         promise_fields["amount"]: "{{pending_amount}}",
                         promise_fields["date"]: "{{pending_date}}"}
@@ -1878,7 +1883,9 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")
     promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
     note = _api_tool(openapi, "add_note", description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=_NOTE_HOOK)
-    transfer = _api_tool(openapi, "transfer_to_agent", description="Transfer only for accepted support, persistent human request, or restructuring. Never add notes on a transfer.", post_code=_TRANSFER_HOOK)
+    transfer_hook = _TRANSFER_HOOK.replace("transfer_to_agent_args.queue",
+                                           "transfer_to_agent_args." + transfer_fields["queue"])
+    transfer = _api_tool(openapi, "transfer_to_agent", description="Transfer only for accepted support, persistent human request, or restructuring. Never add notes on a transfer.", post_code=transfer_hook)
     promise["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
@@ -1897,19 +1904,22 @@ except Exception:
     transfer["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
-        vars['pending_transfer_queue'] = str(body.get('queue') or '')
+        vars['pending_transfer_queue'] = str(body.get(__QUEUE_FIELD__) or '')
 except Exception:
     pass
-"""
-    close = _api_tool(openapi, "close_call", fixed={"outcome": "{{close_outcome}}", "reason": "{{close_reason}}"},
+""".replace("__QUEUE_FIELD__", repr(transfer_fields["queue"]))
+    close_bindings = {close_fields["outcome"]: "{{close_outcome}}"}
+    if close_fields["reason"]:
+        close_bindings[close_fields["reason"]] = "{{close_reason}}"
+    close = _api_tool(openapi, "close_call", fixed=close_bindings,
                       description="Close the call exactly once, after farewell. This is the last bank API call.")
     close["pre_process_code"] = """try:
     body = config.get('body')
-    if isinstance(body, dict) and not body.get('reason'):
-        body.pop('reason', None)
+    if isinstance(body, dict) and __REASON_FIELD__ and not body.get(__REASON_FIELD__):
+        body.pop(__REASON_FIELD__, None)
 except Exception:
     pass
-"""
+""".replace("__REASON_FIELD__", repr(close_fields["reason"]))
 
     identity_base = ("You are still before identity verification. Follow the policy's confidentiality and disclosure rules exactly; do not reveal account details. "
                      f"If asked whether you are AI, identify yourself truthfully as {bank_name}'s digital assistant. If asked whether this is a scam, follow the policy's verification guidance. "
@@ -2566,7 +2576,7 @@ except Exception:
     nodes["note_write_failed"] = _code_node("note_write_failed", _SKIP_NOTE_CODE, "select_note")
     for suffix in ("restructuring", "support", "human"):
         queue = _queue_for(openapi, suffix, policy)
-        t = _api_tool(openapi, "transfer_to_agent", fixed={"queue": queue},
+        t = _api_tool(openapi, "transfer_to_agent", fixed={transfer_fields["queue"]: queue},
                       description=f"Transfer to {queue} now; no notes on any transfer.", post_code=_TRANSFER_HOOK)
         t["pre_process_code"] = (
             "try:\n"
@@ -2680,30 +2690,31 @@ except Exception:
                 "service_unavailable", "Code execution failed; no result may be assumed",
                 _when(_check(code_name + "_failure_count", "greater_than", 0)),
             ))
-    close["pre_process_code"] = (
-        "try:\n"
-        "    import json\n"
-        "    body = config.get('body')\n"
-        "    if isinstance(body, dict):\n"
-        f"        failed_nodes = {code_names!r}\n"
-        "        failed = any(int(vars.get(name + '_failure_count') or 0) > 0 for name in failed_nodes)\n"
-        "        if failed or not vars.get('close_outcome'):\n"
-        "            recorded = vars.get('recorded_ids') or '[]'\n"
-        "            try:\n"
-        "                recorded = json.loads(recorded) if isinstance(recorded, str) else recorded\n"
-        "            except Exception:\n"
-        "                recorded = []\n"
-        "            if recorded:\n"
-        f"                body['outcome'] = {outcomes['promise']!r}\n"
-        "                body.pop('reason', None)\n"
-        "            else:\n"
-        f"                body['outcome'] = {outcomes['no_promise']!r}\n"
-        f"                body['reason'] = {(close_reason_names.get('service_error') or 'service_error')!r}\n"
-        "        elif not body.get('reason'):\n"
-        "            body.pop('reason', None)\n"
-        "except Exception:\n"
-        "    pass\n"
-    )
+    close_code = [
+        "try:\n", "    import json\n", "    body = config.get('body')\n",
+        "    if isinstance(body, dict):\n",
+        f"        failed_nodes = {code_names!r}\n",
+        "        failed = any(int(vars.get(name + '_failure_count') or 0) > 0 for name in failed_nodes)\n",
+        "        if failed or not vars.get('close_outcome'):\n",
+        "            recorded = vars.get('recorded_ids') or '[]'\n",
+        "            try:\n",
+        "                recorded = json.loads(recorded) if isinstance(recorded, str) else recorded\n",
+        "            except Exception:\n", "                recorded = []\n",
+        "            if recorded:\n",
+        f"                body[{close_fields['outcome']!r}] = {outcomes['promise']!r}\n",
+        f"                body.pop({close_fields['reason']!r}, None)\n",
+        "            else:\n",
+        f"                body[{close_fields['outcome']!r}] = {outcomes['no_promise']!r}\n",
+    ]
+    if close_fields["reason"]:
+        close_code.append(
+            f"                body[{close_fields['reason']!r}] = {(close_reason_names.get('service_error') or 'service_error')!r}\n")
+    close_code.extend([
+        f"        elif {close_fields['reason']!r} and not body.get({close_fields['reason']!r}):\n",
+        f"            body.pop({close_fields['reason']!r}, None)\n",
+        "except Exception:\n", "    pass\n",
+    ])
+    close["pre_process_code"] = "".join(close_code)
     system_prompt = (
         f"You are {bank_name}'s digital assistant. Follow the source policy below in full. "
         "Follow the current node's task exactly. Never disclose account information before the required identity checks pass. "
