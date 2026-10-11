@@ -146,7 +146,7 @@ class FinalSubmissionTests(unittest.TestCase):
         submission._scan_text('Use Bearer authentication; fixture Bearer abcdefghijklmnop', 'test fixture')
         submission._scan_text('sk-or-offline', 'test fixture')
         with self.assertRaisesRegex(submission.SubmissionError, "Possible credential"):
-            submission._scan_text('Bearer a-different-token-123456789', 'artifact')
+            submission._scan_text('Bearer ' + 'a-different-token-123456789', 'artifact')
 
 
 if __name__ == "__main__":
