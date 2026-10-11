@@ -36,19 +36,56 @@ def _source_policy(policy: dict) -> str:
     return "\n\n".join(str(part) for part in sections if part)
 
 
+def _declared_call_variables(source: str) -> set[str]:
+    """Find variables explicitly supplied with each call in source prose."""
+    names: set[str] = set()
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        if not re.search(r"\b(?:every|each|per) call\b.{0,100}\b(?:variables?|inputs?)\b|"
+                         r"\b(?:call variables?|call inputs?)\b", line, re.I):
+            continue
+        for candidate in lines[index + 1:index + 12]:
+            if re.match(r"\s*#{1,6}\s", candidate) or candidate.startswith("===== SOURCE:"):
+                break
+            match = re.match(r"\s*[-*]\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*:", candidate)
+            if match:
+                names.add(match.group(1))
+    return names
+
+
+def _upstream_identity_confirmed(source: str) -> bool:
+    """Recognize an explicit prior IVR identity check, never infer one from tools."""
+    matches = re.finditer(
+        r"\b(?:IVR|phone menu)\b.{0,180}\b(?:verified|authenticated|checked (?:identity|who they are))\b|"
+        r"\b(?:verified|authenticated)\b.{0,80}\b(?:by|through|in)\s+(?:the\s+)?(?:IVR|phone menu)\b",
+        source, re.I | re.S)
+    return any(not re.search(r"\b(?:not|never|without|unable)\b", match.group(0), re.I)
+               for match in matches)
+
+
 def _role(name: str, method: str, operation: dict, tool_rule: str) -> str:
-    label = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
+    label = re.sub(r"[_./-]+", " ", re.sub(r"([a-z])([A-Z])", r"\1 \2", name)).lower()
     summary = str(operation.get("summary") or "").lower()
+    description = str(operation.get("description") or "").lower()
+    detail = " ".join((label, summary, description))
     if re.search(r"verif|identit|authenticat|security.check|security.question", label):
         return "verify"
     if re.search(r"close|finish|end.call|finali[sz]|disposition", label):
         return "close"
-    if method == "get" or re.search(r"fetch|retrieve|read|list|lookup|get.account", label):
-        return "read"
     if re.search(r"verif|identit|authenticat|security.check", summary):
         return "verify"
     if re.search(r"close.call|finish.call|end.call|finali[sz].call|disposition", summary):
         return "close"
+    if method == "get":
+        return "read"
+    if re.search(r"\b(?:send|change|update|modify|save|submit|create|record|set|write|"
+                 r"g[oö]nder|de[gğ]i[sş]tir|g[uü]ncelle|kaydet|olu[sş]tur|tan[iı]mla)\b", detail):
+        return "write"
+    if re.search(r"\b(?:get|fetch|retrieve|read|list|lookup|query|search|show|view|"
+                 r"sorgula|listele|g[oö]r[uü]nt[uü]le|getir|oku)\b", detail):
+        return "read"
+    if re.search(r"\b(?:read.only|retrieve|lookup|query|list|sorgula|listele)\b", tool_rule, re.I):
+        return "read"
     return "write"
 
 
@@ -143,7 +180,7 @@ def _identity_completion_field(operation: _Operation) -> str | None:
 
 
 def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | None = None,
-          fixed: dict | None = None) -> dict:
+          fixed: dict | None = None, call_variables: set[str] | None = None) -> dict:
     url = operation_url(openapi, operation.path, operation.method)
     headers = {"Content-Type": {"type": "string", "default": "application/json"}}
     headers.update(required_header_bindings(openapi, operation.path, operation.method))
@@ -170,6 +207,8 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
             leaf["default"] = spec["default"]
         elif isinstance(spec.get("enum"), list) and len(spec["enum"]) == 1:
             leaf["default"] = spec["enum"][0]
+        elif name in (call_variables or set()):
+            leaf["default"] = "{{" + name + "}}"
         elif re.fullmatch(r"(?:customer|client|party|person)_?id", name, re.I):
             leaf["default"] = "{{customer_id}}"
         body_properties[name] = leaf
@@ -396,6 +435,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     openapi = normalize_openapi(openapi)
     policy = policy or {}
     source = _source_policy(policy)
+    call_variables = _declared_call_variables(str(policy.get("raw_brief") or source))
     operations = _operations(openapi, policy)
     rules = policy.get("tool_policy") or {}
     rules = rules if isinstance(rules, dict) else {}
@@ -408,13 +448,14 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                                  else _boolean_result(operation, terms))
         try:
             tools[operation.name] = _tool(openapi, operation, str(rules.get(operation.name) or ""),
-                                          proof[operation.name])
+                                          proof[operation.name], call_variables=call_variables)
         except ValueError:
             # The API transport cannot safely bind some OpenAPI parameters.
             # Omission keeps the workflow runnable without fabricating values.
             continue
     verify = [op for op in operations if op.role == "verify" and op.name in tools and proof[op.name]]
-    if len(verify) != 1 and any(op.role in {"verify", "read", "write"} for op in operations):
+    upstream_verified = len(verify) == 0 and _upstream_identity_confirmed(source)
+    if len(verify) != 1 and not upstream_verified and any(op.role in {"verify", "read", "write"} for op in operations):
         raise ValueError("Cannot identify exactly one callable identity operation with an unambiguous "
                          "bank-confirmed full-verification boolean result")
     verified = len(verify) == 1
@@ -447,23 +488,20 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
         return ([{"name": "generic_close_reason", "type": "string", "enum_values": values,
                  "description": "Choose only the source-approved reason explicitly supported by the caller or bank result.",
                  "min_confidence": 0.9}] if values else [])
+    call_context = ("Call inputs supplied by the platform: " +
+                    ", ".join(f"{name}={{{{{name}}}}}" for name in sorted(call_variables)) + ". "
+                    if call_variables else "")
+    identity_rule = ("The source says the upstream IVR confirmed identity. Follow any additional identity or "
+                     "second-factor requirement in the source before disclosing protected details. "
+                     if upstream_verified else
+                     "Never disclose account or debt details before the bank explicitly confirms identity. ")
     system_prompt = (
-        "Follow the supplied bank policy exactly. Never disclose account or debt details before the bank explicitly "
-        "confirms identity. Never invent account facts, terms, tool results, or a successful write. "
+        "Follow the supplied bank policy exactly. " + identity_rule + call_context +
+        "Never invent account facts, terms, tool results, or a successful write. "
         "If a required tool is unavailable or its result is ambiguous, explain that the action cannot be confirmed. "
         "Never retry an uncertain write. Use only tools available in the current stage.\n\nSOURCE POLICY:\n" + source
     )
     nodes = {
-        "opening": _conversation(
-            "opening", "Follow the source opening and confidentiality rules. Establish whether the speaker is "
-            "the customer before requesting any account information. Do not mention debt or account details.",
-            extraction=[{"name": "caller_role", "type": "string",
-                         "enum_values": ["customer", "third_party", "wrong_number", "unknown"],
-                         "description": "Confirmed role of the person speaking.", "min_confidence": 0.75}]
-            + reason_extraction("not_reached"),
-            transitions=[_when("caller_role", "customer", "verification" if verified else "farewell",
-                               "Customer is on the line"), _always("farewell")],
-            turns=4),
         "farewell": {"name": "farewell", "node_type": "conversation",
                      "on_enter": {"type": "tts", "text": "Thank you. Goodbye."},
                      "task_message": "End the call. Do not claim an action succeeded unless the bank confirmed it.",
@@ -472,6 +510,17 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                      "transitions": [_always("closing" if close_tool else "ended")]},
         "ended": _end_node(),
     }
+    if not upstream_verified:
+        nodes["opening"] = _conversation(
+            "opening", "Follow the source opening and confidentiality rules. Establish whether the speaker is "
+            "the customer before requesting any account information. Do not mention debt or account details.",
+            extraction=[{"name": "caller_role", "type": "string",
+                         "enum_values": ["customer", "third_party", "wrong_number", "unknown"],
+                         "description": "Confirmed role of the person speaking.", "min_confidence": 0.75}]
+            + reason_extraction("not_reached"),
+            transitions=[_when("caller_role", "customer", "verification" if verified else "farewell",
+                               "Customer is on the line"), _always("farewell")],
+            turns=4)
     if verified:
         assert verify_op is not None
         steps = _identity_steps(verify_op, source)
@@ -497,7 +546,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                     "Use the bank identity tool for their own answer. Do not disclose account information until "
                     "the bank explicitly confirms every required check. Respect the source attempt limit.",
                     tools=[_tool(openapi, verify_op, str(rules.get(verify_op.name) or ""),
-                                 proof[verify_op.name], fixed={field: value})],
+                                 proof[verify_op.name], fixed={field: value},
+                                 call_variables=call_variables)],
                     extraction=reason_extraction("not_verified"), transitions=edges, turns=6)
         else:
             nodes["verification"] = _conversation(
@@ -510,8 +560,9 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                              _when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "True", "service",
                                    "Bank confirmed identity")],
                 turns=6)
+    if verified or upstream_verified:
         nodes["service"] = _conversation(
-            "service", "The bank confirmed identity. Follow the source policy for account discussion, calculations, "
+            "service", "Use the source-confirmed identity context. Follow the source policy for account discussion, calculations, "
             "offers, and exceptions. Use read tools only when their policy conditions hold. Before a bank write, "
             "state the exact proposed action and obtain the customer's explicit confirmation. If no action is "
             "authorized, end the call. Do not imply any write was recorded here.",
@@ -539,4 +590,5 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             "passthrough": True, "passthrough_default_transition": "ended",
             "pre_actions": [close_tool], "transitions": [_always("ended")],
         }
-    return {"initial_node": "opening", "system_prompt": system_prompt, "nodes": nodes}
+    return {"initial_node": "service" if upstream_verified else "opening",
+            "system_prompt": system_prompt, "nodes": nodes}

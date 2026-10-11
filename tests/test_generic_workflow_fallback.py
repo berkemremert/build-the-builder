@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from generic_workflow_fallback import build_generic_workflow, describe_contract  # noqa: E402
+from qa import validate_generic_workflow  # noqa: E402
 
 
 def _operation(name: str, summary: str, *, request: dict | None = None,
@@ -138,6 +139,51 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         workflow = build_generic_workflow(_policy(), spec)
         self.assertNotIn("tools", workflow["nodes"]["service"])
         self.assertIn("commit", workflow["nodes"])
+
+    def test_source_confirmed_upstream_identity_uses_declared_call_inputs(self):
+        spec = {"openapi": "3.0.3", "servers": [{"url": "https://bank.example.test"}],
+                "paths": {"/summary": {"post": _operation(
+                    "fetchSummary", "Read account summary", request={"type": "object",
+                    "properties": {"subscriberNumber": {"type": "string"},
+                                   "callTime": {"type": "string"}},
+                    "required": ["subscriberNumber", "callTime"]})}}}
+        policy = {"raw_brief": "The caller passed through the IVR. The IVR verified their identity.\n"
+                               "Each call gives two variables:\n"
+                               "- `subscriberNumber`: number supplied by the IVR.\n"
+                               "- `callTime`: time supplied with this call.\n",
+                  "tool_policy": {"fetchSummary": "Read only for the IVR-verified caller."}}
+        workflow = build_generic_workflow(policy, spec)
+        self.assertEqual("service", workflow["initial_node"])
+        self.assertNotIn("opening", workflow["nodes"])
+        body = workflow["nodes"]["service"]["tools"][0]["function"]["parameters"]["properties"]["body"]
+        self.assertEqual("{{subscriberNumber}}", body["properties"]["subscriberNumber"]["default"])
+        self.assertEqual("{{callTime}}", body["properties"]["callTime"]["default"])
+        self.assertIn("callTime={{callTime}}", workflow["system_prompt"])
+        self.assertEqual([], validate_generic_workflow(workflow, spec))
+
+    def test_upstream_handoff_without_identity_confirmation_stays_gated(self):
+        spec = copy.deepcopy(_spec())
+        del spec["paths"]["/check-person"]
+        policy = {"raw_brief": "The IVR detects intent and hands the call to the assistant."}
+        with self.assertRaisesRegex(ValueError, "callable identity operation"):
+            build_generic_workflow(policy, spec)
+        policy["raw_brief"] = "The IVR has not verified the caller."
+        with self.assertRaisesRegex(ValueError, "callable identity operation"):
+            build_generic_workflow(policy, spec)
+
+    def test_post_read_and_write_roles_follow_operation_meaning(self):
+        spec = {"openapi": "3.0.3", "servers": [{"url": "https://bank.example.test"}],
+                "paths": {
+                    "/lookup": {"post": _operation("kartSorgula", "Query cards")},
+                    "/send": {"post": _operation("ekstreGonder", "Send statement", result="saved")}}}
+        policy = {"raw_brief": "The IVR verified the caller's identity.",
+                  "tool_policy": {"kartSorgula": "Query account cards.",
+                                  "ekstreGonder": "Send after confirmation."}}
+        workflow = build_generic_workflow(policy, spec)
+        self.assertEqual(["kartSorgula"], [tool["function"]["name"]
+                                           for tool in workflow["nodes"]["service"]["tools"]])
+        self.assertEqual(["ekstreGonder"], [tool["function"]["name"]
+                                            for tool in workflow["nodes"]["commit"]["tools"]])
 
 
 if __name__ == "__main__":
