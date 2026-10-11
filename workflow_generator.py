@@ -458,6 +458,18 @@ def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str
                 target[role] = role
             else:
                 target[role] = next((value for hint in hints for value in allowed if hint in value.lower()), "")
+    required_note = {"refused", "hardship", "dispute", "paid", "service_error"}
+    required_close = {"refused", "hardship", "dispute", "service_error",
+                      "human", "support", "restructuring", "failed", "declined",
+                      "callback", "no_callback", "wrong_number", "deceased", "unclear"}
+    for operation, allowed, mapped, required in (
+        ("add_note", note_enum, result, required_note),
+        ("close_call", close_enum, close_result, required_close),
+    ):
+        if allowed:
+            missing = sorted(role for role in required if mapped.get(role) not in allowed)
+            if missing:
+                raise ValueError(f"Cannot map {operation} reason code(s) from policy source and API enum: {', '.join(missing)}")
     return result, close_result, note_enum, close_enum
 
 

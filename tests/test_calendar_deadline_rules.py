@@ -12,7 +12,9 @@ from workflow_generator import _deadline_bands, _holiday_dates, build_workflow
 
 def _policy(raw: str, constraints: dict | None = None) -> dict:
     policy = synthetic_policy()
-    policy["raw_brief"] = raw + "\nQueue codes: support=Q2, human=Q3, restructuring=Q1."
+    reason_tables = "| Reason | Note code |" + policy["raw_brief"].split("| Reason | Note code |", 1)[1]
+    policy["raw_brief"] = (raw + "\nQueue codes: support=Q2, human=Q3, restructuring=Q1.\n"
+                           + reason_tables)
     policy["constraints"] = constraints or {}
     return policy
 

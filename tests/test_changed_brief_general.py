@@ -125,16 +125,34 @@ class ChangedBriefGeneralityTests(unittest.TestCase):
 
     def test_reason_table_drives_close_and_note_codes(self) -> None:
         policy = synthetic_policy()
+        policy["raw_brief"] = policy["raw_brief"].split("| Reason | Note code |")[0]
         policy["raw_brief"] += ("\n| Reason | Close code |\n|---|---|\n"
                                 "| failed | R1 |\n| declined | R2 |\n"
                                 "| wrong number | R3 |\n| service error | R4 |\n"
-                                "| refused | R5 |\n"
-                                "| Reason | Note code |\n|---|---|\n| refused | R5 |\n")
+                                "| refused | R5 |\n| hardship | R2 |\n"
+                                "| dispute | R3 |\n| human | R1 |\n"
+                                "| support | R2 |\n| restructuring | R3 |\n"
+                                "| callback | R1 |\n| no callback | R2 |\n"
+                                "| deceased | R4 |\n| unclear | R5 |\n"
+                                "| Reason | Note code |\n|---|---|\n"
+                                "| refused | R5 |\n| hardship | R2 |\n"
+                                "| dispute | R3 |\n| paid | R1 |\n"
+                                "| service error | R4 |\n")
         workflow = build_workflow(policy, synthetic_api())
         self.assertEqual([], validate_workflow(workflow, synthetic_api()))
         self.assertIn("'R1'", _code(workflow, "finish_identity_failed"))
         self.assertIn("'R3'", _code(workflow, "finish_wrong_number"))
         self.assertIn("'R5'", _code(workflow, "prepare_notes"))
+
+    def test_missing_or_ambiguous_opaque_reason_source_fails_closed(self) -> None:
+        policy = synthetic_policy()
+        policy["raw_brief"] = policy["raw_brief"].split("| Reason | Note code |")[0]
+        with self.assertRaisesRegex(ValueError, "Cannot map add_note reason code"):
+            build_workflow(policy, synthetic_api())
+        policy["raw_brief"] += ("\n| Reason | Note code |\n|---|---|\n"
+                                "| refused | R5 |\n| refused | R4 |\n")
+        with self.assertRaisesRegex(ValueError, "Ambiguous note reason code"):
+            build_workflow(policy, synthetic_api())
 
     def test_changed_success_sentence_is_used_and_missing_sentence_is_silent(self) -> None:
         policy = synthetic_policy()

@@ -90,6 +90,15 @@ def synthetic_policy(*, identity: str = "Ask birth year, then passcode.") -> dic
         "Code list: promise=C2, paid=C3, transfer=C4, no promise=C5, "
         "identity failure=C6, not reached=C1. Support=Q2, human=Q3, "
         "restructuring=Q1.\n"
+        "| Reason | Note code |\n|---|---|\n"
+        "| refused | R5 |\n| hardship | R2 |\n| dispute | R3 |\n"
+        "| paid | R1 |\n| service error | R4 |\n"
+        "| Reason | Close code |\n|---|---|\n"
+        "| refused | R5 |\n| hardship | R2 |\n| dispute | R3 |\n"
+        "| service error | R4 |\n| human | R1 |\n| support | R2 |\n"
+        "| restructuring | R3 |\n| failed | R1 |\n| declined | R2 |\n"
+        "| callback | R1 |\n| no callback | R2 |\n| wrong number | R3 |\n"
+        "| deceased | R4 |\n| unclear | R5 |\n"
     )
     source = initial + memo
     return {
