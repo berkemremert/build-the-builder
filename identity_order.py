@@ -1,0 +1,42 @@
+"""Find the latest explicit security-question order in the source brief."""
+
+from __future__ import annotations
+
+import re
+
+
+ALIASES = {
+    "date_of_birth": ("date of birth", "birth date", "dob"),
+    "phone_last4": ("last four digits of the phone", "last 4 digits of the phone", "phone number"),
+    "birth_year": ("birth year",),
+}
+
+
+def latest_explicit_identity_order(source: str, values: list[str]) -> list[str] | None:
+    """Return the final clearly ordered pair of selectors, or None if absent."""
+    latest = None
+    for sentence in re.finditer(r"[^.!?\n]+", source):
+        clause = sentence.group()
+        if not re.search(r"\b(?:first|then|before|after|followed by|identity order)\b", clause, re.I):
+            continue
+        hits = []
+        for value in values:
+            for name in ALIASES.get(value, (value.replace("_", " "),)):
+                pattern = r"(?<!\w)" + re.escape(name) + r"(?!\w)"
+                hits.extend((match.start(), match.end(), value)
+                            for match in re.finditer(pattern, clause, re.I))
+        hits.sort()
+        ordered = []
+        for _, _, value in hits:
+            if value not in ordered:
+                ordered.append(value)
+        if len(ordered) > 2:
+            raise ValueError("Ambiguous identity question order in source")
+        if len(ordered) != 2:
+            continue
+        first = next(hit for hit in hits if hit[2] == ordered[0])
+        second = next(hit for hit in hits if hit[2] == ordered[1])
+        if re.search(r"\bafter\b", clause[first[1]:second[0]], re.I):
+            ordered.reverse()
+        latest = ordered
+    return latest
