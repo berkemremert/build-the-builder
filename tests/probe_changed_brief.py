@@ -71,6 +71,8 @@ def synthetic_api(*, identity_order: list[str] | None = None) -> dict:
             "reason": _field(choices=["R1", "R2", "R3", "R4", "R5"])},
             {"ok": _field("boolean")}),
     }
+    close_schema = paths["/close_call"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    close_schema["required"].remove("reason")
     return {"openapi": "3.0.3", "servers": [{"url": "https://synthetic.invalid/v7"}],
             "paths": paths}
 
