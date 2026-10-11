@@ -12,10 +12,17 @@ from typing import Any
 
 from api_bindings import (account_response_collection, identity_response_fields,
                           note_request_fields, promise_request_fields)
+from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
 
 
+_PAYMENT_AMOUNT_SOURCE = inspect.getsource(parse_payment_amount)
 _PAYMENT_DATE_SOURCE = inspect.getsource(parse_payment_date)
+
+
+def _with_amount_parser(code: str) -> str:
+    """Embed the shared strict parser in a standalone Freya code node."""
+    return _PAYMENT_AMOUNT_SOURCE + "\n" + code
 
 
 def _check(variable: str, operator: str, operand: Any = "") -> dict:
@@ -928,7 +935,7 @@ try:
         elif amount_raw is None:
             amount = float(product.get('past_due') or 0)
         else:
-            amount = float(str(amount_raw).replace(',', ''))
+            amount = parse_payment_amount(amount_raw)
         minimum = float(product.get('floor') or 0)
         maximum = float(product.get('past_due') or 0)
         if amount < minimum or amount > maximum:
@@ -1205,8 +1212,7 @@ try:
     elif words in ('full', 'full amount', 'past due', 'past_due') or amount_raw is None:
         amount = float(product.get('past_due') or 0)
     else:
-        match = re.search(r'(?<!\\d)(\\d[\\d,]*(?:\\.\\d{1,2})?)(?!\\d)', words)
-        amount = float(match.group(1).replace(',', '')) if match else float(words)
+        amount = parse_payment_amount(amount_raw)
     date = str(term.get('date_phrase') or term.get('date_words') or term.get('raw_date') or term.get('date') or
                vars.get('proposed_date_words') or '').strip()
     vars['single_proposal_gate_state'] = 'normal'
@@ -1443,32 +1449,6 @@ try:
             if name in aliases:
                 matches.append(known_pid)
         return matches[0] if len(matches) == 1 else ''
-    def spoken_number(value):
-        words = re.findall(r'[a-z]+', value.lower().replace('-', ' '))
-        ones = dict(zero=0, one=1, two=2, three=3, four=4, five=5, six=6,
-                    seven=7, eight=8, nine=9, ten=10, eleven=11, twelve=12,
-                    thirteen=13, fourteen=14, fifteen=15, sixteen=16,
-                    seventeen=17, eighteen=18, nineteen=19)
-        tens = dict(twenty=20, thirty=30, forty=40, fifty=50, sixty=60,
-                    seventy=70, eighty=80, ninety=90)
-        total = current = 0
-        meaningful = False
-        for word in words:
-            if word in ('and', 'pounds', 'pound', 'dollars', 'dollar', 'full', 'amount'):
-                continue
-            if word in ones:
-                current += ones[word]
-            elif word in tens:
-                current += tens[word]
-            elif word == 'hundred':
-                current = max(current, 1) * 100
-            elif word == 'thousand':
-                total += max(current, 1) * 1000
-                current = 0
-            else:
-                return None
-            meaningful = True
-        return total + current if meaningful else None
     def resolve_amount(value, product):
         due = float(product.get('past_due') or 0)
         floor = float(product.get('floor') or 0)
@@ -1481,15 +1461,13 @@ try:
             if words in ('floor', 'minimum', 'minimum payment', 'instalment', 'installment'):
                 return floor
             try:
-                number = float(words.replace(',', '').replace('£', '').replace('$', ''))
+                number = parse_payment_amount(value)
             except ValueError:
-                number = spoken_number(words)
-            if number is None or ('full' in words.split() and abs(number - due) > 0.005):
                 return None
         else:
             try:
-                number = float(value)
-            except (TypeError, ValueError):
+                number = parse_payment_amount(value)
+            except ValueError:
                 return None
         return number if floor <= number <= due else None
     def note_reason(value):
@@ -2139,7 +2117,8 @@ except Exception:
     nodes["single_robot_answer"]["passthrough"] = True
     nodes["single_robot_answer"]["passthrough_default_transition"] = "account_discussion"
 
-    nodes["single_proposal_gate"] = _code_node("single_proposal_gate", _SINGLE_PROPOSAL_GATE_CODE, "prepare_confirmation")
+    nodes["single_proposal_gate"] = _code_node(
+        "single_proposal_gate", _with_amount_parser(_SINGLE_PROPOSAL_GATE_CODE), "prepare_confirmation")
     nodes["single_proposal_gate"]["transitions"] = [
         _eq("single_below_floor_offer", "single_proposal_gate_state", "below_floor"),
         _always("prepare_confirmation")]
@@ -2249,7 +2228,8 @@ except Exception:
                               .replace("__PAID_REASON__", repr(reason_names.get("paid") or "paid"))
                               .replace("__DISPUTE_REASON__", repr(reason_names.get("dispute") or "dispute"))
                               .replace("__HARDSHIP_REASON__", repr(reason_names.get("hardship") or "hardship")))
-        nodes["multi_advance"] = _code_node("multi_advance", multi_advance_code, "service_unavailable")
+        nodes["multi_advance"] = _code_node(
+            "multi_advance", _with_amount_parser(multi_advance_code), "service_unavailable")
         nodes["multi_advance"]["transitions"] = [
             _eq("prepare_confirmation", "multi_next", "confirm"),
             _eq("prepare_notes", "multi_next", "notes"),
@@ -2365,9 +2345,10 @@ except Exception:
         ]
 
     nodes["prepare_confirmation"] = _code_node(
-        "prepare_confirmation", _PREPARE_CONFIRMATION_CODE
-        .replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)
-        .replace("__HOLIDAYS__", repr(holidays)), "account_discussion")
+        "prepare_confirmation", _with_amount_parser(
+            _PREPARE_CONFIRMATION_CODE
+            .replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)
+            .replace("__HOLIDAYS__", repr(holidays))), "account_discussion")
     nodes["prepare_confirmation"]["transitions"] = [
         _eq("confirmation", "proposal_validation_state", "ready"),
         *([_to("service_unavailable", "Correction attempts exhausted without valid terms",
