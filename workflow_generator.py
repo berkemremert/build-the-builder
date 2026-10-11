@@ -17,6 +17,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
 from api_parameters import required_header_bindings
 from api_servers import operation_url
 from account_item_bindings import product_item_fields
+from bank_names import BANK_NAME, source_bank_name
 from deadline_tables import parse_deadline_tables
 from identity_order import latest_explicit_identity_order
 from openapi_resolver import normalize_openapi
@@ -474,6 +475,9 @@ def _reason_names(openapi: dict, policy: dict) -> tuple[dict[str, str], dict[str
 
 
 def _bank_name(policy: dict) -> str:
+    raw_name = source_bank_name(str(policy.get("raw_brief") or ""))
+    if raw_name:
+        return raw_name
     constraints = policy.get("constraints") or {}
     if isinstance(constraints, dict):
         for key in ("bank_name", "institution_name", "company_name", "organization_name"):
@@ -489,17 +493,22 @@ def _opening_line(policy: dict, bank_name: str) -> str:
     """Render the source's initial disclosure before asking who answered."""
     raw = str(policy.get("raw_brief") or "")
     opening_source = str(policy.get("opening") or "")
-    for line in (raw + "\n" + opening_source).splitlines():
-        if not re.search(r"\b(?:first sentence|opening(?: sentence| line)?|start(?: the)? call|begin(?: the)? call)\b", line, re.I):
-            continue
-        if not re.search(r"\b(?:exact(?:ly)?|verbatim|word.for.word|must say|required wording)\b", line, re.I):
-            continue
-        quoted_parts = re.findall(r'["“]([^"”]+)["”]', line)
-        quoted_parts += re.findall(r"(?<!\w)'((?:[^']|'(?=\w))*)'", line)
-        for quoted in quoted_parts:
-            if bank_name.lower() in quoted.lower() or "digital assistant" in quoted.lower():
-                exact = re.sub(r"(?<!\{)\{(title|last_name)\}(?!\})", r"{{\1}}", quoted.strip())
-                return exact if "?" in exact else exact + " Am I speaking with {{title}} {{last_name}}?"
+    for text in (raw, opening_source):
+        exact_lines = []
+        for line in text.splitlines():
+            if not re.search(r"\b(?:first sentence|opening(?: sentence| line)?|start(?: the)? call|begin(?: the)? call)\b", line, re.I):
+                continue
+            if not re.search(r"\b(?:exact(?:ly)?|verbatim|word.for.word|must say|required wording)\b", line, re.I):
+                continue
+            quoted_parts = re.findall(r'["“]([^"”]+)["”]', line)
+            quoted_parts += re.findall(r"(?<!\w)'((?:[^']|'(?=\w))*)'", line)
+            for quoted in quoted_parts:
+                named = {match.group() for match in BANK_NAME.finditer(quoted)}
+                if (not named or bank_name in named) and (bank_name.lower() in quoted.lower() or "digital assistant" in quoted.lower()):
+                    exact_lines.append(quoted)
+        if exact_lines:
+            exact = re.sub(r"(?<!\{)\{(title|last_name)\}(?!\})", r"{{\1}}", exact_lines[-1].strip())
+            return exact if "?" in exact else exact + " Am I speaking with {{title}} {{last_name}}?"
     opening_lines = [line for line in raw.splitlines()
                      if re.search(r"\b(?:first sentence|opening(?: sentence| line)?|start(?: the)? call|begin(?: the)? call)\b", line, re.I)]
     opening_source = "\n".join([opening_source, *opening_lines]).strip()

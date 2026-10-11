@@ -9,7 +9,7 @@ import unittest
 
 from probe_changed_brief import _code, synthetic_api, synthetic_policy
 from qa import validate_workflow
-from workflow_generator import _holiday_dates, _outcome_names, _queue_for, build_workflow
+from workflow_generator import _bank_name, _holiday_dates, _outcome_names, _queue_for, build_workflow
 
 
 class ChangedBriefGeneralityTests(unittest.TestCase):
@@ -48,6 +48,33 @@ class ChangedBriefGeneralityTests(unittest.TestCase):
             "For your security, please use the Meridian Bank mobile app or visit a branch. Goodbye.",
             farewell,
         )
+
+    def test_later_bank_rename_overrides_stale_extracted_name_everywhere(self) -> None:
+        policy = synthetic_policy()
+        policy["raw_brief"] = (
+            'First sentence must say exactly: "Hello, this is Meridian Bank\'s digital assistant, and this call is recorded."\n'
+            + policy["raw_brief"]
+        )
+        policy["raw_brief"] += (
+            "\nLater memo: the bank has been renamed Harbor Bank. "
+            'First sentence must say exactly: "Hello, this is Harbor Bank\'s digital assistant, and this call is recorded."\n'
+        )
+        self.assertEqual("Harbor Bank", _bank_name(policy))
+        workflow = build_workflow(policy, synthetic_api())
+        nodes = workflow["nodes"]
+        opening = nodes["opening"]["on_enter"]["text"]
+        self.assertTrue(opening.startswith(
+            "Hello, this is Harbor Bank's digital assistant, and this call is recorded."))
+        self.assertIn("Harbor Bank's digital assistant", nodes["opening"]["task_message"])
+        self.assertIn("Harbor Bank's digital assistant", nodes["single_robot_answer"]["on_enter"]["text"])
+        self.assertIn("Harbor Bank mobile app", nodes["farewell_identity_failed"]["on_enter"]["text"])
+        self.assertTrue(workflow["system_prompt"].startswith("You are Harbor Bank's digital assistant."))
+
+    def test_conflicting_bank_names_in_one_revision_fail_closed(self) -> None:
+        policy = synthetic_policy()
+        policy["raw_brief"] += "\nLater memo: Meridian Bank and Harbor Bank jointly own this call.\n"
+        with self.assertRaisesRegex(ValueError, "Conflicting bank names"):
+            _bank_name(policy)
 
     def test_later_policy_and_api_names_drive_generated_actions(self) -> None:
         api = synthetic_api()
