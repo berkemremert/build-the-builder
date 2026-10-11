@@ -121,6 +121,85 @@ class Hard07ConfirmationRegression(unittest.TestCase):
         self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
         self.assertEqual(3, len(json.loads(state["readback_terms_json"])))
 
+    def test_fragmented_correction_requires_fresh_combined_readback_and_yes(self) -> None:
+        state = self._state()
+        products = json.loads(state["product_json"])
+        products[1]["floor"] = 200
+        state["product_json"] = json.dumps(products)
+        original_terms = {
+            "p1": {"product_id": "p1", "amount": 510, "date": "fifteen October"},
+            "p2": {"product_id": "p2", "amount": 640, "date": "Tuesday 20 October"},
+            "p3": {"product_id": "p3", "amount": 75, "date": "Thursday 22 October"},
+        }
+        state["multi_terms_json"] = json.dumps(original_terms)
+        state["proposed_terms_json"] = json.dumps(list(original_terms.values()))
+        run_node(self.workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"])
+        run_node(self.workflow, "clear_confirmation", state)
+
+        for field, answer, expected_prompt in (
+            ("multi_correction_product", "personal loan", "amount and exact day"),
+            ("multi_correction_amount_words", "320", "exact day and month"),
+        ):
+            state[field] = answer
+            run_node(self.workflow, "multi_revise", state)
+            self.assertEqual("clarify", state["multi_next"])
+            self.assertIn(expected_prompt, state["multi_correction_prompt"])
+            self.assertEqual(original_terms, json.loads(state["multi_terms_json"]))
+            self.assertEqual([], json.loads(state["readback_terms_json"]))
+            self.assertEqual("0", state["multi_correction_attempts"])
+
+        state["multi_correction_date_words"] = "Wednesday 21 October"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("confirm", state["multi_next"])
+        revised = json.loads(state["multi_terms_json"])
+        self.assertEqual(original_terms["p1"], revised["p1"])
+        self.assertEqual(original_terms["p3"], revised["p3"])
+        self.assertEqual(320, revised["p2"]["amount"])
+        self.assertEqual("Wednesday 21 October", revised["p2"]["date"])
+        run_node(self.workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        readback = json.loads(state["readback_terms_json"])
+        self.assertEqual(3, len(readback))
+        self.assertEqual({"product_id": "p2", "amount": 320.0, "date": "2026-10-21"}, readback[1])
+        self.assertIn("personal loan: 320.00 on 2026-10-21", state["confirmation_readback"])
+        self.assertEqual("unclear", state["confirmation_status"])
+        run_node(self.workflow, "validate_confirmation", state)
+        self.assertNotEqual("promise", state["write_state"])
+        self.assertEqual([], json.loads(state["pending_promises_json"]))
+        state["confirmation_status"] = "confirmed"
+        run_node(self.workflow, "validate_confirmation", state)
+        self.assertEqual("promise", state["write_state"])
+
+    def test_new_product_discards_stale_fragments_and_invalid_reply_resets(self) -> None:
+        state = self._state()
+        original = state["multi_terms_json"]
+        state["multi_correction_product"] = "personal loan"
+        run_node(self.workflow, "multi_revise", state)
+        state["multi_correction_amount_words"] = "500"
+        run_node(self.workflow, "multi_revise", state)
+        state["multi_correction_product"] = "car loan"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual({"product_id": "p3"}, json.loads(state["multi_correction_parts_json"]))
+        self.assertEqual(original, state["multi_terms_json"])
+
+        state["multi_correction_amount_words"] = "10"
+        run_node(self.workflow, "multi_revise", state)
+        state["multi_correction_date_words"] = "Thursday 22 October"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual("1", state["multi_correction_attempts"])
+        self.assertEqual({}, json.loads(state["multi_correction_parts_json"]))
+        self.assertEqual(original, state["multi_terms_json"])
+
+        state["multi_correction_product"] = "credit"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        state["multi_correction_product"] = "credit"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("service_error", state["multi_next"])
+        self.assertEqual(original, state["multi_terms_json"])
+
 
 if __name__ == "__main__":
     unittest.main()

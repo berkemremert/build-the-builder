@@ -1004,6 +1004,9 @@ try:
     if len(products) == 1:
         vars['single_revision_base_json'] = json.dumps(ordered)
     vars['multi_correction_attempts'] = '0'
+    vars['multi_correction_turns'] = '0'
+    vars['multi_correction_parts_json'] = '{}'
+    vars['multi_correction_prompt'] = 'Please tell me which product you want to change, its amount, and the exact day and month you want to pay.'
     vars['proposed_terms_json'] = ''
     vars['proposed_date_words'] = ''
 except Exception as error:
@@ -1014,6 +1017,8 @@ except Exception as error:
     vars['proposed_date_words'] = ''
     vars['discussion_action'] = 'continue'
     vars['proposal_error'] = str(error)
+    if not str(vars.get('multi_correction_prompt') or ''):
+        vars['multi_correction_prompt'] = 'Please tell me which product you want to change, its amount, and the exact day and month you want to pay.'
 """
 
 
@@ -1852,14 +1857,22 @@ import datetime
 import re
 __PAYMENT_DATE_PARSER__
 try:
-    attempts = int(vars.get('multi_correction_attempts') or 0) + 1
+    turns = int(vars.get('multi_correction_turns') or 0) + 1
 except Exception:
-    attempts = 1
-vars['multi_correction_attempts'] = str(attempts)
+    turns = 1
+vars['multi_correction_turns'] = str(turns)
+vars['confirmation_status'] = 'changed'
+vars['validation_state'] = 'invalid'
+vars['pending_promises_json'] = '[]'
+vars['readback_terms_json'] = '[]'
+vars['confirmation_readback'] = ''
 try:
     terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
     products = json.loads(str(vars.get('product_json') or '[]'))
     product_by_id = dict((str(item.get('product_id') or ''), item) for item in products)
+    parts = json.loads(str(vars.get('multi_correction_parts_json') or '{}'))
+    if not isinstance(terms, dict) or not isinstance(products, list) or not isinstance(parts, dict):
+        raise ValueError('Malformed correction state')
     def resolve_pid(value):
         name = re.sub(r'\\s+', ' ', str(value or '').lower().replace('_', ' ')).strip()
         if not name:
@@ -1884,40 +1897,81 @@ try:
         raw = [dict(product_id=raw[0], amount=raw[1], date=raw[2])]
     elif isinstance(raw, dict):
         raw = [raw]
-    if not isinstance(raw, list) or not raw:
-        raise ValueError('No corrected terms')
+    if not raw:
+        raw = [dict(product_id=vars.get('multi_correction_product') or '',
+                    amount=vars.get('multi_correction_amount_words') or '',
+                    date=vars.get('multi_correction_date_words') or '')]
+    if not isinstance(raw, list) or not raw or any(not isinstance(item, dict) for item in raw):
+        raise ValueError('Malformed corrected terms')
     today = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00')).date()
-    changed = False
+    next_terms = dict(terms)
     seen = set()
     for item in raw:
-        if not isinstance(item, dict):
-            raise ValueError('Malformed corrected terms')
-        pid = resolve_pid(item.get('product_id'))
-        if not pid or pid in seen:
-            raise ValueError('Unknown or ambiguous corrected product')
-        seen.add(pid)
-        date = str(item.get('date_phrase') or item.get('date_words') or item.get('date') or '').strip()
-        if not date:
-            raise ValueError('Corrected payment date missing')
-        day = parse_payment_date(date, today)
-        if day < today:
-            raise ValueError('Corrected payment date in past')
-        previous = terms.get(pid) or dict()
-        amount = parse_payment_amount(item.get('amount', previous.get('amount')))
-        product = product_by_id[pid]
-        if not float(product.get('floor') or 0) <= amount <= float(product.get('past_due') or 0):
-            raise ValueError('Corrected amount outside approved range')
-        terms[pid] = dict(product_id=pid, amount=amount, date=date)
-        changed = True
-    vars['multi_terms_json'] = json.dumps(terms)
-    vars['proposed_terms_json'] = json.dumps([terms[str(item.get('product_id') or '')] for item in products
-                                              if str(item.get('product_id') or '') in terms])
-    vars['multi_corrected_terms_json'] = ''
-    vars['multi_next'] = 'confirm' if changed else 'service_error' if attempts >= 3 else 'clarify'
+        supplied_product = str(item.get('product_id') or item.get('product') or '').strip()
+        supplied_amount = str(item.get('amount') or '').strip()
+        supplied_date = str(item.get('date_phrase') or item.get('date_words') or item.get('date') or '').strip()
+        if not any((supplied_product, supplied_amount, supplied_date)):
+            raise ValueError('No corrected terms')
+        if supplied_product:
+            pid = resolve_pid(supplied_product)
+            if not pid or pid in seen:
+                raise ValueError('Unknown or ambiguous corrected product')
+            if parts.get('product_id') and pid != parts.get('product_id'):
+                parts = {}
+            parts['product_id'] = pid
+        pid = str(parts.get('product_id') or '')
+        if supplied_amount:
+            parts['amount'] = parse_payment_amount(supplied_amount)
+        if supplied_date:
+            day = parse_payment_date(supplied_date, today)
+            if day < today:
+                raise ValueError('Corrected payment date in past')
+            parts['date'] = supplied_date
+        if pid and parts.get('date'):
+            previous = terms.get(pid) or {}
+            amount = parse_payment_amount(parts.get('amount', previous.get('amount')))
+            product = product_by_id[pid]
+            if not float(product.get('floor') or 0) <= amount <= float(product.get('past_due') or 0):
+                raise ValueError('Corrected amount outside approved range')
+            next_terms[pid] = dict(product_id=pid, amount=amount, date=parts['date'])
+            seen.add(pid)
+            parts = {}
+    if seen:
+        if len(raw) > 1 and len(seen) != len(raw):
+            raise ValueError('Incomplete batch correction')
+        vars['multi_terms_json'] = json.dumps(next_terms)
+        vars['proposed_terms_json'] = json.dumps([next_terms[str(item.get('product_id') or '')] for item in products
+                                                  if str(item.get('product_id') or '') in next_terms])
+        vars['multi_correction_parts_json'] = '{}'
+        vars['multi_correction_attempts'] = '0'
+        vars['multi_correction_turns'] = '0'
+        vars['multi_correction_prompt'] = 'Please tell me which product you want to change, its amount, and the exact day and month you want to pay.'
+        vars['multi_next'] = 'confirm'
+    else:
+        vars['multi_correction_parts_json'] = json.dumps(parts)
+        if not parts.get('product_id'):
+            prompt = 'Which product do you want to change?'
+        elif not parts.get('date'):
+            prompt = ('What amount and exact day and month do you want to pay for that product?'
+                      if 'amount' not in parts else 'What exact day and month do you want to pay for that product?')
+        else:
+            prompt = 'What amount do you want to pay for that product?'
+        vars['multi_correction_prompt'] = prompt
+        vars['multi_next'] = 'service_error' if turns >= 10 else 'clarify'
 except Exception:
-    vars['multi_next'] = 'service_error' if attempts >= 3 else 'clarify'
+    try:
+        attempts = int(vars.get('multi_correction_attempts') or 0) + 1
+    except Exception:
+        attempts = 1
+    vars['multi_correction_attempts'] = str(attempts)
+    vars['multi_correction_parts_json'] = '{}'
+    vars['multi_correction_prompt'] = 'Please tell me one product, its amount, and the exact day and month you want to pay.'
+    vars['multi_next'] = 'service_error' if attempts >= 3 or turns >= 10 else 'clarify'
 finally:
     vars['multi_corrected_terms_json'] = ''
+    vars['multi_correction_product'] = ''
+    vars['multi_correction_amount_words'] = ''
+    vars['multi_correction_date_words'] = ''
 """
 
 
@@ -2564,17 +2618,23 @@ except Exception:
         nodes["multi_correction"] = _conversation(
             "multi_correction", "The fixed correction request was spoken on entry. Wait for the caller's answer. "
             "Do not speak, suggest, restate, or confirm a payment date in this node; the code must validate it first. "
-            "Keep all other proposed terms. No tool call is allowed in this node.",
-            opening="Please tell me which product you want to change, its amount, and the exact day and month you want to pay.",
+            "Keep all other proposed terms. Accept a product, amount, and day in separate turns; ask only for the missing part shown by the workflow. No tool call is allowed in this node.",
+            opening="{{multi_correction_prompt}}",
             extraction=[{"name": "multi_corrected_terms_json", "type": "string", "min_confidence": 0.55,
-                         "description": "Return a JSON array string containing only corrected product_id, amount and RAW date words from the latest caller answer. Leave empty if none."},
+                         "description": "If the latest answer gives one or more complete corrections, return a JSON array string of product_id, amount if spoken, and RAW date words. For an incomplete answer, leave empty and fill the separate correction fields instead. Never invent missing parts."},
+                        {"name": "multi_correction_product", "type": "string", "min_confidence": 0.55,
+                         "description": "Copy only a product ID or unambiguous product label explicitly named in the latest answer. Leave empty if the caller supplies only an amount or date; do not infer the product from the current offer."},
+                        {"name": "multi_correction_amount_words", "type": "string", "min_confidence": 0.55,
+                         "description": "Copy only the amount explicitly spoken in the latest correction answer, using its raw words or digits. Leave empty if no amount was spoken; do not use the previous amount as an extracted answer."},
+                        {"name": "multi_correction_date_words", "type": "string", "min_confidence": 0.55,
+                         "description": "Copy only the exact payment day or date explicitly spoken in the latest correction answer, in raw words. Leave empty if no date was spoken; do not reuse or convert a prior date."},
                         _enum("multi_correction_action", ["transfer_restructuring", "transfer_support", "transfer_human", "continue"],
                               "Transfer requests take priority; otherwise continue collecting corrected terms.")],
             transitions=[_eq("transfer_restructuring", "multi_correction_action", "transfer_restructuring"),
                          _eq("transfer_support", "multi_correction_action", "transfer_support"),
                          _eq("transfer_human", "multi_correction_action", "transfer_human"),
                          _always("multi_revise")],
-            max_turns=3, max_target="service_unavailable")
+            max_turns=10, max_target="service_unavailable")
         nodes["multi_revise"] = _code_node(
             "multi_revise", _with_amount_parser(
                 _MULTI_REVISE_CODE.replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)),
