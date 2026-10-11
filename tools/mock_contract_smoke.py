@@ -182,16 +182,16 @@ def _target_url(contract: dict, operation: Operation, base_url: str, path_params
     if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise SmokeError("remote deployed URL must use HTTPS")
     full = urlsplit(operation_url(contract, operation.path, operation.method))
+    server_prefix = full.path.removesuffix(operation.path)
+    if (parsed.scheme != full.scheme or parsed.netloc != full.netloc or
+            parsed.path.rstrip("/") != server_prefix.rstrip("/")):
+        raise SmokeError("contract server URL does not match deployed base URL")
     path = operation.path
     for name in re.findall(r"\{([^{}]+)\}", path):
         if name not in path_params:
             raise SmokeError("case lacks a required path parameter")
         path = path.replace("{" + name + "}", quote(str(path_params[name]), safe=""))
-    if parsed.path.rstrip("/"):
-        target_path = parsed.path.rstrip("/") + "/" + path.lstrip("/")
-    else:
-        suffix = full.path.removesuffix(operation.path)
-        target_path = suffix.rstrip("/") + "/" + path.lstrip("/")
+    target_path = parsed.path.rstrip("/") + "/" + path.lstrip("/")
     return urlunsplit((parsed.scheme, parsed.netloc, target_path, "", ""))
 
 

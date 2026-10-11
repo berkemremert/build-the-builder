@@ -9,10 +9,16 @@ python3 tools/mock_contract_smoke.py \
   --base-url https://deployed-worker.example/v1
 ```
 
-The base URL points to the server prefix before the OpenAPI paths. If the URL
-has no path prefix, the validator uses the prefix in the contract's effective
-`servers` entry. Remote URLs must use HTTPS. The check sends real requests and
-may exercise writes declared in the cases, so use dedicated seeded customers.
+The base URL points to the server prefix before the OpenAPI paths and must
+match each operation's effective OpenAPI `servers` URL. For the default Worker,
+pass its origin without a trailing slash. If the contract paths start with
+`/v1`, they supply that segment themselves. If the Worker has
+`MOCK_BASE_PATH=/mock`, pass
+`origin/mock` and set that as the contract server URL. Paths declared in the
+contract are appended verbatim. Remote URLs must use HTTPS. The check sends
+real requests and may exercise writes declared in the cases, so use dedicated
+seeded customers. `/healthz` and `/readyz` are at the Worker origin root and
+are outside the bank OpenAPI operations.
 
 The cases file is JSON. Give every OpenAPI operation at least one step whose
 expected status is 2xx. Steps run in order within each scenario. A complete

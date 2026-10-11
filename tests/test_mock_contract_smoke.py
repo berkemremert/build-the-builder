@@ -77,6 +77,8 @@ CASES = {
 class MockContractSmokeTests(unittest.TestCase):
     def setUp(self):
         self.base_url = "http://127.0.0.1:8800/v1"
+        self.contract = copy.deepcopy(CONTRACT)
+        self.contract["servers"][0]["url"] = self.base_url
         self.mode = "valid"
         self.calls = []
         self.patcher = patch.object(smoke, "_send", side_effect=self._send)
@@ -105,18 +107,25 @@ class MockContractSmokeTests(unittest.TestCase):
         return status, response, json.dumps(response)
 
     def test_seeded_flow_covers_every_method_and_schema(self):
-        self.assertEqual(smoke.run(CONTRACT, CASES, self.base_url), [
+        self.assertEqual(smoke.run(self.contract, CASES, self.base_url), [
             "scenario 1 step 1: PASS", "scenario 1 step 2: PASS", "scenario 1 step 3: PASS"])
         self.assertEqual([(method, path) for method, path, _ in self.calls], [
             ("get", "/v1/customers/SYNTHETIC-CUSTOMER-01"),
             ("post", "/v1/promises"), ("get", "/v1/promises/P-01")])
 
-    def test_contract_server_prefix_is_used_when_base_url_has_no_path(self):
-        smoke.run(CONTRACT, CASES, "http://127.0.0.1:8800")
+    def test_contract_server_prefix_mismatch_is_rejected(self):
+        result = smoke.run(self.contract, CASES, "http://127.0.0.1:8800")
+        self.assertEqual(result, ["scenario 1 step 1: FAIL contract server URL does not match deployed base URL"])
+        self.assertEqual(self.calls, [])
+
+    def test_origin_url_uses_contract_paths_verbatim(self):
+        self.contract["servers"][0]["url"] = "http://127.0.0.1:8800"
+        self.contract["paths"] = {"/v1" + path: spec for path, spec in self.contract["paths"].items()}
+        smoke.run(self.contract, CASES, "http://127.0.0.1:8800")
         self.assertEqual(self.calls[0][1], "/v1/customers/SYNTHETIC-CUSTOMER-01")
 
     def test_remote_http_url_is_rejected(self):
-        result = smoke.run(CONTRACT, CASES, "http://example.invalid/v1")
+        result = smoke.run(self.contract, CASES, "http://example.invalid/v1")
         self.assertEqual(result, ["scenario 1 step 1: FAIL remote deployed URL must use HTTPS"])
         self.assertEqual(self.calls, [])
 
@@ -124,32 +133,32 @@ class MockContractSmokeTests(unittest.TestCase):
         cases = copy.deepcopy(CASES)
         cases["scenarios"][0]["steps"].pop()
         with self.assertRaisesRegex(smoke.SmokeError, "every contract operation"):
-            smoke.run(CONTRACT, cases, self.base_url)
+            smoke.run(self.contract, cases, self.base_url)
         self.assertEqual(self.calls, [])
 
     def test_response_schema_failure_has_no_values(self):
         self.mode = "schema"
-        result = smoke.run(CONTRACT, CASES, self.base_url)
+        result = smoke.run(self.contract, CASES, self.base_url)
         self.assertEqual(result, ["scenario 1 step 1: FAIL response schema mismatch"])
         self.assertNotIn("SYNTHETIC", str(result))
 
     def test_secret_echo_is_rejected_without_printing_secret(self):
         self.mode = "secret"
-        result = smoke.run(CONTRACT, CASES, self.base_url)
+        result = smoke.run(self.contract, CASES, self.base_url)
         self.assertEqual(result, ["scenario 1 step 1: FAIL response echoed a protected value"])
         self.assertNotIn("SYNTHETIC", str(result))
 
     def test_request_schema_failure_does_not_send_request(self):
         cases = copy.deepcopy(CASES)
         cases["scenarios"][0]["steps"][1]["request"].pop("amount")
-        self.assertEqual(smoke.run(CONTRACT, cases, self.base_url)[-1],
+        self.assertEqual(smoke.run(self.contract, cases, self.base_url)[-1],
                          "scenario 1 step 2: FAIL request schema mismatch")
 
     def test_cli_output_excludes_case_values_and_url(self):
         with TemporaryDirectory() as directory:
             contract = Path(directory) / "contract.json"
             cases = Path(directory) / "cases.json"
-            contract.write_text(json.dumps(CONTRACT))
+            contract.write_text(json.dumps(self.contract))
             cases.write_text(json.dumps(CASES))
             output = io.StringIO()
             with redirect_stdout(output):
