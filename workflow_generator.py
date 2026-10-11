@@ -221,27 +221,99 @@ def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
     return tool
 
 
+_NUMBER_WORDS = {
+    "zero": 0, "one": 1, "first": 1, "two": 2, "second": 2,
+    "three": 3, "third": 3, "four": 4, "fourth": 4,
+    "five": 5, "fifth": 5, "six": 6, "sixth": 6,
+    "seven": 7, "seventh": 7, "eight": 8, "eighth": 8,
+    "nine": 9, "ninth": 9, "ten": 10, "tenth": 10,
+    "eleven": 11, "eleventh": 11, "twelve": 12, "twelfth": 12,
+    "thirteen": 13, "thirteenth": 13, "fourteen": 14, "fourteenth": 14,
+    "fifteen": 15, "fifteenth": 15, "sixteen": 16, "sixteenth": 16,
+    "seventeen": 17, "seventeenth": 17, "eighteen": 18, "eighteenth": 18,
+    "nineteen": 19, "nineteenth": 19, "twenty": 20, "twentieth": 20,
+    "thirty": 30, "thirtieth": 30, "forty": 40, "fortieth": 40,
+    "fifty": 50, "fiftieth": 50,
+}
+_NUMBER_TEXT = r"[A-Za-z]+(?:[- ][A-Za-z]+)?|\d+(?:st|nd|rd|th)?"
+_MONTHS = {name.lower(): index for index, name in enumerate(
+    ("January", "February", "March", "April", "May", "June", "July", "August",
+     "September", "October", "November", "December"), 1)}
+
+
+def _source_number(value: object) -> int | None:
+    text = str(value).strip().lower()
+    digit = re.fullmatch(r"(\d+)(?:st|nd|rd|th)?", text)
+    if digit:
+        return int(digit.group(1))
+    parts = re.split(r"[ -]+", text)
+    numbers = [_NUMBER_WORDS.get(part) for part in parts]
+    return sum(numbers) if numbers and all(number is not None for number in numbers) else None
+
+
+def _mentions_number(text: str, expected: int) -> bool:
+    tokens = re.findall(r"\b\d+(?:st|nd|rd|th)?\b|\b[A-Za-z]+\b", text)
+    return any(_source_number(token) == expected for token in tokens) or any(
+        _source_number(left + " " + right) == expected for left, right in zip(tokens, tokens[1:]))
+
+
+def _source_date_matches(source: str) -> list[tuple[int, int, str]]:
+    """Recognize ISO and month-name dates without interpreting unrelated numbers."""
+    import datetime
+    found: list[tuple[int, int, str]] = []
+    patterns = (
+        r"\b(?P<iso>20\d{2}-\d{1,2}-\d{1,2})\b",
+        r"\b(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+        rf"(?P<day>{_NUMBER_TEXT}),?\s+(?P<year>20\d{{2}})\b",
+        rf"\b(?P<day>{_NUMBER_TEXT})\s+(?:of\s+)?"
+        r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December),?\s+"
+        r"(?P<year>20\d{2})\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, source, re.I):
+            try:
+                if match.groupdict().get("iso"):
+                    date = datetime.date.fromisoformat(match.group("iso"))
+                else:
+                    day = _source_number(match.group("day"))
+                    if day is None:
+                        continue
+                    date = datetime.date(int(match.group("year")),
+                                         _MONTHS[match.group("month").lower()], day)
+            except (ValueError, KeyError):
+                continue
+            if not any(start <= match.start() < end for start, end, _ in found):
+                found.append((match.start(), match.end(), date.isoformat()))
+    return sorted(found)
+
+
 def _holiday_dates(policy: dict) -> list[str]:
-    """Apply holiday statements in source order, including later revocations."""
+    """Apply source calendar statements in order, including later revocations."""
     source = str(policy.get("raw_brief") or "")
     if not source:
         source = "\n".join(str(policy.get(key) or "") for key in
                            ("global_rules", "verified_call", "opening"))
     dates: set[str] = set()
-    matches = list(re.finditer(r"\b20\d{2}-\d{2}-\d{2}\b", source))
-    for index, match in enumerate(matches):
-        start = max(source.rfind(mark, 0, match.start()) for mark in (";", ".", "\n")) + 1
-        ends = [source.find(mark, match.end()) for mark in (";", ".", "\n")]
+    matches = _source_date_matches(source)
+    if not matches and re.search(r"\b(?:bank\s+)?holidays?\b", source, re.I) and not re.search(
+            r"\b(?:no|without)\s+(?:bank\s+)?holidays?\b", source, re.I):
+        raise ValueError("Cannot establish bank holiday dates from source")
+    for index, (start_at, end_at, date) in enumerate(matches):
+        start = max(source.rfind(mark, 0, start_at) for mark in (";", ".", "\n")) + 1
+        ends = [source.find(mark, end_at) for mark in (";", ".", "\n")]
         end = min((point for point in ends if point >= 0), default=len(source))
         clause = source[start:end].lower()
         if "holiday" not in clause:
             continue
-        next_date = matches[index + 1].start() if index + 1 < len(matches) else len(source)
-        following = source[match.end():min(end, next_date)].lower()
-        if re.search(r"\b(?:no longer|not|removed|revoked|cancelled|canceled)\b", following):
-            dates.discard(match.group())
+        next_date = matches[index + 1][0] if index + 1 < len(matches) else len(source)
+        following = source[end_at:min(end, next_date)].lower()
+        preceding = source[max(start, start_at - 55):start_at].lower()
+        revoked = re.search(r"\b(?:no longer|not|removed|revoked|cancelled|canceled)\b", following)
+        revoked = revoked or re.search(r"\b(?:remove|revoke|cancel)\b.{0,35}\bholiday\b", preceding)
+        if revoked:
+            dates.discard(date)
         else:
-            dates.add(match.group())
+            dates.add(date)
     return sorted(dates)
 
 
@@ -431,51 +503,86 @@ def _deadline_bands(policy: dict) -> list[dict]:
     source = str(policy.get("raw_brief") or "")
     if not source:
         source = "\n".join(str(policy.get(key) or "") for key in ("verified_call", "global_rules"))
-    found = []
-    pattern = re.compile(
+    found: list[tuple[int, dict]] = []
+    table = re.compile(
         r"\|\s*(\d+)\s+to\s+(\d+)\s*\|\s*([^|]+)\|\s*the\s+(\d+)(?:st|nd|rd|th)\s+business day[^|]*\|\s*(\d+)\s*\|",
         re.IGNORECASE,
     )
-    for match in pattern.finditer(source):
+    for match in table.finditer(source):
         low, high, label, days, attempts = match.groups()
         found.append((match.start(), {"low": int(low), "high": int(high), "label": label.strip(),
                      "business_days": int(days), "attempts": int(attempts)}))
-    words = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
-                 "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
-                 "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
-                 "fifteenth": 15}
-    cardinal = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-                    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-    sentence = re.compile(
-            r"(\d+)\s*(?:to|[-–])\s*(\d+)\s+days?\s+late[^.]*?deadline\s+is\s+(?:the\s+)?"
-            r"([a-z]+|\d+(?:st|nd|rd|th)?)\s+business\s+day[^.]*?with\s+"
-            r"([a-z]+|\d+)\s+(?:persuasion\s+)?attempt",
-            re.IGNORECASE,
-        )
-    for match in sentence.finditer(source):
-        low, high, ordinal, attempt = match.groups()
-        days = int(re.match(r"\d+", ordinal).group()) if re.match(r"\d+", ordinal) else words.get(ordinal.lower())
-        count = int(attempt) if attempt.isdigit() else cardinal.get(attempt.lower())
-        if days and count:
-            found.append((match.start(), {"low": int(low), "high": int(high), "label": "",
-                          "business_days": days, "attempts": count}))
-    if not found:
-        prose = re.compile(
-            r"(\d+)\s*(?:to|[-–])\s*(\d+)(?:\s+days?\s+late)?\s*(?:=|:|is|gets?|means?)\s*(?:the\s+)?(\d+)(?:st|nd|rd|th)?|"
-            r"(\d+)\s*(?:to|[-–])\s*(\d+)(?:\s+days?\s+late)?\s*(?:=|:|is|gets?|means?)\s*(?:the\s+)?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth)\s+business day",
-            re.IGNORECASE,
-        )
-        for match in prose.finditer(source):
-            low, high, ordinal = (match.group(1), match.group(2), match.group(3)) if match.group(1) else (match.group(4), match.group(5), match.group(6))
-            if match.group(1):
-                following = source[match.end(): match.end() + 35].lower()
-                if "business day" not in following:
+    range_pattern = re.compile(
+        r"\b(?P<low>\d+)\s*(?:to|through|[-–])\s*(?P<high>\d+)\s+days?\b"
+        r"(?:\s+(?:late|overdue))?|"
+        r"\boverdue\s+from\s+(?P<pre_low>\d+)\s*(?:to|through|[-–])\s*"
+        r"(?P<pre_high>\d+)\s+days?\b", re.I,
+    )
+    ranges = list(range_pattern.finditer(source))
+    partial: list[tuple[int, int, int]] = []
+    for index, match in enumerate(ranges):
+        line = source[source.rfind("\n", 0, match.start()) + 1:source.find("\n", match.end()) if "\n" in source[match.end():] else len(source)]
+        if "|" in line:  # The table parser preserves its explicit band label.
+            continue
+        low = int(match.group("low") or match.group("pre_low"))
+        high = int(match.group("high") or match.group("pre_high"))
+        next_start = ranges[index + 1].start() if index + 1 < len(ranges) else len(source)
+        window = source[match.end():min(next_start, match.end() + 420)]
+        blank = re.search(r"\n\s*\n|===== SOURCE:", window)
+        if blank:
+            window = window[:blank.start()]
+        deadline = re.search(rf"\bdeadline\b\s*(?:is|falls?|=|:)?\s*(?:on|after|the)?\s*"
+                             rf"(?P<days>{_NUMBER_TEXT})\s+business\s+days?\b", window, re.I)
+        attempts = re.search(r"(?P<count>[A-Za-z]+(?:-[A-Za-z]+)?|\d+)\s+"
+                             r"(?:persuasion\s+)?attempts?\b", window, re.I)
+        if not attempts:
+            attempts = re.search(rf"\b(?:persuasion\s+)?attempts?\s*(?:are|is|=|:)\s*"
+                                 r"(?P<count>[A-Za-z]+(?:-[A-Za-z]+)?|\d+)\b", window, re.I)
+        days = _source_number(deadline.group("days")) if deadline else None
+        count = _source_number(attempts.group("count")) if attempts else None
+        if days is not None and days > 0 and count is not None and count >= 0:
+            found.append((match.start(), {"low": low, "high": high, "label": "",
+                                          "business_days": days, "attempts": count}))
+        elif re.search(r"\bdeadline\b.{0,80}\bbusiness\s+day|\bpersuasion\s+attempt", window, re.I | re.S):
+            partial.append((match.start(), low, high))
+
+    constraints = policy.get("constraints") or {}
+    structured = constraints.get("deadline_bands") if isinstance(constraints, dict) else None
+    if isinstance(structured, list):
+        for item in structured:
+            if not isinstance(item, dict):
+                continue
+            try:
+                band = {"low": int(item["low"]), "high": int(item["high"]),
+                        "business_days": int(item["business_days"]), "attempts": int(item["attempts"]),
+                        "label": str(item.get("label") or "")}
+            except (KeyError, TypeError, ValueError):
+                continue
+            if band["low"] > band["high"] or band["business_days"] < 1 or band["attempts"] < 0:
+                continue
+            # Model extraction is a fallback, never an override of a later source rule.
+            for match in ranges:
+                if (int(match.group("low") or match.group("pre_low")),
+                    int(match.group("high") or match.group("pre_high"))) != (band["low"], band["high"]):
                     continue
-                days = int(ordinal)
-            else:
-                days = words[ordinal.lower()]
-            found.append((match.start(), {"low": int(low), "high": int(high), "label": "",
-                          "business_days": days, "attempts": 0}))
+                excerpt = source[match.start():match.end() + 420]
+                deadline_context = re.search(r"\bdeadline\b([^.;\n]{0,100})", excerpt, re.I)
+                attempt_context = re.search(r"([^.;\n]{0,70})\battempts?\b", excerpt, re.I)
+                if (deadline_context and attempt_context and
+                    _mentions_number(deadline_context.group(1), band["business_days"]) and
+                    _mentions_number(attempt_context.group(1), band["attempts"])):
+                    found.insert(0, (-1, band))
+                    partial = [entry for entry in partial if entry !=
+                               (match.start(), band["low"], band["high"])]
+                    break
+    missing = [(low, high) for position, low, high in partial if not any(
+        later >= position and (band["low"], band["high"]) == (low, high)
+        for later, band in found)]
+    if missing:
+        raise ValueError("Cannot establish source deadline and persuasion attempts for overdue band(s): " +
+                         ", ".join(f"{low} to {high} days" for low, high in missing))
+    if not found and re.search(r"\bdeadline\b", source, re.I) and re.search(r"\bbusiness\s+days?\b", source, re.I):
+        raise ValueError("Cannot establish source deadline and persuasion attempts before building workflow")
     return [band for _, band in sorted(found, key=lambda item: item[0])]
 
 
