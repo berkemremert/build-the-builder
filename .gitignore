@@ -17,3 +17,6 @@ results/
 # deliberate submission paths before committing.
 traces/
 out/
+
+# Generated after final artifacts are committed so its commit field is exact.
+/submission.json

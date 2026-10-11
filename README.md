@@ -69,4 +69,4 @@ Use the ID for the corresponding A or B agent. The runner prints each case's res
 
 ## Final submission
 
-When the organizers provide final briefs and matching OpenAPI files, run the same builder command for each input pair. Use a separate slot and output directory for each, retain that run's trace and **live Freya export**, and verify the export's workflow and agent IDs against the trace. Fix general builder bugs only; do not insert final-brief rules or values into source. Commit the builder code and chosen exports and traces after checking for credentials. Submit the exact commit and artifact paths using the destination and format supplied by the organizers. The original [kit rules](docs/kit-readme-v3.md#the-final) govern the final.
+The organizer's current final format asks for one exported workflow, its matching trace, an own Cloudflare mock URL, and a `submission.json` manifest. Follow the [final submission package guide](docs/final-submission.md) to stage and check those files. The original [kit rules](docs/kit-readme-v3.md#the-final) remain available for background; the current organizer format controls the package.
