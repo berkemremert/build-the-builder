@@ -14,6 +14,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           identity_selector_field, note_request_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
+from api_parameters import required_header_bindings
 from account_item_bindings import product_item_fields
 from deadline_tables import parse_deadline_tables
 from openapi_resolver import normalize_openapi
@@ -215,6 +216,8 @@ def _url(openapi: dict, path: str) -> str:
 def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
               description: str = "", post_code: str = "") -> dict:
     path, method, schema = _api_spec(openapi, name)
+    headers = {"Content-Type": {"type": "string", "default": "application/json"}}
+    headers.update(required_header_bindings(openapi, path, method))
     fixed = fixed or {}
     properties = {}
     for field, spec in (schema.get("properties") or {}).items():
@@ -227,8 +230,7 @@ def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
     params = {"type": "object", "properties": {
         "url": {"type": "string", "default": _url(openapi, path)},
         "method": {"type": "string", "default": method},
-        "headers": {"type": "object", "properties": {
-            "Content-Type": {"type": "string", "default": "application/json"}}},
+        "headers": {"type": "object", "properties": headers},
         "body": {"type": "object", "properties": properties, "required": schema.get("required") or []},
     }}
     tool = {"type": "function", "config": {"timeoutMs": 12000, "maxRetries": 0},

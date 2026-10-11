@@ -19,6 +19,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           identity_selector_field, note_request_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
+from api_parameters import required_header_bindings
 from openapi_resolver import normalize_openapi
 
 
@@ -358,6 +359,20 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         expected_name = operation.get("operationId") or api_path.rstrip("/").split("/")[-1]
         if name != expected_name:
             errors.append(f"{location}: function.name {name!r} must match OpenAPI operation {expected_name!r} at {api_path!r}")
+        try:
+            expected_headers = required_header_bindings(openapi, api_path, api_method)
+        except ValueError as exc:
+            errors.append(f"{location}: {exc}")
+        else:
+            header_spec = props.get("headers")
+            header_props = header_spec.get("properties") if isinstance(header_spec, dict) else None
+            header_props = header_props if isinstance(header_props, dict) else {}
+            for header_name, expected in expected_headers.items():
+                matches = [leaf for key, leaf in header_props.items()
+                           if isinstance(key, str) and key.lower() == header_name.lower()]
+                if len(matches) != 1 or not isinstance(matches[0], dict) or any(
+                        matches[0].get(key) != value for key, value in expected.items()):
+                    errors.append(f"{location}.headers.properties.{header_name}: bind required OpenAPI header to {expected!r}")
         schema = _schema_for(openapi, api_path, api_method)
         api_props = schema.get("properties", {})
         body = props.get("body")
