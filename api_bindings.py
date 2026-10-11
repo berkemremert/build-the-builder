@@ -122,9 +122,7 @@ def close_request_fields(schema: dict) -> dict[str, str | None]:
         elif words & {"reason", "detail", "cause"} or re.search(
                 r"\b(?:close|outcome)\s+reason\b", description):
             found["reason"].append(field)
-    if len(found["outcome"]) != 1 or len(found["reason"]) > 1 or (
-            not found["reason"] and any(name != "customer_id" and name != found["outcome"][0]
-                                        for name in schema.get("required") or [])):
+    if len(found["outcome"]) != 1 or len(found["reason"]) > 1:
         raise ValueError(f"close_call request needs one outcome and at most one reason field: {found!r}")
     return {"outcome": found["outcome"][0],
             "reason": found["reason"][0] if found["reason"] else None}

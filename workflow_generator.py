@@ -15,6 +15,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
 from api_parameters import required_header_bindings
+from api_body_bindings import fixed_required_body_values
 from api_servers import operation_url
 from account_item_bindings import product_item_fields
 from business_calendar import business_weekdays
@@ -210,13 +211,17 @@ def _promise_response_contract(openapi: dict) -> tuple[list[str], str, list[str]
     return success_codes, next(iter(flags)), false_codes, no_write_codes
 
 
-def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
+def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None, source: str = "",
               description: str = "", post_code: str = "") -> dict:
     path, method, schema = _api_spec(openapi, name)
     customer_field = customer_identifier_field(schema)
     headers = {"Content-Type": {"type": "string", "default": "application/json"}}
     headers.update(required_header_bindings(openapi, path, method))
     fixed = fixed or {}
+    required_constants = fixed_required_body_values(name, schema, source)
+    for field, value in required_constants.items():
+        if field in fixed and fixed[field] != value:
+            raise ValueError(f"{name} fixed request field {field!r} conflicts with OpenAPI")
     properties = {}
     for field, spec in (schema.get("properties") or {}).items():
         leaf = {"type": spec.get("type", "string"),
@@ -224,7 +229,8 @@ def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
         if spec.get("enum"):
             leaf["enum"] = spec["enum"]
         leaf["default"] = ("{{customer_id}}" if field == customer_field else
-                           fixed[field] if field in fixed else "{{" + field + "}}")
+                           fixed[field] if field in fixed else
+                           required_constants.get(field, "{{" + field + "}}"))
         properties[field] = leaf
     params = {"type": "object", "properties": {
         "url": {"type": "string", "default": operation_url(openapi, path, method)},
@@ -1908,11 +1914,11 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     verify_hook = (_VERIFY_HOOK.replace("__COMPLETE_FIELD__", repr(identity_response["complete"]))
                    .replace("__ANSWER_FIELD__", repr(identity_response["answer"]))
                    .replace("__REMAINING_FIELD__", repr(identity_response["remaining"])))
-    verify_dob = _api_tool(openapi, "verify_identity", fixed={identity_selector: identity_fields[0]},
+    verify_dob = _api_tool(openapi, "verify_identity", source=brief or prose, fixed={identity_selector: identity_fields[0]},
                            description=f"Check the customer's {identity_fields[0].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
-    verify_phone = _api_tool(openapi, "verify_identity", fixed={identity_selector: identity_fields[1]},
+    verify_phone = _api_tool(openapi, "verify_identity", source=brief or prose, fixed={identity_selector: identity_fields[1]},
                              description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
-    callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=callback_hook)
+    callback = _api_tool(openapi, "schedule_callback", source=brief or prose, description="Book a valid callback after a third party gives an exact day and time.", post_code=callback_hook)
     callback_schema = _api_spec(openapi, "schedule_callback")[2]
     callback_date_fields = [field for field, spec in (callback_schema.get("properties") or {}).items()
                             if isinstance(spec, dict) and (spec.get("format") == "date" or
@@ -1930,12 +1936,12 @@ if day < today:
 if day > today and (day.weekday() not in {weekdays!r} or day.isoformat() in {holidays!r}):
     raise ValueError('Callback date is not a business day')
 """
-    account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")
-    promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
-    note = _api_tool(openapi, "add_note", description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=note_hook)
+    account = _api_tool(openapi, "get_account", source=brief or prose, description="Load late products only after both security answers have passed.")
+    promise = _api_tool(openapi, "create_promise", source=brief or prose, description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
+    note = _api_tool(openapi, "add_note", source=brief or prose, description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=note_hook)
     transfer_hook = transfer_hook.replace("transfer_to_agent_args.queue",
                                           "transfer_to_agent_args." + transfer_fields["queue"])
-    transfer = _api_tool(openapi, "transfer_to_agent", description="Transfer only for accepted support, persistent human request, or restructuring. Never add notes on a transfer.", post_code=transfer_hook)
+    transfer = _api_tool(openapi, "transfer_to_agent", source=brief or prose, description="Transfer only for accepted support, persistent human request, or restructuring. Never add notes on a transfer.", post_code=transfer_hook)
     promise["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
@@ -1961,7 +1967,7 @@ except Exception:
     close_bindings = {close_fields["outcome"]: "{{close_outcome}}"}
     if close_fields["reason"]:
         close_bindings[close_fields["reason"]] = "{{close_reason}}"
-    close = _api_tool(openapi, "close_call", fixed=close_bindings,
+    close = _api_tool(openapi, "close_call", source=brief or prose, fixed=close_bindings,
                       description="Close the call exactly once, after farewell. This is the last bank API call.")
     close["pre_process_code"] = """try:
     body = config.get('body')
@@ -2542,7 +2548,7 @@ except Exception:
         _eq("account_discussion", "write_state", "invalid"),
         _always("prepare_notes"),
     ]
-    promise_engine = _api_tool(openapi, "create_promise", fixed=promise_bindings,
+    promise_engine = _api_tool(openapi, "create_promise", source=brief or prose, fixed=promise_bindings,
         description="Record the explicitly confirmed and validated current product promise.", post_code=promise_hook)
     promise_engine["config"]["maxRetries"] = 0
     promise_engine["function"]["parameters"]["properties"]["connect_retries"] = {
@@ -2615,7 +2621,7 @@ except Exception:
     nodes["select_note"] = _code_node("select_note", _SELECT_NOTE_CODE, "finalize")
     nodes["select_note"]["transitions"] = [
         _eq("add_note_call", "note_write_state", "notes"), _always("finalize")]
-    note_engine = _api_tool(openapi, "add_note", fixed={
+    note_engine = _api_tool(openapi, "add_note", source=brief or prose, fixed={
         note_fields["product"]: "{{pending_note_product_id}}", note_fields["reason"]: "{{pending_note_reason}}"},
         description="Record one deferred non-promise reason after the discussion has ended and no transfer is pending.", post_code=note_hook)
     note_engine["pre_process_code"] = note["pre_process_code"]
@@ -2632,7 +2638,7 @@ except Exception:
     nodes["note_write_failed"] = _code_node("note_write_failed", _SKIP_NOTE_CODE, "select_note")
     for suffix in ("restructuring", "support", "human"):
         queue = _queue_for(openapi, suffix, policy)
-        t = _api_tool(openapi, "transfer_to_agent", fixed={transfer_fields["queue"]: queue},
+        t = _api_tool(openapi, "transfer_to_agent", source=brief or prose, fixed={transfer_fields["queue"]: queue},
                       description=f"Transfer to {queue} now; no notes on any transfer.", post_code=transfer_hook)
         t["pre_process_code"] = (
             "try:\n"

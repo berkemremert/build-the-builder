@@ -20,6 +20,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
 from api_parameters import required_header_bindings
+from api_body_bindings import fixed_required_body_values
 from api_servers import operation_url
 from customer_bindings import customer_identifier_field
 from openapi_resolver import normalize_openapi
@@ -410,6 +411,17 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"{location}.body.properties: add required API field {field!r}")
             elif field not in required and isinstance(body_props[field], dict) and "default" not in body_props[field]:
                 errors.append(f"{location}.body.required: include unbaked API field {field!r}")
+        try:
+            fixed_body_values = fixed_required_body_values(
+                name, schema, provided={field: leaf.get("default") for field, leaf in body_props.items()
+                                        if isinstance(leaf, dict) and "default" in leaf})
+        except ValueError as exc:
+            errors.append(f"{location}.body: {exc}")
+        else:
+            for field, value in fixed_body_values.items():
+                leaf = body_props.get(field)
+                if not isinstance(leaf, dict) or leaf.get("default") != value:
+                    errors.append(f"{location}.body.properties.{field}: bind required fixed OpenAPI value {value!r}")
         try:
             customer_field = customer_identifier_field(schema)
         except ValueError as exc:
