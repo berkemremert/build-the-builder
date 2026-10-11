@@ -976,13 +976,14 @@ def _conversation(name: str, prompt: str, *, tools: list[dict] | None = None,
     return node
 
 
-def _end_node() -> dict:
+def _end_node(spoken_message: str) -> dict:
     return {"name": "ended", "node_type": "end_call", "on_enter": {"type": "silent"},
             "disable_inactivity_monitor": True, "transitions": [],
             "terminal": {"type": "function", "function": {
                 "name": "freya_call_complete", "handler": "__function__:end_call",
                 "parameters": {"type": "object", "properties": {
-                    "message_mode": {"type": "string", "default": "none"}}}}}}
+                    "message_mode": {"type": "string", "default": "custom"},
+                    "spoken_message": {"type": "string", "default": spoken_message}}}}}}
 
 
 def _normal_completion_utterance(policy: dict) -> str:
@@ -993,6 +994,7 @@ def _normal_completion_utterance(policy: dict) -> str:
         for pattern in (
             r"\bnormal\s+(?:completion|goodbye|end)\s*:\s*[“\"]([^”\"]+)[”\"]",
             r"\b(?:normal\s+(?:goodbye|end)|nothing\s+else|thanks)\b[^:]{0,150}:\s*[“\"]([^”\"]+)[”\"]",
+            r"\b(?:caller\s+finishes|says\s+thanks|nothing\s+else|normal\s+(?:completion|goodbye|end))\b[^“”\"]{0,100}[“\"]([^”\"]+)[”\"]",
         ):
             match = re.search(pattern, menu, re.I | re.S)
             if match:
@@ -1099,20 +1101,19 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     normal_completion = _normal_completion_utterance(policy)
     outcomes = policy.get("outcomes") or {}
     main_menu_rule = outcomes.get("main_menu") if isinstance(outcomes, dict) else ""
-    courtesy_on_thanks = isinstance(main_menu_rule, str) and bool(re.search(r"\bthanks\b", main_menu_rule, re.I))
-    farewell_message = ("This is the final spoken turn. Do not ask a question, offer another action, or imply the caller can respond. "
+    farewell_message = ("Give a brief final acknowledgment in the source language. Do not ask a question, offer another action, or imply the caller can respond. "
                         "If a bank write was confirmed, state only its source-defined confirmation using verified bank values. "
                         "If the caller just thanked you, acknowledge that briefly in the source language. "
-                        "Finish by saying the source-defined normal completion phrase exactly: " + normal_completion + " "
-                        "Do not claim an action succeeded unless the bank confirmed it.")
+                        "The terminal will say the source-defined normal completion phrase exactly: " + normal_completion + ". "
+                        "Do not repeat that phrase here. Do not claim an action succeeded unless the bank confirmed it.")
     nodes = {
         "farewell": {"name": "farewell", "node_type": "conversation",
-                     "on_enter": {"type": "llm"} if courtesy_on_thanks else {"type": "tts", "text": normal_completion},
+                     "on_enter": {"type": "llm"},
                      "task_message": farewell_message,
                      "passthrough": True,
                      "passthrough_default_transition": "closing" if close_tool else "ended",
                      "transitions": [_always("closing" if close_tool else "ended")]},
-        "ended": _end_node(),
+        "ended": _end_node(normal_completion),
     }
     if not upstream_verified:
         nodes["opening"] = _conversation(

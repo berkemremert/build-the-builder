@@ -118,12 +118,26 @@ class GenericRequestValidationTests(unittest.TestCase):
         self.assertIn("acknowledge that briefly in the source language", farewell["task_message"])
         self.assertIn("Do not ask a question, offer another action", farewell["task_message"])
         self.assertIn("Sizi ana menüye yönlendiriyorum.", farewell["task_message"])
+        terminal = workflow["nodes"]["ended"]["terminal"]["function"]["parameters"]["properties"]
+        self.assertEqual("custom", terminal["message_mode"]["default"])
+        self.assertEqual("Sizi ana menüye yönlendiriyorum.", terminal["spoken_message"]["default"])
         self.policy["outcomes"]["main_menu"] = (
             "Normal completion and no eligible card. No eligible card: “Different phrase.” "
             "Normal completion: “Sizi ana menüye yönlendiriyorum.”")
         workflow = build_generic_workflow(self.policy, self.spec)
         self.assertEqual("Sizi ana menüye yönlendiriyorum.",
-                         workflow["nodes"]["farewell"]["on_enter"]["text"])
+                         workflow["nodes"]["ended"]["terminal"]["function"]["parameters"]
+                         ["properties"]["spoken_message"]["default"])
+
+    def test_caller_finishes_source_phrase_becomes_terminal_speech(self):
+        self.policy["outcomes"] = {"main_menu":
+            "The caller finishes or says thanks (“Sizi ana menüye yönlendiriyorum.”); "
+            "an applicable question uses all three non-silence tries "
+            "(“Size şu anda yardımcı olamıyorum. Sizi ana menüye aktarıyorum.”)."}
+        workflow = build_generic_workflow(self.policy, self.spec)
+        spoken = workflow["nodes"]["ended"]["terminal"]["function"]["parameters"]
+        self.assertEqual("Sizi ana menüye yönlendiriyorum.",
+                         spoken["properties"]["spoken_message"]["default"])
 
 
 class GenericWriteSafetyTests(unittest.TestCase):
