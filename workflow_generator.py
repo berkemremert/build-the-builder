@@ -829,6 +829,7 @@ try:
     vars['recorded_ids'] = '[]'
     vars['recorded_count'] = '0'
     vars['note_reasons'] = '{{}}'
+    vars['multi_partial_terms_json'] = '{{}}'
     vars['missing_products'] = ', '.join(str(item.get('product_id')) for item in result)
 except Exception:
     vars['product_json'] = '[]'
@@ -838,6 +839,7 @@ except Exception:
     vars['recorded_ids'] = '[]'
     vars['recorded_count'] = '0'
     vars['note_reasons'] = '{{}}'
+    vars['multi_partial_terms_json'] = '{{}}'
     vars['missing_products'] = ''
 """
 
@@ -1534,6 +1536,7 @@ try:
     product_by_id = dict((str(item.get('product_id') or ''), item) for item in products)
     terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
     notes = json.loads(str(vars.get('multi_notes_json') or '{}'))
+    partial = json.loads(str(vars.get('multi_partial_terms_json') or '{}'))
     floor_first = set(json.loads(str(vars.get('multi_floor_first_json') or '[]')))
     def resolve_pid(value, fallback=''):
         name = re.sub(r'\\s+', ' ', str(value or '').lower().replace('_', ' ')).strip()
@@ -1587,7 +1590,7 @@ try:
         if isinstance(value, dict):
             value = value.get('promises') or value.get('products') or [value]
         return value if isinstance(value, list) else []
-    def add_terms(value, fallback_pid=''):
+    def add_terms(value, fallback_pid='', latest_reply=False):
         added = False
         for item in parsed(value):
             if not isinstance(item, dict):
@@ -1596,12 +1599,21 @@ try:
             if pid not in product_by_id or pid in notes:
                 continue
             date = str(item.get('date_phrase') or item.get('date_words') or item.get('raw_date') or item.get('date') or '').strip()
-            if not date:
-                continue
-            amount = resolve_amount(item.get('amount'), product_by_id[pid])
+            if latest_reply and str(vars.get('multi_reply_date_spoken') or 'yes') != 'yes':
+                date = ''
+            supplied_amount = item.get('amount')
+            if supplied_amount is None or str(supplied_amount).strip() == '':
+                amount = partial.get(pid, {}).get('amount', float(product_by_id[pid].get('past_due') or 0))
+            else:
+                amount = resolve_amount(supplied_amount, product_by_id[pid])
             if amount is None:
                 continue
+            if not date:
+                if supplied_amount is not None and str(supplied_amount).strip():
+                    partial[pid] = dict(product_id=pid, amount=amount)
+                continue
             terms[pid] = dict(product_id=pid, amount=amount, date=date)
+            partial.pop(pid, None)
             notes.pop(pid, None)
             added = True
         return added
@@ -1618,6 +1630,7 @@ try:
                 if claim_pid and reason and reason != __REFUSAL_REASON__:
                     notes[claim_pid] = reason
                     terms.pop(claim_pid, None)
+                    partial.pop(claim_pid, None)
         if str(vars.get('all_today_status') or '') == 'yes':
             today = str(vars.get('now') or '')[:10]
             for pid, item in product_by_id.items():
@@ -1660,12 +1673,13 @@ try:
                 for target, reason in resolved_claims:
                     terms.pop(target, None)
                     notes[target] = reason
-                add_terms(vars.get('multi_reply_terms_json') or '', pid)
+                add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
         elif phase == 'identify':
             target = resolve_pid(vars.get('multi_reply_product_id'))
             claim = str(vars.get('multi_claim_action') or '')
             if target and claim in ('paid', 'dispute'):
                 terms.pop(target, None)
+                partial.pop(target, None)
                 notes[target] = __PAID_REASON__ if claim == 'paid' else __DISPUTE_REASON__
                 vars['multi_claim_action'] = ''
                 vars['multi_claim_attempts'] = '0'
@@ -1677,31 +1691,38 @@ try:
                 next_step = 'identify' if attempts < 2 else 'service_error'
         elif phase == 'support':
             if action == 'proposal':
-                add_terms(vars.get('multi_reply_terms_json') or '', pid)
+                add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
             if pid not in terms and pid not in notes:
                 notes[pid] = __HARDSHIP_REASON__
+        elif str(vars.get('multi_offer_fact_question') or '') == 'yes' and action not in ('paid', 'dispute', 'hardship'):
+            next_step = 'question'
         elif action == 'accepted' and phase == 'offer':
             if pid in notes:
                 pass
-            elif str(vars.get('multi_fixed_offer') or '') == 'yes':
+            elif (str(vars.get('multi_fixed_offer') or '') == 'yes' and
+                  str(vars.get('multi_fixed_offer_accepted') or '') == 'yes'):
                 terms[pid] = dict(product_id=pid, amount=vars.get('multi_offer_amount'), date=str(vars.get('multi_offer_date') or ''))
+                partial.pop(pid, None)
                 notes.pop(pid, None)
-            elif not add_terms(vars.get('multi_reply_terms_json') or '', pid):
+            elif not add_terms(vars.get('multi_reply_terms_json') or '', pid, True):
                 next_step = 'clarify'
-        elif action == 'proposal':
+        elif action == 'accepted' and phase == 'clarify' and str(vars.get('multi_reply_date_spoken') or '') != 'yes':
+            next_step = 'clarify'
+        elif action in ('proposal', 'accepted'):
             common = str(vars.get('multi_reply_common_date_words') or '').strip()
             if common:
                 for item in products:
                     other = str(item.get('product_id') or '')
                     if other not in terms and other not in notes:
                         terms[other] = dict(product_id=other, amount=item.get('past_due'), date=common)
-            add_terms(vars.get('multi_reply_terms_json') or '', pid)
+            add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
             if pid not in terms and pid not in notes:
                 next_step = 'clarify'
         elif action in ('paid', 'dispute'):
             target = resolve_pid(vars.get('multi_reply_product_id'))
             if target:
                 terms.pop(target, None)
+                partial.pop(target, None)
                 notes[target] = __PAID_REASON__ if action == 'paid' else __DISPUTE_REASON__
                 if target != pid and pid not in terms and pid not in notes:
                     next_step = 'clarify'
@@ -1722,6 +1743,7 @@ try:
                 vars['multi_offer_stage'] = str(stage + 1)
             else:
                 notes[pid] = __REFUSAL_REASON__
+                partial.pop(pid, None)
         else:
             stage = int(vars.get('multi_offer_stage') or 1)
             limit = int(product_by_id.get(pid, dict()).get('attempts') or 1)
@@ -1730,17 +1752,24 @@ try:
                 next_step = 'offer'
             else:
                 notes[pid] = __REFUSAL_REASON__
+                partial.pop(pid, None)
         vars['multi_reply_terms_json'] = ''
         vars['multi_reply_notes_json'] = ''
         vars['multi_reply_common_date_words'] = ''
         vars['multi_reply_product_id'] = ''
+        vars['multi_reply_date_spoken'] = ''
+        vars['multi_fixed_offer_accepted'] = ''
     unresolved = [(index, str(item.get('product_id') or '')) for index, item in enumerate(products)
                   if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
     if next_step == 'service_error':
         vars['multi_next'] = 'service_error'
-    elif next_step in ('support', 'clarify', 'identify', 'disclosure'):
+    elif next_step in ('support', 'clarify', 'identify', 'disclosure', 'question'):
         vars['multi_phase'] = next_step
         vars['multi_next'] = next_step
+        if next_step == 'clarify' and pid in product_by_id:
+            label = str(product_by_id[pid].get('label') or pid)
+            vars['multi_clarify_prompt'] = ('What exact day would you pay ' + label + '?' if pid in partial else
+                                            'What exact day would you make this payment for ' + label + '?')
         if next_step != 'disclosure':
             vars['multi_offer_action'] = 'unclear'
     elif next_step == 'offer' and pid in product_by_id and pid not in terms and pid not in notes:
@@ -1753,6 +1782,10 @@ try:
         vars['multi_offer_stage'] = '1'
         vars['multi_phase'] = 'offer'
         vars['multi_next'] = 'offer'
+        if focus in partial:
+            vars['multi_phase'] = 'clarify'
+            vars['multi_next'] = 'clarify'
+            vars['multi_clarify_prompt'] = 'What exact day would you pay ' + str(product_by_id[focus].get('label') or focus) + '?'
         if phase == 'initial' and not terms and not notes and disclosure in ('incomplete', 'hardship'):
             vars['multi_focus_label'] = str(product_by_id[focus].get('label') or focus)
             vars['multi_phase'] = 'disclosure' if disclosure == 'incomplete' else 'support'
@@ -1765,6 +1798,7 @@ try:
         vars['pending_note_reasons_json'] = json.dumps(notes)
     vars['multi_terms_json'] = json.dumps(terms)
     vars['multi_notes_json'] = json.dumps(notes)
+    vars['multi_partial_terms_json'] = json.dumps(partial)
     vars['multi_floor_first_json'] = json.dumps(sorted(floor_first))
 except Exception:
     vars['multi_next'] = 'service_error'
@@ -1849,6 +1883,86 @@ try:
 except Exception:
     vars['multi_offer_state'] = 'invalid'
     vars['multi_offer_text'] = ''
+"""
+
+
+_MULTI_OFFER_FACT_CODE = """import datetime
+import json
+import re
+__PAYMENT_DATE_PARSER__
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    by_id = dict((str(item.get('product_id') or ''), item) for item in products)
+    kind = str(vars.get('multi_offer_fact_kind') or '')
+    requested = str(vars.get('multi_offer_fact_product_id') or '').strip()
+    item = by_id.get(requested)
+    if kind == 'list':
+        answer = 'The products, in order, are ' + ', '.join(str(value.get('label') or '') for value in products) + '.'
+    elif not item:
+        answer = 'Which product do you mean?'
+    else:
+        label = str(item.get('label') or requested)
+        if kind == 'past_due':
+            answer = 'The past-due amount on the ' + label + ' is ' + format(float(item['past_due']), '.2f') + '.'
+        elif kind == 'days_late':
+            answer = 'The ' + label + ' is ' + str(int(item['days_late'])) + ' days late.'
+        elif kind == 'card_suffix':
+            answer = 'The product is ' + label + '.' if re.search(r'ending \\d{4}\\b', label) else 'I do not have a card suffix for that product.'
+        elif kind == 'deadline':
+            deadline = datetime.date.fromisoformat(str(item.get('deadline') or ''))
+            named = str(vars.get('multi_offer_fact_date_words') or '').strip()
+            if named:
+                today = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00')).date()
+                candidate = parse_payment_date(named, today)
+                relation = 'on or before' if candidate <= deadline else 'after'
+                answer = named + ' is ' + relation + ' the ' + label + ' deadline of ' + deadline.isoformat() + '.'
+            else:
+                answer = 'The deadline for the ' + label + ' is ' + deadline.isoformat() + '.'
+        else:
+            answer = 'I do not have that information.'
+    vars['multi_offer_fact_answer'] = answer
+    focus = str(vars.get('multi_focus_product_id') or '')
+    partial = json.loads(str(vars.get('multi_partial_terms_json') or '{}'))
+    focus_label = str(by_id.get(focus, {}).get('label') or focus)
+    vars['multi_offer_resume_question'] = ('What exact day would you pay ' + focus_label + '?' if focus in partial else
+                                           'Please answer the current payment offer for ' + focus_label + '.')
+    vars['multi_phase'] = 'clarify' if focus in partial else 'offer'
+except Exception:
+    vars['multi_offer_fact_answer'] = 'I cannot confirm that account detail right now.'
+    vars['multi_offer_resume_question'] = 'Please answer the current payment offer.'
+    vars['multi_phase'] = 'offer'
+finally:
+    vars['multi_offer_fact_question'] = 'no'
+    vars['multi_offer_fact_kind'] = 'none'
+    vars['multi_offer_fact_product_id'] = ''
+    vars['multi_offer_fact_date_words'] = ''
+"""
+
+
+_MULTI_CORRECTION_CLAIM_CODE = """import json
+try:
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    known = set(str(item.get('product_id') or '') for item in products)
+    action = str(vars.get('multi_correction_claim_action') or '')
+    pid = str(vars.get('multi_correction_claim_product_id') or '').strip()
+    if action not in ('paid', 'dispute'):
+        raise ValueError('No supported claim')
+    if pid not in known:
+        vars['multi_correction_prompt'] = 'Which product do you mean?'
+        vars['multi_next'] = 'clarify'
+    else:
+        vars['multi_phase'] = 'offer'
+        vars['multi_offer_action'] = action
+        vars['multi_reply_product_id'] = pid
+        vars['multi_next'] = 'advance'
+    vars['multi_corrected_terms_json'] = ''
+    vars['multi_correction_product'] = ''
+    vars['multi_correction_amount_words'] = ''
+    vars['multi_correction_date_words'] = ''
+    vars['multi_correction_claim_action'] = 'none'
+    vars['multi_correction_claim_product_id'] = ''
+except Exception:
+    vars['multi_next'] = 'clarify'
 """
 
 
@@ -2530,6 +2644,7 @@ except Exception:
             _eq("multi_support", "multi_next", "support"),
             _eq("multi_disclosure_clarify", "multi_next", "disclosure"),
             _eq("multi_clarify", "multi_next", "clarify"),
+            _eq("multi_offer_fact_answer", "multi_next", "question"),
             _eq("multi_identify", "multi_next", "identify"),
             _always("service_unavailable"),
         ]
@@ -2569,9 +2684,21 @@ except Exception:
         multi_reply_extraction = [
             _enum("multi_offer_action", ["accepted", "proposal", "refused", "full_too_much", "paid", "dispute", "hardship",
                                          "transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
-                  "Classify only the latest answer about the current product. accepted means yes to the exact fixed offer just spoken. proposal means the caller gave a new exact amount or date. refused includes a flat no or non-answer. full_too_much means the full amount is explicitly too high. Paid, dispute, hardship and transfer requests take priority."),
+                  "Classify only the latest answer about the current product. accepted means a clear yes to the entire fixed amount AND date just spoken, never an amount-only statement or a bare date fragment. proposal means the caller gives an exact amount OR payment date, even if the other part is missing; an amount-only proposal is not a refusal. refused means a flat no or genuine non-answer, never a factual question or unfinished date question. full_too_much means the full amount is explicitly too high. Paid, dispute, hardship and transfer requests take priority."),
             {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.45,
-             "description": "On a fresh proposal, return a JSON array string of product_id, amount, and the caller's RAW date words. Include every product the caller explicitly covered; leave empty otherwise. For an accepted model-generated offer, repeat the exact offered terms."},
+             "description": "On a fresh proposal, return a JSON array string of product_id and only the amount and RAW date words actually spoken in the latest answer. Include amount-only and date-only fragments for the current focused product; omit the missing field instead of copying the offered day or amount. Include every product the caller explicitly covered; leave empty for a factual question or genuine refusal. For a clear yes accepting the entire fixed offer, repeat its exact terms."},
+            _enum("multi_reply_date_spoken", ["yes", "no"],
+                  "yes only if the latest caller answer itself explicitly names an exact payment day, including a date-only continuation. no for an amount-only promise, bare yes to the entire fixed offer, factual question, or non-answer. Do not copy the earlier offer's date into an amount-only answer."),
+            _enum("multi_fixed_offer_accepted", ["yes", "no"],
+                  "yes only when the caller clearly accepts the exact fixed amount AND date already offered, such as a bare yes to that complete offer. no when they name only an amount, name only a date, ask a question, or refuse."),
+            _enum("multi_offer_fact_question", ["yes", "no"],
+                  "yes if the latest caller reply is a factual product or deadline question, including an unfinished question fragment such as 'Is 16 October before the'. A question is never acceptance, refusal, or a non-answer and does not consume an offer attempt. no for a genuine non-answer such as needing a moment to check a calendar, a flat refusal, or a payment proposal."),
+            _enum("multi_offer_fact_kind", ["deadline", "past_due", "days_late", "card_suffix", "list", "other", "none"],
+                  "For a factual question, identify the fact requested from the account: deadline includes whether a named date is before the deadline; past_due, days_late, card_suffix, list, other. none if no question."),
+            {"name": "multi_offer_fact_product_id", "type": "string", "min_confidence": 0.55,
+             "description": "For a factual question, return the exact product ID from {{account_facts}} only when the caller names an unambiguous product, label, or card suffix. Leave empty for an unfinished or ambiguous product reference; do not automatically use the current focus."},
+            {"name": "multi_offer_fact_date_words", "type": "string", "min_confidence": 0.55,
+             "description": "For a deadline comparison question only, copy the exact date words the caller asked about, such as '16 October'. Leave empty for a payment proposal or a question with no complete day."},
             {"name": "multi_reply_common_date_words", "type": "string", "min_confidence": 0.55,
              "description": "Copy a date phrase only when the latest answer explicitly applies that ONE date to all remaining products. Otherwise leave empty."},
             {"name": "multi_reply_product_id", "type": "string", "min_confidence": 0.55,
@@ -2587,6 +2714,8 @@ except Exception:
             "Discuss only {{multi_focus_label}} at persuasion attempt {{multi_offer_stage}}. Follow the source policy and the supplied product facts. "
             "If the fixed offer was spoken on entry, wait for the caller's answer without making another offer. "
             "If no fixed offer was supplied, make exactly this attempt's source-authorized offer and wait. "
+            "An amount without a day is a partial caller proposal: retain it and ask for the exact day on this same product. "
+            "Answer factual or deadline questions without counting a refusal, advancing products, or repeating the offer. "
             "Do not claim a promise is recorded. No tool call is allowed in this node.",
             opening="{{multi_offer_text}}" if fixed_multi_offers else None,
             extraction=multi_reply_extraction,
@@ -2601,11 +2730,24 @@ except Exception:
             transitions=[_eq("transfer_support", "multi_offer_action", "accepted")] + transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_clarify"] = _conversation(
-            "multi_clarify", "Ask for one exact amount and day for {{multi_focus_label}} under the source policy. "
+            "multi_clarify", "Ask for the missing exact day for {{multi_focus_label}} under the source policy. "
             "Do not repeat the previous offer or claim a promise is recorded. No tool call is allowed in this node.",
+            opening="{{multi_clarify_prompt}}",
             extraction=multi_reply_extraction,
             transitions=transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
+        nodes["multi_offer_fact_answer"] = _code_node(
+            "multi_offer_fact_answer", _MULTI_OFFER_FACT_CODE.replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE),
+            "multi_offer_resume")
+        nodes["multi_offer_resume"] = _conversation(
+            "multi_offer_resume",
+            "The answer to the verified account question was prepared from account facts. The current product and offer attempt are unchanged. "
+            "Wait for the caller's response to the existing offer or their proposed payment terms. A new factual question gets another fact answer. "
+            "Do not repeat a refused offer or count a question as a non-answer. No tool call is allowed.",
+            opening="{{multi_offer_fact_answer}} {{multi_offer_resume_question}}",
+            extraction=multi_reply_extraction,
+            transitions=transfer_routes + [_always("multi_advance")],
+            max_turns=5, max_target="multi_advance")
         nodes["multi_identify"] = _conversation(
             "multi_identify", "The question was spoken on entry. Wait for the caller to identify the product for their paid or dispute claim. "
             "Do not make an offer or assume it concerns {{multi_focus_label}}. No tool call is allowed in this node.",
@@ -2626,16 +2768,28 @@ except Exception:
                         {"name": "multi_correction_product", "type": "string", "min_confidence": 0.55,
                          "description": "Copy only a product ID or unambiguous product label explicitly named in the latest answer. Leave empty if the caller supplies only an amount or date; do not infer the product from the current offer."},
                         {"name": "multi_correction_amount_words", "type": "string", "min_confidence": 0.55,
-                         "description": "Copy only the amount explicitly spoken in the latest correction answer, using its raw words or digits. Leave empty if no amount was spoken; do not use the previous amount as an extracted answer."},
+                         "description": "Copy only a NEW proposed payment amount explicitly spoken in the latest correction answer. Leave empty for an amount mentioned as already paid, past-due account information, or a disputed debt; those are claims, not corrected promise amounts. Do not use the previous amount as an extracted answer."},
                         {"name": "multi_correction_date_words", "type": "string", "min_confidence": 0.55,
                          "description": "Copy only the exact payment day or date explicitly spoken in the latest correction answer, in raw words. Leave empty if no date was spoken; do not reuse or convert a prior date."},
+                        _enum("multi_correction_claim_action", ["paid", "dispute", "none"],
+                              "paid if the caller says the CURRENT overdue amount for a product was already paid; dispute if they deny owning a product, say they never had it, or that it was closed or paid off in the past. Such claims take priority over any correction amount, including a number quoted in the claim. none for a genuine promise correction."),
+                        {"name": "multi_correction_claim_product_id", "type": "string", "min_confidence": 0.55,
+                         "description": "For a paid or dispute claim, return only the exact product ID identified by the caller from {{account_facts}}. Leave empty if ambiguous. Never infer a paid or disputed product from a quoted amount."},
                         _enum("multi_correction_action", ["transfer_restructuring", "transfer_support", "transfer_human", "continue"],
                               "Transfer requests take priority; otherwise continue collecting corrected terms.")],
             transitions=[_eq("transfer_restructuring", "multi_correction_action", "transfer_restructuring"),
                          _eq("transfer_support", "multi_correction_action", "transfer_support"),
                          _eq("transfer_human", "multi_correction_action", "transfer_human"),
+                         _eq("multi_correction_claim", "multi_correction_claim_action", "paid"),
+                         _eq("multi_correction_claim", "multi_correction_claim_action", "dispute"),
                          _always("multi_revise")],
             max_turns=10, max_target="service_unavailable")
+        nodes["multi_correction_claim"] = _code_node(
+            "multi_correction_claim", _MULTI_CORRECTION_CLAIM_CODE, "multi_correction")
+        nodes["multi_correction_claim"]["transitions"] = [
+            _eq("multi_advance", "multi_next", "advance"),
+            _always("multi_correction"),
+        ]
         nodes["multi_revise"] = _code_node(
             "multi_revise", _with_amount_parser(
                 _MULTI_REVISE_CODE.replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)),
