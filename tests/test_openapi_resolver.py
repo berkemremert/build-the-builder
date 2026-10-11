@@ -51,7 +51,7 @@ class OpenApiResolverTests(unittest.TestCase):
         account = normalized["paths"]["/get_account"]["post"]
         products = account["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["products"]
         self.assertEqual("string", products["items"]["properties"]["product_id"]["type"])
-        workflow = build_workflow(synthetic_policy(), normalized)
+        workflow = build_workflow(synthetic_policy(), api)
         self.assertEqual([], validate_workflow(workflow, api))
 
     def test_allof_merges_required_fields_and_enums(self) -> None:
@@ -76,7 +76,7 @@ class OpenApiResolverTests(unittest.TestCase):
         resolved = normalized["paths"]["/verify_identity"]["post"]["requestBody"]["content"]["application/json"]["schema"]
         self.assertEqual(["customer_id", "field", "answer"], resolved["required"])
         self.assertEqual(["birth_year", "passcode"], resolved["properties"]["field"]["enum"])
-        workflow = build_workflow(synthetic_policy(), normalized)
+        workflow = build_workflow(synthetic_policy(), api)
         self.assertEqual([], validate_workflow(workflow, api))
 
     def test_unsupported_external_missing_and_cycle_refs_fail_explicitly(self) -> None:
@@ -91,6 +91,8 @@ class OpenApiResolverTests(unittest.TestCase):
             "$ref": "#/components/schemas/A"}
         with self.assertRaisesRegex(ValueError, "Cyclic OpenAPI reference"):
             normalize_openapi(api)
+        with self.assertRaisesRegex(ValueError, "Cyclic OpenAPI reference"):
+            build_workflow(synthetic_policy(), api)
         workflow = build_workflow(synthetic_policy(), synthetic_api())
         self.assertTrue(any("Cyclic OpenAPI reference" in error
                             for error in validate_workflow(workflow, api)))

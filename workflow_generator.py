@@ -12,6 +12,7 @@ from typing import Any
 
 from api_bindings import (account_response_collection, identity_response_fields,
                           note_request_fields, promise_request_fields)
+from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
 
@@ -1827,6 +1828,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
 
     Extra policy keys are ignored. Missing prose sections fall back to ``raw_brief``.
     """
+    openapi = normalize_openapi(openapi)
     policy = policy or {}
     brief = str(policy.get("raw_brief") or "")
     prose = "\n".join(str(policy.get(key) or "") for key in
