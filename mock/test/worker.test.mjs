@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import worker, { createWorker } from '../src/index.mjs';
 
-const call = (app, path, options = {}) => app.fetch(
-  new Request(`https://mock.example${path}`, options), {}, {},
+const call = (app, path, options = {}, env = {}) => app.fetch(
+  new Request(`https://mock.example${path}`, options), env, {},
 );
 
 test('scaffold is alive but refuses readiness and bank calls', async () => {
@@ -16,7 +16,7 @@ test('scaffold is alive but refuses readiness and bank calls', async () => {
   assert.equal(readiness.status, 503);
   assert.deepEqual(await readiness.json(), { ready: false });
 
-  const bankCall = await call(worker, '/v1/get_account', { method: 'POST' });
+  const bankCall = await call(worker, '/get_account', { method: 'POST' });
   assert.equal(bankCall.status, 503);
   assert.deepEqual(await bankCall.json(), { error: 'bank_mock_not_configured' });
 });
@@ -37,16 +37,36 @@ test('configured hooks receive contract, data, and the original request', async 
     loadContract: async () => contract,
     loadData: async () => data,
     handleBankRequest: async (request, context) => {
-      assert.equal(new URL(request.url).pathname, '/v1/lookup');
+      assert.equal(new URL(request.url).pathname, '/lookup');
+      assert.equal(context.operationPath, '/lookup');
       assert.equal(context.contract, contract);
       assert.equal(context.data, data);
       return new Response('handled', { status: 202 });
     },
   });
   assert.equal((await call(app, '/readyz')).status, 200);
-  const response = await call(app, '/v1/lookup', { method: 'POST' });
+  const response = await call(app, '/lookup', { method: 'POST' });
   assert.equal(response.status, 202);
   assert.equal(await response.text(), 'handled');
+});
+
+test('optional base prefix maps the appended contract path exactly', async () => {
+  const env = { MOCK_BASE_PATH: '/mock' };
+  const app = createWorker({
+    enabled: true,
+    loadContract: async () => ({ openapi: '3.0.3', paths: { '/get_account': { post: {} } } }),
+    loadData: async () => ({ accounts: [] }),
+    handleBankRequest: async (request, context) => {
+      assert.equal(new URL(request.url).pathname, '/mock/get_account');
+      assert.equal(context.operationPath, '/get_account');
+      return new Response('handled');
+    },
+  });
+  assert.equal((await call(app, '/readyz', {}, env)).status, 200);
+  assert.equal((await call(app, '/mock/get_account', { method: 'POST' }, env)).status, 200);
+  assert.equal((await call(app, '/get_account', { method: 'POST' }, env)).status, 404);
+  assert.equal((await call(app, '/mockish/get_account', { method: 'POST' }, env)).status, 404);
+  assert.equal((await call(app, '/readyz', {}, { MOCK_BASE_PATH: 'mock' })).status, 503);
 });
 
 test('missing or failing hooks never make the bank service ready', async () => {

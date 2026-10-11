@@ -11,6 +11,15 @@ function json(body, status, headers = {}) {
   });
 }
 
+function configuredBasePath(env) {
+  const raw = String(env?.MOCK_BASE_PATH ?? '').trim();
+  if (raw === '' || raw === '/') return '';
+  if (!raw.startsWith('/') || raw.includes('//') || raw.includes('?') || raw.includes('#')) {
+    return null;
+  }
+  return raw.replace(/\/+$/, '');
+}
+
 async function configuredBank(implementation, env) {
   if (implementation.enabled !== true ||
       typeof implementation.loadContract !== 'function' ||
@@ -29,7 +38,8 @@ async function configuredBank(implementation, env) {
       !data || typeof data !== 'object') {
     return null;
   }
-  return { contract, data };
+  const basePath = configuredBasePath(env);
+  return basePath === null ? null : { contract, data, basePath };
 }
 
 export function createWorker(implementation = bank) {
@@ -58,6 +68,14 @@ export function createWorker(implementation = bank) {
       if (!configured) {
         return json({ error: 'bank_mock_not_configured' }, 503);
       }
+      const operationPath = configured.basePath
+        ? (path.startsWith(`${configured.basePath}/`)
+            ? path.slice(configured.basePath.length)
+            : null)
+        : path;
+      if (!operationPath) {
+        return json({ error: 'not_found' }, 404);
+      }
 
       try {
         const response = await implementation.handleBankRequest(request, {
@@ -65,6 +83,7 @@ export function createWorker(implementation = bank) {
           ctx,
           contract: configured.contract,
           data: configured.data,
+          operationPath,
         });
         return response instanceof Response
           ? response
