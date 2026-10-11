@@ -256,7 +256,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             # Omission keeps the workflow runnable without fabricating values.
             continue
     verify = [op for op in operations if op.role == "verify" and op.name in tools and proof[op.name]]
-    if any(op.role == "verify" for op in operations) and len(verify) != 1:
+    if len(verify) != 1 and any(op.role in {"verify", "read", "write"} for op in operations):
         raise ValueError("Cannot identify exactly one callable identity operation with an unambiguous "
                          "bank-confirmed full-verification boolean result")
     verified = len(verify) == 1

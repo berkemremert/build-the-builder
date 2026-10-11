@@ -92,6 +92,12 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full-verification boolean"):
             build_generic_workflow(_policy(), spec)
 
+    def test_missing_identity_operation_fails_closed_with_diagnostic(self):
+        spec = _spec()
+        del spec["paths"]["/check-person"]
+        with self.assertRaisesRegex(ValueError, "callable identity operation"):
+            build_generic_workflow(_policy(), spec)
+
     def test_unsupported_required_query_operation_is_omitted(self):
         spec = copy.deepcopy(_spec())
         spec["paths"]["/portfolio"]["get"]["parameters"] = [
