@@ -1749,6 +1749,9 @@ except Exception:
 
 
 _MULTI_REVISE_CODE = """import json
+import datetime
+import re
+__PAYMENT_DATE_PARSER__
 try:
     attempts = int(vars.get('multi_correction_attempts') or 0) + 1
 except Exception:
@@ -1757,20 +1760,56 @@ vars['multi_correction_attempts'] = str(attempts)
 try:
     terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
     products = json.loads(str(vars.get('product_json') or '[]'))
-    known = set(str(item.get('product_id') or '') for item in products)
+    product_by_id = dict((str(item.get('product_id') or ''), item) for item in products)
+    def resolve_pid(value):
+        name = re.sub(r'\\s+', ' ', str(value or '').lower().replace('_', ' ')).strip()
+        if not name:
+            return ''
+        matches = []
+        for pid, product in product_by_id.items():
+            label = re.sub(r'\\s+', ' ', str(product.get('label') or '').lower().replace('_', ' ')).strip()
+            aliases = {pid.lower(), label, label.split(' ending ')[0]}
+            suffix = re.search(r'\\bending (\\d{4})\\b', label)
+            if suffix:
+                digits = suffix.group(1)
+                aliases.update((digits, 'ending ' + digits, 'card ' + digits,
+                                'card ending ' + digits, 'credit card ' + digits))
+            if name in aliases:
+                matches.append(pid)
+        return matches[0] if len(matches) == 1 else ''
     raw = vars.get('multi_corrected_terms_json') or ''
     raw = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
-    raw = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    if isinstance(raw, list) and raw and all(not isinstance(item, dict) for item in raw):
+        if len(raw) != 3 or not all(str(item).strip() for item in raw):
+            raise ValueError('Incomplete positional correction')
+        raw = [dict(product_id=raw[0], amount=raw[1], date=raw[2])]
+    elif isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('No corrected terms')
+    today = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00')).date()
     changed = False
+    seen = set()
     for item in raw:
         if not isinstance(item, dict):
-            continue
-        pid = str(item.get('product_id') or '')
+            raise ValueError('Malformed corrected terms')
+        pid = resolve_pid(item.get('product_id'))
+        if not pid or pid in seen:
+            raise ValueError('Unknown or ambiguous corrected product')
+        seen.add(pid)
         date = str(item.get('date_phrase') or item.get('date_words') or item.get('date') or '').strip()
-        if pid in known and date:
-            previous = terms.get(pid) or dict()
-            terms[pid] = dict(product_id=pid, amount=item.get('amount', previous.get('amount')), date=date)
-            changed = True
+        if not date:
+            raise ValueError('Corrected payment date missing')
+        day = parse_payment_date(date, today)
+        if day < today:
+            raise ValueError('Corrected payment date in past')
+        previous = terms.get(pid) or dict()
+        amount = parse_payment_amount(item.get('amount', previous.get('amount')))
+        product = product_by_id[pid]
+        if not float(product.get('floor') or 0) <= amount <= float(product.get('past_due') or 0):
+            raise ValueError('Corrected amount outside approved range')
+        terms[pid] = dict(product_id=pid, amount=amount, date=date)
+        changed = True
     vars['multi_terms_json'] = json.dumps(terms)
     vars['proposed_terms_json'] = json.dumps([terms[str(item.get('product_id') or '')] for item in products
                                               if str(item.get('product_id') or '') in terms])
@@ -1778,6 +1817,8 @@ try:
     vars['multi_next'] = 'confirm' if changed else 'service_error' if attempts >= 3 else 'clarify'
 except Exception:
     vars['multi_next'] = 'service_error' if attempts >= 3 else 'clarify'
+finally:
+    vars['multi_corrected_terms_json'] = ''
 """
 
 
@@ -2337,7 +2378,10 @@ except Exception:
                          _eq("transfer_human", "multi_correction_action", "transfer_human"),
                          _always("multi_revise")],
             max_turns=3, max_target="service_unavailable")
-        nodes["multi_revise"] = _code_node("multi_revise", _MULTI_REVISE_CODE, "multi_correction")
+        nodes["multi_revise"] = _code_node(
+            "multi_revise", _with_amount_parser(
+                _MULTI_REVISE_CODE.replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)),
+            "multi_correction")
         nodes["multi_revise"]["transitions"] = [
             _eq("prepare_confirmation", "multi_next", "confirm"),
             _eq("service_unavailable", "multi_next", "service_error"),
