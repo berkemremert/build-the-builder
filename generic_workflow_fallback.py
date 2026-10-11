@@ -278,6 +278,281 @@ def _body_property(name: str, spec: dict, call_variables: set[str],
     return leaf
 
 
+def _schema_paths(schema: dict, path: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    """Return JSON leaf paths, using * for array members."""
+    if not isinstance(schema, dict):
+        return []
+    if schema.get("type") == "array":
+        return _schema_paths(schema.get("items") or {}, (*path, "*"))
+    properties = schema.get("properties") or {}
+    if isinstance(properties, dict) and properties:
+        return [leaf for name, child in properties.items()
+                for leaf in _schema_paths(child, (*path, name))]
+    return [path] if path else []
+
+
+def _json_schema(operation: _Operation, *, response: bool) -> dict:
+    if not response:
+        return (((operation.source.get("requestBody") or {}).get("content") or {})
+                .get("application/json") or {}).get("schema") or {}
+    for status, item in (operation.source.get("responses") or {}).items():
+        if str(status).startswith("2"):
+            return (((item.get("content") or {}).get("application/json") or {})
+                    .get("schema") or {})
+    return {}
+
+
+def _unique_field_path(operation: _Operation, field: str, *, response: bool) -> tuple[str, ...] | None:
+    paths = [path for path in _schema_paths(_json_schema(operation, response=response))
+             if path[-1] == field]
+    return paths[0] if len(paths) == 1 else None
+
+
+def _schema_at_path(schema: dict, path: tuple[str, ...]) -> dict:
+    current = schema
+    for part in path:
+        current = (current.get("items") if part == "*" else
+                   (current.get("properties") or {}).get(part)) if isinstance(current, dict) else None
+    return current if isinstance(current, dict) else {}
+
+
+def _provenance_plan(operation: _Operation, operations: list[_Operation], rule: str,
+                     call_variables: set[str]) -> list[dict]:
+    """Derive exact request bindings from explicit source rules and OpenAPI shapes."""
+    request_paths = [path for path in _schema_paths(_json_schema(operation, response=False))
+                     if "*" not in path]
+    data_paths = [path for path in request_paths if path[0] == "data"]
+    reads = [op for op in operations if op.role == "read" and op.name != operation.name]
+    plan: list[dict] = []
+
+    for path in request_paths:
+        variable = _call_variable_for(path[-1], call_variables)
+        if variable:
+            plan.append({"kind": "call_variable", "field": path, "variable": variable})
+
+    for path in data_paths:
+        field = path[-1]
+        listed = re.search(r"\b(?:listed|list-returned)\s+" +
+                           re.escape(field) + r"\b|\b" + re.escape(field) +
+                           r"\b.{0,12}\b(?:listed|list-returned)\b", rule, re.I)
+        if not listed and re.search(r"(?:number|identifier|key)$", field, re.I):
+            listed = re.search(r"\bdata\." + re.escape(field) +
+                               r"\s*=.{0,30}\blisted\s+(?:number|identifier|key)\b", rule, re.I)
+        candidates = [(op, source_path) for op in reads
+                      if (source_path := _unique_field_path(op, field, response=True))
+                      and "*" in source_path and (op.name in rule or
+                          listed)]
+        if len(candidates) == 1:
+            op, source_path = candidates[0]
+            plan.append({"kind": "response_member", "field": path,
+                         "source": op.name, "source_path": source_path})
+        elif listed or any(op.name in rule and _unique_field_path(op, field, response=True)
+                           and "*" in _unique_field_path(op, field, response=True)
+                           for op in reads):
+            raise ValueError(f"{operation.name}: cannot prove listed {field} provenance")
+
+    assignments = list(re.finditer(r"\bdata\.([A-Za-z_][A-Za-z0-9_]*)\s*=", rule))
+    for match in assignments:
+        targets = [path for path in data_paths if path[-1] == match.group(1)]
+        if len(targets) != 1:
+            continue
+        # The next assignment or sentence ends this source clause; operation IDs
+        # contain periods, so a period alone is not a sentence boundary.
+        tail = rule[match.end():match.end() + 220]
+        tail = re.split(r",\s*(?:and\s+)?data\.|[.;]\s+[A-Z]", tail, maxsplit=1)[0]
+        source_ops = [op for op in reads if op.name in tail]
+        field_tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", tail))
+        matches = []
+        for op in source_ops or reads:
+            for token in field_tokens | {match.group(1)}:
+                source_path = _unique_field_path(op, token, response=True)
+                if source_path and (op.name in tail or token != match.group(1)):
+                    matches.append((op, source_path))
+        # Prefer the field named by the source; otherwise the request field.
+        exact = [(op, source_path) for op, source_path in matches
+                 if source_path[-1] != match.group(1)]
+        if len(exact) == 1:
+            matches = exact
+        elif len(exact) > 1:
+            matches = exact
+        else:
+            matches = [(op, source_path) for op, source_path in matches
+                       if source_path[-1] == match.group(1)]
+        matches = list({(op.name, source_path): (op, source_path)
+                        for op, source_path in matches}.values())
+        if len(matches) == 1 and "*" not in matches[0][1]:
+            op, source_path = matches[0]
+            scope = [(target, source) for target in data_paths
+                     if target != targets[0] and (source := _unique_field_path(op, target[-1], response=False))
+                     and source[0] == "data"]
+            plan.append({"kind": "response_equal", "field": targets[0],
+                         "source": op.name, "source_path": source_path, "scope": scope})
+        if (source_ops or re.search(r"\b(?:supplied|registered|current|listed)\b", tail, re.I)):
+            covered = any(item.get("field") == targets[0] for item in plan)
+            if not covered:
+                raise ValueError(f"{operation.name}: cannot prove source binding for {match.group(1)}")
+
+    if re.search(r"\bdifferent\b", rule, re.I):
+        for path in data_paths:
+            if not path[-1].startswith("new") or len(path[-1]) <= 3:
+                continue
+            previous_field = path[-1][3].lower() + path[-1][4:]
+            candidates = [(op, source_path) for op in reads if op.name in rule
+                          if (source_path := _unique_field_path(op, previous_field, response=True))]
+            if len(candidates) == 1:
+                op, source_path = candidates[0]
+                scope = [(target, source) for target in data_paths
+                         if target != path and (source := _unique_field_path(op, target[-1], response=False))
+                         and source[0] == "data"]
+                plan.append({"kind": "response_not_equal", "field": path,
+                             "source": op.name, "source_path": source_path, "scope": scope})
+
+    if re.search(r"choice\s+is\s+established", rule, re.I) and re.search(r"multi[- ]currency", rule, re.I):
+        for path in data_paths:
+            field_schema = _schema_at_path(_json_schema(operation, response=False), path)
+            values = field_schema.get("enum") or []
+            if not isinstance(values, list) or len(values) < 2:
+                continue
+            candidates = []
+            for op in reads:
+                if op.name not in rule:
+                    continue
+                leaves = _schema_paths(_json_schema(op, response=True))
+                nodes = {leaf[:index] for leaf in leaves for index in range(1, len(leaf) + 1)}
+                pairs = [(value, node) for value in values for node in nodes
+                         if isinstance(value, str) and node[0] == "data"
+                         and node[-1].lower().endswith(value.lower())]
+                if len(pairs) == len(values) and len({value for value, _ in pairs}) == len(values):
+                    scope = [(target, source) for target in data_paths
+                             if target != path and (source := _unique_field_path(op, target[-1], response=False))
+                             and source[0] == "data"]
+                    candidates.append((op, pairs, scope))
+            if len(candidates) == 1:
+                op, pairs, scope = candidates[0]
+                plan.append({"kind": "single_enum_block", "field": path,
+                             "source": op.name, "pairs": pairs, "scope": scope})
+            elif field_schema.get("enum") and re.search(r"currency|type", path[-1], re.I):
+                raise ValueError(f"{operation.name}: cannot prove source choice for {path[-1]}")
+
+    if operation.role == "write" and re.search(r"successful\s+preview", rule, re.I):
+        candidates = []
+        for op in reads:
+            detail = " ".join((op.name, str(op.source.get("summary") or ""),
+                               str(op.source.get("description") or "")))
+            if not re.search(r"preview|decide|estimate|quote", detail, re.I):
+                continue
+            shared = [(path, source) for path in data_paths
+                      if (source := _unique_field_path(op, path[-1], response=False))
+                      and source[0] == "data"]
+            if len(shared) >= 2:
+                candidates.append((op, shared))
+        if len(candidates) != 1:
+            raise ValueError(f"{operation.name}: cannot prove unique successful preview provenance")
+        preview, shared = candidates[0]
+        plan.append({"kind": "request_match", "source": preview.name, "fields": shared})
+        date_paths = [path for path in _schema_paths(_json_schema(preview, response=True))
+                      if re.search(r"date$", path[-1], re.I) and path[0] == "data"]
+        if re.search(r"previewed\s+dates?|preview\s+statementDate", rule, re.I):
+            if len(date_paths) < 2:
+                raise ValueError(f"{operation.name}: preview dates cannot be proved")
+            plan.append({"kind": "response_present", "source": preview.name,
+                         "paths": date_paths})
+
+    return plan
+
+
+def _pre_provenance_code(operation: _Operation, plan: list[dict]) -> str:
+    return (
+        "import json\n"
+        "def reject(reason):\n"
+        "    config['url'] = ''\n"
+        "    config['body'] = {}\n"
+        "    raise ValueError(reason)\n"
+        "def values(value, path):\n"
+        "    found = [value]\n"
+        "    for part in path:\n"
+        "        found = ([member for item in found if isinstance(item, list) for member in item] "
+        "if part == '*' else [item[part] for item in found if isinstance(item, dict) and part in item])\n"
+        "    return found\n"
+        "try:\n"
+        "    evidence = json.loads(str(vars.get('generic_read_evidence') or '{}'))\n"
+        "except (ValueError, TypeError):\n"
+        "    evidence = {}\n"
+        f"for item in {plan!r}:\n"
+        "    actual = values(config.get('body'), item['field']) if 'field' in item else []\n"
+        "    kind = item['kind']\n"
+        "    if kind == 'call_variable':\n"
+        "        if len(actual) != 1 or not str(actual[0]) or str(actual[0]) != str(vars.get(item['variable']) or ''):\n"
+        "            reject('Request does not match the supplied call identity')\n"
+        "        continue\n"
+        "    source = evidence.get(item['source'])\n"
+        "    if not isinstance(source, dict):\n"
+        "        reject('Required successful bank read is unavailable')\n"
+        "    if kind in ('response_member', 'response_equal', 'response_not_equal'):\n"
+        "        expected = values(source.get('response'), item['source_path'])\n"
+        "        if len(actual) != 1 or not str(actual[0]) or not expected:\n"
+        "            reject('Write input has no bank provenance')\n"
+        "        if kind == 'response_member' and actual[0] not in expected:\n"
+        "            reject('Requested item was not returned by the bank list')\n"
+        "        if kind == 'response_equal' and (len(expected) != 1 or str(actual[0]) != str(expected[0])):\n"
+        "            reject('Write input differs from the bank result')\n"
+        "        if kind == 'response_not_equal' and (len(expected) != 1 or str(actual[0]) == str(expected[0])):\n"
+        "            reject('Requested value must differ from the current bank value')\n"
+        "        if kind in ('response_equal', 'response_not_equal'):\n"
+        "            for target_path, source_path in item.get('scope', []):\n"
+        "                target = values(config.get('body'), target_path)\n"
+        "                prior = values(source.get('request'), source_path)\n"
+        "                if len(target) != 1 or len(prior) != 1 or str(target[0]) != str(prior[0]):\n"
+        "                    reject('Bank read belongs to another selected item')\n"
+        "    elif kind == 'request_match':\n"
+        "        for target_path, source_path in item['fields']:\n"
+        "            target = values(config.get('body'), target_path)\n"
+        "            prior = values(source.get('request'), source_path)\n"
+        "            if len(target) != 1 or len(prior) != 1 or str(target[0]) != str(prior[0]):\n"
+        "                reject('Write differs from the successful preview request')\n"
+        "    elif kind == 'response_present':\n"
+        "        if any(not any(str(value) for value in values(source.get('response'), path)) for path in item['paths']):\n"
+        "            reject('Successful preview is missing required details')\n"
+        "    elif kind == 'single_enum_block':\n"
+        "        available = [code for code, path in item['pairs'] if any(value is not None for value in values(source.get('response'), path))]\n"
+        "        if len(actual) != 1 or len(available) != 1 or str(actual[0]) != str(available[0]):\n"
+        "            reject('Requested choice is not uniquely established by the bank')\n"
+        "        for target_path, source_path in item.get('scope', []):\n"
+        "            target = values(config.get('body'), target_path)\n"
+        "            prior = values(source.get('request'), source_path)\n"
+        "            if len(target) != 1 or len(prior) != 1 or str(target[0]) != str(prior[0]):\n"
+        "                reject('Bank choice belongs to another selected item')\n"
+        + (f"evidence.pop({operation.name!r}, None)\n"
+           "vars['generic_read_evidence'] = json.dumps(evidence)\n"
+           f"vars[{('generic_pending_' + operation.name)!r}] = json.dumps(config.get('body') or {{}})\n"
+           if operation.role == "read" else "")
+    )
+
+
+def _post_read_evidence_code(operation: _Operation,
+                             checks: list[tuple[tuple[str, ...], object]]) -> str:
+    return (
+        "import json\n"
+        "try:\n"
+        "    payload = result.get('data') if isinstance(result, dict) else None\n"
+        "    def field(path):\n"
+        "        value = payload\n"
+        "        for part in path:\n"
+        "            value = value.get(part) if isinstance(value, dict) else None\n"
+        "        return value\n"
+        f"    checks = {checks!r}\n"
+        "    ok = (isinstance(payload, dict) and str(result.get('status_code') or '').startswith('2') "
+        "and bool(checks) and all(field(path) == expected for path, expected in checks))\n"
+        "    evidence = json.loads(str(vars.get('generic_read_evidence') or '{}'))\n"
+        f"    pending = json.loads(str(vars.pop({('generic_pending_' + operation.name)!r}, '') or 'null'))\n"
+        "    if ok and isinstance(pending, dict):\n"
+        f"        evidence[{operation.name!r}] = {{'request': pending, 'response': payload}}\n"
+        "    vars['generic_read_evidence'] = json.dumps(evidence)\n"
+        "except (ValueError, TypeError, AttributeError):\n"
+        "    pass\n"
+    )
+
+
 def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | None = None,
           fixed: dict | None = None, call_variables: set[str] | None = None,
           result_checks: list[tuple[tuple[str, ...], object]] | None = None) -> dict:
@@ -561,6 +836,18 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             # The API transport cannot safely bind some OpenAPI parameters.
             # Omission keeps the workflow runnable without fabricating values.
             continue
+    for operation in operations:
+        if operation.name not in tools or operation.role not in {"read", "write"}:
+            continue
+        plan = _provenance_plan(operation, operations,
+                                str(rules.get(operation.name) or ""), call_variables)
+        tool = tools[operation.name]
+        tool["pre_process_code"] = (_pre_provenance_code(operation, plan)
+                                    + tool.get("pre_process_code", ""))
+        if operation.role == "read":
+            tool["post_process_code"] = (tool.get("post_process_code", "")
+                                         + _post_read_evidence_code(operation,
+                                                                    success_checks[operation.name]))
     verify = [op for op in operations if op.role == "verify" and op.name in tools and proof[op.name]]
     upstream_verified = len(verify) == 0 and _upstream_identity_confirmed(source)
     if len(verify) != 1 and not upstream_verified and any(op.role in {"verify", "read", "write"} for op in operations):

@@ -59,6 +59,104 @@ def _policy() -> dict:
 
 
 class GenericWorkflowFallbackTests(unittest.TestCase):
+    def test_source_derived_write_provenance_rejects_mismatched_inputs(self):
+        def operation(name, request, response):
+            return {"operationId": name, "summary": name,
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "type": "object", "properties": {"data": {"type": "object",
+                        "properties": request}}}}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": {
+                        "type": "object", "properties": {"ok": {"type": "boolean"},
+                        "data": {"type": "object", "properties": response}}}}}}}}
+
+        text = lambda: {"type": "string"}
+        specs = {
+            "listItems": ({"customerNo": text()}, {"items": {"type": "array", "items": {
+                "type": "object", "properties": {"itemKey": text()}}}}),
+            "getCycle": ({"itemKey": text()}, {"itemKey": text(), "day": {"type": "integer"},
+                                               "week": {"type": "integer"}}),
+            "previewCycle": ({"itemKey": text(), "newWeek": {"type": "integer"},
+                              "day": {"type": "integer"}},
+                             {"cutDate": text(), "dueDate": text()}),
+            "changeCycle": ({"itemKey": text(), "newWeek": {"type": "integer"},
+                             "day": {"type": "integer"}}, {}),
+            "readBalance": ({"itemKey": text()}, {"issuedDate": text(),
+                            "amountUSD": {"type": "object", "properties": {"amount": {"type": "number"}}},
+                            "amountEUR": {"type": "object", "properties": {"amount": {"type": "number"}}}}),
+            "getContact": ({"customerNo": text()}, {"registeredMail": text()}),
+            "sendCopy": ({"customerNo": text(), "itemKey": text(), "issuedDate": text(),
+                          "destination": text(), "currencyCode": {"type": "string",
+                                                             "enum": ["USD", "EUR"]}}, {}),
+        }
+        spec = {"openapi": "3.0.3", "servers": [{"url": "https://example.test"}],
+                "paths": {"/" + name: {"post": operation(name, *schemas)}
+                          for name, schemas in specs.items()}}
+        policy = {"raw_brief": "The IVR verified identity. Each call gives variables:\n"
+                               "- `customerNumber`: caller identity.\n",
+                  "tool_policy": {
+                      "listItems": "List eligible items.",
+                      "getCycle": "Read cycle for selected listed itemKey.",
+                      "previewCycle": "Only after a different newWeek is chosen. POST data.day=the "
+                                      "CURRENT day from getCycle. Use exact listed itemKey.",
+                      "changeCycle": "Change only after successful preview; confirm previewed dates "
+                                     "and use the same exact listed itemKey, newWeek and day.",
+                      "readBalance": "Read for exact listed itemKey.",
+                      "getContact": "Read registered contact for supplied customerNo.",
+                      "sendCopy": "Send only after confirmation. POST data.customerNo=the supplied "
+                                  "customerNumber, data.itemKey=the exact listItems value, "
+                                  "data.issuedDate=the issued readBalance issuedDate, "
+                                  "data.destination=the same registeredMail, and data.currencyCode "
+                                  "only when its choice is established; the multi-currency choice is unresolved."}}
+        workflow = build_generic_workflow(policy, spec)
+        tools = {tool["function"]["name"]: tool for node in workflow["nodes"].values()
+                 for tool in node.get("tools", [])}
+
+        def invoke(name, body, state, data=None):
+            tool = tools[name]
+            config = {"url": "https://example.test/" + name, "body": {"data": body}}
+            exec(tool["pre_process_code"], {"vars": state, "config": config})
+            if data is not None:
+                result = {"status_code": 200, "data": {"ok": True, "data": data}}
+                exec(tool["post_process_code"], {"vars": state, "result": result})
+            return config
+
+        state = {"customerNumber": "77"}
+        with self.assertRaisesRegex(ValueError, "bank read"):
+            invoke("changeCycle", {"itemKey": "A", "newWeek": 2, "day": 5}, state)
+        invoke("listItems", {"customerNo": "77"}, state, {"items": [{"itemKey": "A"}]})
+        invoke("getCycle", {"itemKey": "A"}, state, {"itemKey": "A", "day": 5, "week": 1})
+        with self.assertRaisesRegex(ValueError, "bank result"):
+            invoke("previewCycle", {"itemKey": "A", "newWeek": 2, "day": 6}, state)
+        with self.assertRaisesRegex(ValueError, "current bank value"):
+            invoke("previewCycle", {"itemKey": "A", "newWeek": 1, "day": 5}, state)
+        invoke("previewCycle", {"itemKey": "A", "newWeek": 2, "day": 5}, state,
+               {"cutDate": "2026-11-01", "dueDate": "2026-11-11"})
+        state.update(explicit_action_confirmation="yes", confirmed_write_action="changeCycle")
+        with self.assertRaisesRegex(ValueError, "preview request"):
+            invoke("changeCycle", {"itemKey": "A", "newWeek": 3, "day": 5}, state)
+        with self.assertRaisesRegex(ValueError, "bank list"):
+            invoke("changeCycle", {"itemKey": "B", "newWeek": 2, "day": 5}, state)
+        invoke("changeCycle", {"itemKey": "A", "newWeek": 2, "day": 5}, state)
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            invoke("changeCycle", {"itemKey": "A", "newWeek": 2, "day": 5}, state)
+
+        state = {"customerNumber": "77"}
+        invoke("listItems", {"customerNo": "77"}, state, {"items": [{"itemKey": "A"}]})
+        invoke("readBalance", {"itemKey": "A"}, state,
+               {"issuedDate": "2026-10-01", "amountUSD": {"amount": 10}})
+        invoke("getContact", {"customerNo": "77"}, state,
+               {"registeredMail": "registered@example.test"})
+        state.update(explicit_action_confirmation="yes", confirmed_write_action="sendCopy")
+        send = {"customerNo": "77", "itemKey": "A", "issuedDate": "2026-10-01",
+                "destination": "registered@example.test", "currencyCode": "USD"}
+        with self.assertRaisesRegex(ValueError, "bank result"):
+            invoke("sendCopy", {**send, "destination": "other@example.test"}, state)
+        with self.assertRaisesRegex(ValueError, "bank result"):
+            invoke("sendCopy", {**send, "issuedDate": "2026-09-01"}, state)
+        with self.assertRaisesRegex(ValueError, "uniquely established"):
+            invoke("sendCopy", {**send, "currencyCode": "EUR"}, state)
+        invoke("sendCopy", send, state)
+
     def test_nested_request_and_string_code_success_are_source_bound(self):
         result_schema = {"type": "object", "description": 'HTTP 200 with returnCode "S" indicates success.',
                          "properties": {"returnCode": {"type": "string"}}}
