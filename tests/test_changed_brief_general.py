@@ -12,6 +12,14 @@ from workflow_generator import _holiday_dates, build_workflow
 
 
 class ChangedBriefGeneralityTests(unittest.TestCase):
+    def test_identity_failure_farewell_uses_changed_bank_name(self) -> None:
+        workflow = build_workflow(synthetic_policy(), synthetic_api())
+        farewell = workflow["nodes"]["farewell_identity_failed"]["on_enter"]["text"]
+        self.assertEqual(
+            "For your security, please use the Meridian Bank mobile app or visit a branch. Goodbye.",
+            farewell,
+        )
+
     def test_later_policy_and_api_names_drive_generated_actions(self) -> None:
         api = synthetic_api()
         policy = synthetic_policy(identity="Ask passcode first, then birth year.")

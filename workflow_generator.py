@@ -2538,7 +2538,7 @@ except Exception:
     nodes["finish_identity_declined"]["transitions"] = [_always("farewell_identity_declined")]
     for name, sentence in (
         ("farewell_deceased", "I am sorry for your loss."),
-        ("farewell_identity_failed", "For your security, please use the Freya Bank mobile app or visit a branch. Goodbye."),
+        ("farewell_identity_failed", f"For your security, please use the {bank_name} mobile app or visit a branch. Goodbye."),
         ("farewell_identity_declined", "I cannot continue without the security check. Thank you. Goodbye."),
     ):
         nodes[name] = {
