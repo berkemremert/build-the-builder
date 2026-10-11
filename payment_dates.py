@@ -23,6 +23,12 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
             raise ValueError("Corrected payment date missing")
     if re.search(r"\bor\b", phrase):
         raise ValueError("Ambiguous payment dates")
+    relative_cues = {today for _ in re.finditer(r"\b(?:today|now)\b", phrase)}
+    relative_cues.update(today + datetime.timedelta(days=1)
+                         for _ in re.finditer(r"\btomorrow\b", phrase))
+    if len(relative_cues) > 1:
+        raise ValueError("Conflicting payment dates")
+    relative_day = next(iter(relative_cues)) if relative_cues else None
     if phrase in {"today", "now"}:
         return today
     if phrase == "tomorrow":
@@ -32,8 +38,39 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
     if len(iso_matches) > 1:
         raise ValueError("Ambiguous payment dates")
     if iso_matches:
-        return datetime.date.fromisoformat(iso_matches[0].group())
+        iso_day = datetime.date.fromisoformat(iso_matches[0].group())
+        if relative_day is not None and iso_day != relative_day:
+            raise ValueError("Conflicting payment dates")
+        return iso_day
     phrase = re.sub(r"[\s-]+", " ", phrase)
+
+    ones = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9}
+    tens = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+            "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+    years = set()
+    year_spans = []
+    for match in re.finditer(r"(?<!\d)(?:19|20|21)\d{2}(?!\d)", phrase):
+        years.add(int(match.group()))
+        year_spans.append(match.span())
+    for match in re.finditer(
+            r"\b(twenty|nineteen)\s+(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+            r"(?:\s+(one|two|three|four|five|six|seven|eight|nine))?\b", phrase):
+        years.add((2000 if match.group(1) == "twenty" else 1900) +
+                  tens[match.group(2)] + ones.get(match.group(3), 0))
+        year_spans.append(match.span())
+    for match in re.finditer(
+            r"\btwo\s+thousand(?:\s+and)?(?:\s+(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety))?"
+            r"(?:\s+(one|two|three|four|five|six|seven|eight|nine))?\b", phrase):
+        years.add(2000 + tens.get(match.group(1), 0) + ones.get(match.group(2), 0))
+        year_spans.append(match.span())
+    if len(years) > 1:
+        raise ValueError("Conflicting payment years")
+    explicit_year = next(iter(years)) if years else None
+    date_phrase = phrase
+    for start, end in sorted(year_spans, reverse=True):
+        date_phrase = date_phrase[:start] + " " + date_phrase[end:]
+    date_phrase = re.sub(r"\s+", " ", date_phrase)
 
     months = ("january", "february", "march", "april", "may", "june",
               "july", "august", "september", "october", "november", "december")
@@ -44,11 +81,17 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
         "eighteenth", "nineteenth", "twentieth", "twenty first", "twenty second", "twenty third",
         "twenty fourth", "twenty fifth", "twenty sixth", "twenty seventh", "twenty eighth",
         "twenty ninth", "thirtieth", "thirty first")))
+    named_days.update((name, index + 1) for index, name in enumerate((
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+        "eighteen", "nineteen", "twenty", "twenty one", "twenty two", "twenty three",
+        "twenty four", "twenty five", "twenty six", "twenty seven", "twenty eight",
+        "twenty nine", "thirty", "thirty one")))
     month_pattern = "|".join(months)
     day_pattern = "|".join(re.escape(name) for name in sorted(named_days, key=len, reverse=True))
     day_pattern += r"|[0-3]?\d(?:st|nd|rd|th)?"
-    month_matches = list(re.finditer(r"\b(" + month_pattern + r")\b", phrase))
-    weekday_matches = list(re.finditer(r"\b(" + "|".join(weekdays) + r")\b", phrase))
+    month_matches = list(re.finditer(r"\b(" + month_pattern + r")\b", date_phrase))
+    weekday_matches = list(re.finditer(r"\b(" + "|".join(weekdays) + r")\b", date_phrase))
     if len({match.group() for match in month_matches}) > 1 or len({match.group() for match in weekday_matches}) > 1:
         raise ValueError("Conflicting payment dates")
     month_match = month_matches[0] if month_matches else None
@@ -59,18 +102,18 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
     day_match = None
     if month_match:
         date_matches = (list(re.finditer(r"\b(?:the\s+)?(?P<day>" + day_pattern +
-                                         r")(?:\s+of)?\s+(?:" + month_pattern + r")\b", phrase)) +
+                                         r")(?:\s+of)?\s+(?:" + month_pattern + r")\b", date_phrase)) +
                         list(re.finditer(r"\b(?:" + month_pattern + r")\s+(?:the\s+)?(?P<day>" +
-                                         day_pattern + r")\b", phrase)))
+                                         day_pattern + r")\b", date_phrase)))
         if len(date_matches) > 1:
             raise ValueError("Ambiguous payment dates")
         day_match = date_matches[0] if date_matches else None
     elif weekday_match:
-        day_match = re.search(r"\b(?:the\s+)?(?P<day>" + day_pattern + r")\b", phrase)
+        day_match = re.search(r"\b(?:the\s+)?(?P<day>" + day_pattern + r")\b", date_phrase)
 
     if day_match:
         day_text = day_match.group("day")
-        if re.search(r"\b(?:twenty|thirty)\s+$", phrase[:day_match.start("day")]):
+        if re.search(r"\b(?:twenty|thirty)\s+$", date_phrase[:day_match.start("day")]):
             raise ValueError("Invalid payment day")
         day_number = named_days.get(day_text)
         if day_number is None:
@@ -78,25 +121,6 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
         if not 1 <= day_number <= 31:
             raise ValueError("Invalid payment day")
 
-        digit_years = {int(value) for value in re.findall(r"(?<!\d)(?:19|20|21)\d{2}(?!\d)", phrase)}
-        ones = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-                "six": 6, "seven": 7, "eight": 8, "nine": 9}
-        tens = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
-                "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
-        word_years = set()
-        for match in re.finditer(
-                r"\b(twenty|nineteen)\s+(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
-                r"(?:\s+(one|two|three|four|five|six|seven|eight|nine))?\b", phrase):
-            word_years.add((2000 if match.group(1) == "twenty" else 1900) +
-                           tens[match.group(2)] + ones.get(match.group(3), 0))
-        for match in re.finditer(
-                r"\btwo\s+thousand(?:\s+and)?(?:\s+(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety))?"
-                r"(?:\s+(one|two|three|four|five|six|seven|eight|nine))?\b", phrase):
-            word_years.add(2000 + tens.get(match.group(1), 0) + ones.get(match.group(2), 0))
-        years = digit_years | word_years
-        if len(years) > 1:
-            raise ValueError("Conflicting payment years")
-        explicit_year = next(iter(years)) if years else None
         if explicit_year is not None:
             candidate = datetime.date(explicit_year, month or today.month, day_number)
         elif month is not None:
@@ -127,6 +151,8 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
                 raise ValueError("Invalid payment date")
         if weekday is not None and candidate.weekday() != weekday:
             raise ValueError("Day and weekday disagree")
+        if relative_day is not None and candidate != relative_day:
+            raise ValueError("Conflicting payment dates")
         return candidate
 
     if weekday is not None:
@@ -136,6 +162,9 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
             offset = weekday - today.weekday()
         else:
             offset = (weekday - today.weekday()) % 7
-        return today + datetime.timedelta(days=offset)
+        candidate = today + datetime.timedelta(days=offset)
+        if relative_day is not None and candidate != relative_day:
+            raise ValueError("Conflicting payment dates")
+        return candidate
 
     raise ValueError("Payment date missing")

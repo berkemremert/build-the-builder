@@ -40,6 +40,8 @@ class PaymentDateTests(unittest.TestCase):
         cases = {
             "Monday the twenty sixth": datetime.date(2026, 10, 26),
             "the fifteenth of October": datetime.date(2026, 10, 15),
+            "fifteen October": datetime.date(2026, 10, 15),
+            "tomorrow, fifteen October": datetime.date(2026, 10, 15),
             "October 15th": datetime.date(2026, 10, 15),
             "2026-10-15": datetime.date(2026, 10, 15),
             "this Friday": datetime.date(2026, 10, 16),
@@ -72,6 +74,8 @@ class PaymentDateTests(unittest.TestCase):
                        "the thirty second of January", "sometime in January"):
             with self.subTest(phrase=phrase), self.assertRaises(ValueError):
                 parse_payment_date(phrase, today)
+        with self.assertRaisesRegex(ValueError, "Conflicting payment dates"):
+            parse_payment_date("tomorrow, sixteen October", datetime.date(2026, 10, 14))
 
     def test_parser_source_runs_inside_generated_code_context(self) -> None:
         namespace: dict = {}
@@ -133,6 +137,20 @@ class GeneratedConfirmationDateTests(unittest.TestCase):
         unclear = self._prepare("21 October, sorry, I mean October",
                                 now="2026-10-14T11:00", deadline="2026-10-30")
         self.assertEqual("invalid", unclear["proposal_validation_state"])
+
+    def test_generated_multi_product_phrase_uses_cardinal_day(self) -> None:
+        state = {"now": "2026-10-14T11:00", "product_json": json.dumps([
+            {"product_id": "p1", "label": "credit card", "floor": 153,
+             "past_due": 510, "deadline": "2026-10-30"},
+            {"product_id": "p2", "label": "loan", "floor": 100,
+             "past_due": 400, "deadline": "2026-10-30"},
+        ]), "proposed_terms_json": json.dumps([{
+            "product_id": "p1", "amount": 510, "date": "tomorrow, fifteen October",
+        }])}
+        exec(self.code, {"vars": state})
+        self.assertEqual("ready", state["proposal_validation_state"], state["proposal_error"])
+        self.assertEqual([{"product_id": "p1", "amount": 510.0, "date": "2026-10-15"}],
+                         json.loads(state["readback_terms_json"]))
 
 
 if __name__ == "__main__":
