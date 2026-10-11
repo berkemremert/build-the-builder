@@ -242,6 +242,8 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         nodes = workflow["nodes"]
         self.assertEqual("opening", workflow["initial_node"])
         self.assertIn(_policy()["raw_brief"], workflow["system_prompt"])
+        self.assertIn("never expose internal reasoning, role labels, tool traces, or draft markers",
+                      workflow["system_prompt"])
         self.assertEqual(["checkPerson"], [tool["function"]["name"] for tool in nodes["verification"]["tools"]])
         self.assertEqual(["fetchPortfolio"], [tool["function"]["name"] for tool in nodes["service"]["tools"]])
         self.assertEqual(["saveArrangement"], [tool["function"]["name"] for tool in nodes["commit"]["tools"]])
