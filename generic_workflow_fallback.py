@@ -1036,6 +1036,19 @@ def _normal_completion_utterance(policy: dict) -> str:
     return "Thank you. Goodbye."
 
 
+def _source_confirmation_question(source: str) -> str | None:
+    """Use a short confirmation question quoted by the supplied policy."""
+    candidates = []
+    for match in re.finditer(r"[“\"]([^”\"]{3,240}\?)[”\"]", source):
+        lead = source[max(0, match.start() - 60):match.start()]
+        if not re.search(r"confirm|onay|permission|consent", lead, re.I):
+            continue
+        question = re.split(r"[.!]\s+", match.group(1))[-1].strip()
+        if 3 <= len(question) <= 80 and question.endswith("?"):
+            candidates.append(question)
+    return min(candidates, key=len) if candidates else None
+
+
 def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     """Build a source-grounded, fail-closed workflow from a changed contract.
 
@@ -1244,7 +1257,9 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                                         "alone is not finishing the call.",
                          "min_confidence": 0.9}]
             + reason_extraction("no_promise"),
-            transitions=[
+            transitions=[_when("caller_finished", "yes", "farewell", "Caller clearly has no further request"),
+                         _when("caller_transfer_requested", "yes", "farewell", "Caller requested or acknowledged agent transfer")]
+            + [
                 (_and_when([("requested_write_action", operation.name),
                             ("generic_prereq_ready_" + operation.name, "yes")],
                            "proposal_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
@@ -1255,8 +1270,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                        "Prepare the caller's requested action"))
                 for operation in operations if operation.role == "write"
                 and any(tool["function"]["name"] == operation.name for tool in write_tools)]
-            + [_when("caller_transfer_requested", "yes", "farewell", "Caller requested or acknowledged agent transfer")]
-            + [_when("caller_finished", "yes", "farewell", "Caller clearly has no further request")],
+            ,
             turns=20)
         if write_tools:
             for operation in operations:
@@ -1302,9 +1316,10 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                     transitions=[_and_when(consent_conditions,
                                            "confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
                                            "Caller accepted the proposed action; verify clear assent once more"),
-                                 _when("explicit_action_confirmation", "no", "service",
+                                 _when("explicit_action_confirmation", "no", "farewell",
                                        "Caller declined the proposed action")],
                     turns=8)
+                confirm_question = _source_confirmation_question(source)
                 nodes["confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name)] = _conversation(
                     "confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
                     "Ask for one final clear yes to the exact proposed bank action. Do not treat a vague, "
@@ -1317,9 +1332,12 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                                  "min_confidence": 0.45}],
                     transitions=[_and_when(consent_conditions, "commit",
                                            "Final clear assent after exact proposal"),
-                                 _when("explicit_action_confirmation", "no", "service",
+                                 _when("explicit_action_confirmation", "no", "farewell",
                                        "Caller declined final confirmation")],
                     turns=5)
+                if confirm_question:
+                    nodes["confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name)]["on_enter"] = {
+                        "type": "tts", "text": confirm_question}
             nodes["commit"] = _conversation(
                 "commit", "The customer explicitly confirmed an exact action. Call only the bank write tool "
                 "authorized by that confirmation and the source policy. The bank must return an explicit success "

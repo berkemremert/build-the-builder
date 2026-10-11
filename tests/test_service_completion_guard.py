@@ -48,6 +48,11 @@ class ServiceCompletionGuardTests(unittest.TestCase):
         variables = {"caller_finished": "yes"}
         self.assertEqual(["farewell"], _matching_targets(self.service, variables))
 
+    def test_completion_precedes_stale_action_request(self):
+        variables = {"caller_finished": "yes", "requested_write_action": "saveArrangement"}
+        matched = _matching_targets(self.service, variables)
+        self.assertEqual("farewell", matched[0])
+
     def test_initial_demand_cannot_commit_without_proposal(self):
         variables = {"requested_write_action": "saveArrangement",
                      "explicit_action_confirmation": "yes", "confirmed_write_action": "saveArrangement"}
@@ -58,6 +63,11 @@ class ServiceCompletionGuardTests(unittest.TestCase):
                          _matching_targets(self.nodes["proposal_saveArrangement"], variables))
         self.assertEqual(["commit"],
                          _matching_targets(self.nodes["confirm_saveArrangement"], variables))
+
+    def test_declined_final_confirmation_exits_cleanly(self):
+        confirm = self.nodes["confirm_saveArrangement"]
+        self.assertEqual(["farewell"], _matching_targets(
+            confirm, {"explicit_action_confirmation": "no"}))
 
     def test_read_prerequisites_never_create_write_consent(self):
         state = {"generic_pending_cards": "{}", "generic_pending_preview": "{}"}
