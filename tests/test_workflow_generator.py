@@ -1999,7 +1999,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         custom_brief = (
             "Verify the named customer in two steps: ask postal code, then security word. "
             "The API field codes are postal_code and security_word. Never fetch the account "
-            "until both pass. Transfer to the specialist queue when requested. A promise "
+            "until both pass. Queue codes: support=specialist, human=review, "
+            "restructuring=specialist. Transfer to the specialist queue when requested. A promise "
             "requires campaign_code new_a. All dates are based on call variable now."
         )
         policy = {"global_rules": custom_brief, "opening": "", "identity": "",

@@ -26,9 +26,12 @@ _ROLES = {
     },
 }
 _AMENDMENT = re.compile(r"\b(?:later memo|amendment|updated? policy|supersed\w*|overrid\w*|replac\w*)\b", re.I)
-# Look ahead so a lead-in such as "Queue codes: `support`=`Q2`" does not
-# consume the label of the assignment that follows it.
-_ASSIGNMENT = re.compile(r"(?=(?<![\w])`?([A-Za-z][A-Za-z_ -]{0,30}?)`?\s*[:=]\s*`?([A-Za-z0-9_-]+)`?(?=\W|$))")
+_LABELS = "|".join(re.escape(label).replace(r"\ ", r"[ _-]+") for label in
+                   sorted({label for roles in _ROLES.values() for label in roles},
+                          key=len, reverse=True))
+_ASSIGNMENT = re.compile(
+    rf"(?<![\w])`?({_LABELS})`?\s*([:=])\s*`?([A-Za-z0-9_-]+)`?(?=\W|$)", re.I)
+_CODE_CONTEXT = re.compile(r"\b(?:codes?|queues?|outcomes?|mappings?|enums?)\b", re.I)
 
 
 def _normalize(value: str) -> str:
@@ -87,5 +90,9 @@ def explicit_code_mappings(source: str, kind: str, allowed: list[str]) -> dict[s
             continue
         columns = None
         for match in _ASSIGNMENT.finditer(line):
-            record(match.group(1), match.group(2))
+            # In ordinary prose "human: ask once" is an instruction, not an
+            # API code. Colon assignments require an explicit code context.
+            if match.group(2) == ":" and not _CODE_CONTEXT.search(line[:match.start()]):
+                continue
+            record(match.group(1), match.group(3))
     return {role: code for role, (code, _) in found.items()}

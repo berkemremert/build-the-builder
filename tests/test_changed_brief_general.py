@@ -4,14 +4,43 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import unittest
 
 from probe_changed_brief import _code, synthetic_api, synthetic_policy
 from qa import validate_workflow
-from workflow_generator import _holiday_dates, build_workflow
+from workflow_generator import _holiday_dates, _outcome_names, _queue_for, build_workflow
 
 
 class ChangedBriefGeneralityTests(unittest.TestCase):
+    def test_opaque_table_codes_override_stale_extracted_outcomes(self) -> None:
+        api = synthetic_api()
+        policy = synthetic_policy()
+        policy["raw_brief"] = re.sub(r"Code list:.*?\n", "", policy["raw_brief"])
+        policy["raw_brief"] += ("\n| Purpose | Queue |\n|---|---|\n"
+                                "| support | Q2 |\n| human | Q3 |\n| restructuring | Q1 |\n"
+                                "| Role | Outcome code |\n|---|---|\n"
+                                "| promise | C2 |\n| paid | C3 |\n| transfer | C4 |\n"
+                                "| no promise | C5 |\n| identity failure | C6 |\n"
+                                "| not reached | C1 |\n")
+        policy["outcomes"] = {role: "C1" for role in policy["outcomes"]}
+        workflow = build_workflow(policy, api)
+        self.assertEqual([], validate_workflow(workflow, api))
+        self.assertEqual({"promise": "C2", "paid": "C3", "transferred": "C4",
+                          "no_promise": "C5", "not_verified": "C6", "not_reached": "C1"},
+                         _outcome_names(api, policy))
+        for role, code in (("support", "Q2"), ("human", "Q3"), ("restructuring", "Q1")):
+            self.assertEqual(code, _queue_for(api, role, policy))
+            queue = workflow["nodes"]["transfer_" + role]["pre_actions"][0]
+            body = queue["function"]["parameters"]["properties"]["body"]["properties"]
+            self.assertEqual(code, body["queue"]["default"])
+
+    def test_opaque_queue_without_source_mapping_fails_closed(self) -> None:
+        policy = synthetic_policy()
+        policy["raw_brief"] = re.sub(r"Code list:.*?\n", "", policy["raw_brief"])
+        with self.assertRaisesRegex(ValueError, "Cannot map support queue unambiguously"):
+            _queue_for(synthetic_api(), "support", policy)
+
     def test_identity_failure_farewell_uses_changed_bank_name(self) -> None:
         workflow = build_workflow(synthetic_policy(), synthetic_api())
         farewell = workflow["nodes"]["farewell_identity_failed"]["on_enter"]["text"]

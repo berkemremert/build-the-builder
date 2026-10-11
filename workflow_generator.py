@@ -15,6 +15,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
 from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
+from source_code_mappings import explicit_code_mappings
 
 
 _PAYMENT_AMOUNT_SOURCE = inspect.getsource(parse_payment_amount)
@@ -337,21 +338,18 @@ def _queue_for(openapi: dict, role: str, policy: dict) -> str:
     if not values:
         return role
     source = str(policy.get("raw_brief") or "") or str(policy.get("global_rules") or "")
-    for match in re.finditer(r"\b(support|human|restructuring)\s*=\s*([A-Za-z0-9_-]+)", source, re.I):
-        if match.group(1).lower() == role and match.group(2) in values:
-            explicit = match.group(2)
-    if "explicit" in locals():
-        return explicit
+    explicit = explicit_code_mappings(source, "queue", values)
+    if role in explicit:
+        return explicit[role]
     hints = {
         "restructuring": ("restructur", "repayment", "payment_plan", "workout", "arrangement", "specialist"),
         "support": ("support", "care", "hardship", "assist"),
         "human": ("general", "human", "agent", "service"),
     }
-    for hint in hints[role]:
-        for value in values:
-            if hint in value.lower():
-                return value
-    return values[0]
+    candidates = {value for value in values if any(hint in value.lower() for hint in hints[role])}
+    if len(candidates) == 1:
+        return candidates.pop()
+    raise ValueError(f"Cannot map {role} queue unambiguously to OpenAPI enum {values!r}")
 
 
 def _identity_fields(openapi: dict, policy: dict) -> list[str]:
@@ -392,22 +390,14 @@ def _outcome_names(openapi: dict, policy: dict | None = None) -> dict[str, str]:
     policy_outcomes = (policy or {}).get("outcomes") or {}
     policy_keys = list(policy_outcomes) if isinstance(policy_outcomes, dict) else []
     source = str((policy or {}).get("raw_brief") or "")
-    source_roles = {"promise": "promise", "paid": "paid", "transfer": "transferred",
-                    "transferred": "transferred", "no promise": "no_promise",
-                    "identity failure": "not_verified", "not reached": "not_reached"}
-    source_codes = {}
-    for match in re.finditer(
-        r"\b(no\s+promise|identity\s+failure|not\s+reached|transferred|transfer|promise|paid)\s*[:=]\s*([A-Za-z0-9_-]+)",
-        source, re.I,
-    ):
-        source_codes[source_roles[" ".join(match.group(1).lower().split())]] = match.group(2)
+    source_codes = explicit_code_mappings(source, "outcome", values)
     for role, hints in aliases.items():
         replacements = re.findall(r"replace\s+(?:outcome\s+)?" + re.escape(role) +
                                   r"\s+with\s+([a-z0-9_-]+)", source, flags=re.IGNORECASE)
-        if replacements and replacements[-1] in values:
-            result[role] = replacements[-1]
-        elif source_codes.get(role) in values:
+        if role in source_codes:
             result[role] = source_codes[role]
+        elif replacements and replacements[-1] in values:
+            result[role] = replacements[-1]
         elif isinstance(policy_outcomes, dict) and policy_outcomes.get(role) in values:
             result[role] = policy_outcomes[role]
         elif role in values:
