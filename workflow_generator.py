@@ -28,6 +28,8 @@ from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
 from source_code_mappings import explicit_code_mappings
+from source_date_formats import slash_date_matches
+from source_holidays import holiday_dates_from_matches, is_holiday_date_context
 from write_result_fields import write_success_field
 from reason_code_mappings import explicit_reason_codes
 from success_messages import exact_success_sentence
@@ -285,7 +287,7 @@ def _mentions_number(text: str, expected: int) -> bool:
 
 
 def _source_date_matches(source: str) -> list[tuple[int, int, str]]:
-    """Recognize ISO and month-name dates without interpreting unrelated numbers."""
+    """Recognize ISO, month-name and unambiguous slash dates in source text."""
     import datetime
     found: list[tuple[int, int, str]] = []
     patterns = (
@@ -311,7 +313,7 @@ def _source_date_matches(source: str) -> list[tuple[int, int, str]]:
                 continue
             if not any(start <= match.start() < end for start, end, _ in found):
                 found.append((match.start(), match.end(), date.isoformat()))
-    return sorted(found)
+    return sorted(found + slash_date_matches(source))
 
 
 def _holiday_dates(policy: dict) -> list[str]:
@@ -320,28 +322,11 @@ def _holiday_dates(policy: dict) -> list[str]:
     if not source:
         source = "\n".join(str(policy.get(key) or "") for key in
                            ("global_rules", "verified_call", "opening"))
-    dates: set[str] = set()
     matches = _source_date_matches(source)
-    if not matches and re.search(r"\b(?:bank\s+)?holidays?\b", source, re.I) and not re.search(
+    if not any(is_holiday_date_context(source, start) for start, _, _ in matches) and re.search(r"\b(?:bank\s+)?holidays?\b", source, re.I) and not re.search(
             r"\b(?:no|without)\s+(?:bank\s+)?holidays?\b", source, re.I):
         raise ValueError("Cannot establish bank holiday dates from source")
-    for index, (start_at, end_at, date) in enumerate(matches):
-        start = max(source.rfind(mark, 0, start_at) for mark in (";", ".", "\n")) + 1
-        ends = [source.find(mark, end_at) for mark in (";", ".", "\n")]
-        end = min((point for point in ends if point >= 0), default=len(source))
-        clause = source[start:end].lower()
-        if "holiday" not in clause:
-            continue
-        next_date = matches[index + 1][0] if index + 1 < len(matches) else len(source)
-        following = source[end_at:min(end, next_date)].lower()
-        preceding = source[max(start, start_at - 55):start_at].lower()
-        revoked = re.search(r"\b(?:no longer|not|removed|revoked|cancelled|canceled)\b", following)
-        revoked = revoked or re.search(r"\b(?:remove|revoke|cancel)\b.{0,35}\bholiday\b", preceding)
-        if revoked:
-            dates.discard(date)
-        else:
-            dates.add(date)
-    return sorted(dates)
+    return holiday_dates_from_matches(source, matches)
 
 
 def _queue_for(openapi: dict, role: str, policy: dict) -> str:
