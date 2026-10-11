@@ -223,6 +223,38 @@ def _schema_for(openapi: dict, path: str, method: str) -> dict:
     return op.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {})
 
 
+def _generic_body_errors(body: dict, schema: dict, where: str) -> list[str]:
+    """Check every represented request level against the normalized contract."""
+    errors: list[str] = []
+    if not isinstance(body, dict) or not isinstance(schema, dict):
+        return [f"{where}: request body schema must be an object"]
+    contract_fields = schema.get("properties") or {}
+    fields = body.get("properties") or {}
+    if not isinstance(contract_fields, dict) or not isinstance(fields, dict):
+        return [f"{where}: request body fields must be an object"]
+    for required in schema.get("required") or []:
+        if required not in fields:
+            errors.append(f"{where}: required request field {required!r} is absent")
+    for name, binding in fields.items():
+        field_where = f"{where}.{name}"
+        declared = contract_fields.get(name)
+        if not isinstance(declared, dict):
+            errors.append(f"{field_where}: request field is absent from OpenAPI")
+            continue
+        if not isinstance(binding, dict):
+            errors.append(f"{field_where}: request binding must be an object")
+            continue
+        if declared.get("type") == "object" or isinstance(declared.get("properties"), dict):
+            errors.extend(_generic_body_errors(binding, declared, field_where))
+        enum = declared.get("enum")
+        default = binding.get("default")
+        if isinstance(enum, list) and default is not None and not (
+            isinstance(default, str) and ("{{" in default or "${" in default)
+        ) and default not in enum:
+            errors.append(f"{field_where}: fixed default {default!r} is outside OpenAPI enum")
+    return errors
+
+
 def _tool_name(tool) -> str | None:
     fn = tool.get("function") if isinstance(tool, dict) else None
     return fn.get("name") if isinstance(fn, dict) else None
@@ -1328,16 +1360,7 @@ def validate_generic_workflow(workflow: dict, openapi: dict) -> list[str]:
                 tool_urls.add(url)
                 schema = (operation.get("requestBody") or {}).get("content", {}).get("application/json", {}).get("schema") or {}
                 body = props.get("body") or {}
-                leaves = body.get("properties") or {}
-                if not isinstance(leaves, dict):
-                    errors.append(f"{where}: request body fields must be an object")
-                    continue
-                for required in schema.get("required") or []:
-                    if required not in leaves:
-                        errors.append(f"{where}: required request field {required!r} is absent")
-                for body_field in leaves:
-                    if body_field not in (schema.get("properties") or {}):
-                        errors.append(f"{where}: request field {body_field!r} is absent from OpenAPI")
+                errors.extend(_generic_body_errors(body, schema, where))
         for transition in node.get("transitions") or []:
             target = transition.get("target_node") if isinstance(transition, dict) else None
             if target not in nodes:
