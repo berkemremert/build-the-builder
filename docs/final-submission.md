@@ -6,7 +6,7 @@ The current organizer format requires **one** final workflow, **one** builder tr
 
 ## 1. Build and retain the final run
 
-Run the actual final builder command once the organizer sends `{case_folder}` and the matching API material. The `run_command` in the manifest must be the **exact command that works with this repository's final CLI**, using `{case_folder}` and `{mock_url}` placeholders. Do not hand-edit the exported workflow. Keep the builder's original export and trace together under `out/` until packaging.
+Run the actual final builder command once the organizer sends `{case_folder}` and the matching API material. Set `OPENROUTER_API_KEY` for policy extraction and `FREYA_API_KEY` for live publication; the builder does not require `OPENAI_API_KEY`. The `run_command` in the manifest must be the **exact command that works with this repository's final CLI**, using `{case_folder}` and `{mock_url}` placeholders. Do not hand-edit the exported workflow. Keep the builder's original export and trace together under `out/` until packaging.
 
 ## 2. Stage one export and trace
 
@@ -14,8 +14,8 @@ From the repository root, substituting the files from the chosen successful run:
 
 ```bash
 python3 tools/final_submission.py stage \
-  --workflow out/CHOSEN_RUN/final.workflow.json \
-  --trace out/CHOSEN_RUN/final.trace.jsonl
+  --workflow out/CHOSEN_RUN/final-case.workflow.json \
+  --trace out/CHOSEN_RUN/final-case.trace.jsonl
 ```
 
 This validates the pair and copies it into `submission_artifacts/`, preserving filenames. The output prints the two repository-relative paths. Review the files, then commit and push them with the builder code:
@@ -32,10 +32,10 @@ Use the two paths printed by `stage`, the deployed **own Cloudflare mock** URL, 
 
 ```bash
 python3 tools/final_submission.py manifest \
-  --workflow submission_artifacts/final.workflow.json \
-  --trace submission_artifacts/final.trace.jsonl \
+  --workflow submission_artifacts/final-case.workflow.json \
+  --trace submission_artifacts/final-case.trace.jsonl \
   --mock-url 'https://YOUR-MOCK.YOUR-SUBDOMAIN.workers.dev' \
-  --run-command 'python3 builder.py {case_folder} {mock_url}'
+  --run-command 'python3 builder.py "{case_folder}" "{mock_url}"'
 python3 tools/final_submission.py check submission.json
 ```
 
