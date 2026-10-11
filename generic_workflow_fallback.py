@@ -555,6 +555,56 @@ def _pre_provenance_code(operation: _Operation, plan: list[dict]) -> str:
     )
 
 
+def _normalize_request_code(operation: _Operation) -> str:
+    """Accept Freya's flat tool arguments only when the contract has one data envelope."""
+    schema = _json_schema(operation, response=False)
+    top = schema.get("properties") or {}
+    data = top.get("data") if isinstance(top, dict) else None
+    if not isinstance(data, dict) or data.get("type") != "object":
+        return ""
+    data_fields = data.get("properties") or {}
+    if not isinstance(data_fields, dict):
+        return ""
+    fixed = {}
+    for name, field in data_fields.items():
+        if not isinstance(field, dict):
+            continue
+        if "const" in field:
+            fixed[name] = field["const"]
+        elif "default" in field:
+            fixed[name] = field["default"]
+        elif isinstance(field.get("enum"), list) and len(field["enum"]) == 1:
+            fixed[name] = field["enum"][0]
+    return (
+        "def reject_request_shape(reason):\n"
+        "    config['url'] = ''\n"
+        "    config['body'] = {}\n"
+        "    raise ValueError(reason)\n"
+        "body = config.get('body')\n"
+        "if not isinstance(body, dict):\n"
+        "    reject_request_shape('Bank request body must be an object')\n"
+        f"data_fields = {tuple(sorted(data_fields))!r}\n"
+        f"top_fields = {tuple(sorted(top))!r}\n"
+        "flat = {key: value for key, value in body.items() if key not in top_fields}\n"
+        "if any(key not in data_fields for key in flat):\n"
+        "    reject_request_shape('Request field is absent from the bank contract')\n"
+        "nested = body.get('data', {})\n"
+        "if not isinstance(nested, dict):\n"
+        "    reject_request_shape('Bank data envelope must be an object')\n"
+        "if any(key in nested and nested[key] != value for key, value in flat.items()):\n"
+        "    reject_request_shape('Conflicting bank request fields')\n"
+        "nested = {**nested, **flat}\n"
+        "if any(key not in data_fields for key in nested):\n"
+        "    reject_request_shape('Request field is absent from the bank contract')\n"
+        f"for key, value in {fixed!r}.items():\n"
+        "    if key in nested and nested[key] != value:\n"
+        "        reject_request_shape('Fixed bank request value differs from the contract')\n"
+        "    nested[key] = value\n"
+        "config['body'] = {key: value for key, value in body.items() if key in top_fields and key != 'data'}\n"
+        "config['body']['data'] = nested\n"
+    )
+
+
 def _post_read_evidence_code(operation: _Operation,
                              checks: list[tuple[tuple[str, ...], object]]) -> str:
     return (
@@ -868,7 +918,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
         plan = _provenance_plan(operation, operations,
                                 str(rules.get(operation.name) or ""), call_variables)
         tool = tools[operation.name]
-        tool["pre_process_code"] = (_pre_provenance_code(operation, plan)
+        tool["pre_process_code"] = (_normalize_request_code(operation)
+                                    + _pre_provenance_code(operation, plan)
                                     + tool.get("pre_process_code", ""))
         if operation.role == "read":
             tool["post_process_code"] = (tool.get("post_process_code", "")

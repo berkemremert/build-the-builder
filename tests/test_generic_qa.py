@@ -48,6 +48,16 @@ class GenericRequestValidationTests(unittest.TestCase):
         self.assertTrue(any("outside OpenAPI enum" in error for error in errors))
         self.assertTrue(any("invented" in error and "absent from OpenAPI" in error for error in errors))
 
+    def test_flat_tool_arguments_are_wrapped_in_documented_data_envelope(self):
+        read = self.workflow["nodes"]["service"]["tools"][0]
+        config = {"body": {"customerNo": "42"}}
+        exec(read["pre_process_code"], {"config": config, "vars": {"customerNumber": "42"}})
+        self.assertEqual({"data": {"customerNo": "42", "channel": "IVR"}}, config["body"])
+        invalid = {"body": {"customerNo": "42", "invented": "x"}}
+        with self.assertRaisesRegex(ValueError, "absent from the bank contract"):
+            exec(read["pre_process_code"], {"config": invalid, "vars": {"customerNumber": "42"}})
+        self.assertEqual({}, invalid["body"])
+
     def test_preview_description_success_code_controls_read_evidence(self):
         operation = self.spec["paths"]["/read"]["post"]
         response = operation["responses"]["200"]
