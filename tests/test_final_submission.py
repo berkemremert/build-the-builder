@@ -142,6 +142,12 @@ class FinalSubmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(submission.SubmissionError, "differs from the export"):
             submission.validate_export(other, self.trace)
 
+    def test_known_offline_credentials_are_not_treated_as_live_secrets(self) -> None:
+        submission._scan_text('Use Bearer authentication; fixture Bearer abcdefghijklmnop', 'test fixture')
+        submission._scan_text('sk-or-offline', 'test fixture')
+        with self.assertRaisesRegex(submission.SubmissionError, "Possible credential"):
+            submission._scan_text('Bearer a-different-token-123456789', 'artifact')
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,7 +27,8 @@ _SECRET = re.compile(
     r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}\b|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
     re.I,
 )
-_EXAMPLE_KEYS = ("your_key", "your-key", "OFFLINE_", "sk-or-v1-ignored", "fak_1234567890abcdef")
+_EXAMPLE_KEYS = ("your_key", "your-key", "OFFLINE_", "sk-or-offline", "sk-or-v1-ignored",
+                 "fak_1234567890abcdef", "Bearer authentication", "Bearer abcdefghijklmnop")
 
 
 class SubmissionError(ValueError):
