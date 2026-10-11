@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from openapi_resolver import response_schemas
+
 
 def promise_request_fields(schema: dict) -> dict[str, str]:
     """Map product, amount and date to their unambiguous API field names."""
@@ -67,13 +69,15 @@ def account_collection_field(response_schema: dict) -> str:
     raise ValueError(f"get_account response needs one product collection; found {arrays!r}")
 
 
-def account_response_collection(operation: dict) -> tuple[str, dict]:
+def account_response_collection(operation: dict, openapi: dict | None = None) -> tuple[str, dict]:
     """Find one product array across the operation's successful JSON responses."""
     matches = []
-    for code, response in (operation.get("responses") or {}).items():
+    resolved = response_schemas(operation, openapi) if openapi is not None else {
+        str(code): (response, (response.get("content") or {}).get("application/json", {}).get("schema") or {})
+        for code, response in (operation.get("responses") or {}).items() if isinstance(response, dict)}
+    for code, (response, schema) in resolved.items():
         if not (str(code).isdigit() and 200 <= int(code) < 300 and isinstance(response, dict)):
             continue
-        schema = (response.get("content") or {}).get("application/json", {}).get("schema") or {}
         if not schema.get("properties"):
             continue
         field = account_collection_field(schema)
@@ -83,13 +87,15 @@ def account_response_collection(operation: dict) -> tuple[str, dict]:
     return matches[0]
 
 
-def identity_response_fields(operation: dict) -> dict[str, str]:
+def identity_response_fields(operation: dict, openapi: dict | None = None) -> dict[str, str]:
     """Identify per-answer, fully-verified and remaining-attempt fields."""
     mappings = []
-    for code, response in (operation.get("responses") or {}).items():
+    resolved = response_schemas(operation, openapi) if openapi is not None else {
+        str(code): (response, (response.get("content") or {}).get("application/json", {}).get("schema") or {})
+        for code, response in (operation.get("responses") or {}).items() if isinstance(response, dict)}
+    for code, (response, schema) in resolved.items():
         if not (str(code).isdigit() and 200 <= int(code) < 300 and isinstance(response, dict)):
             continue
-        schema = (response.get("content") or {}).get("application/json", {}).get("schema") or {}
         if not schema.get("properties"):
             continue
         found: dict[str, list[str]] = {"answer": [], "complete": [], "remaining": []}

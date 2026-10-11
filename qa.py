@@ -17,6 +17,7 @@ from pathlib import Path
 
 from api_bindings import (account_response_collection, identity_response_fields,
                           note_request_fields, promise_request_fields)
+from openapi_resolver import normalize_openapi
 
 
 ROOT = Path(__file__).resolve().parent
@@ -186,6 +187,10 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         return ["workflow must be a JSON object"]
     if not isinstance(openapi, dict) or not isinstance(openapi.get("paths"), dict):
         return ["openapi must contain a paths object"]
+    try:
+        openapi = normalize_openapi(openapi)
+    except ValueError as exc:
+        return [f"openapi: {exc}"]
 
     for path, value in _walk(workflow):
         if value is None:
