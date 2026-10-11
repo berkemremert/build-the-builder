@@ -20,6 +20,7 @@ from api_servers import operation_url
 from account_item_bindings import product_item_fields
 from business_calendar import business_weekdays
 from callback_rules import callback_guard_code, callback_request_fields, callback_window
+from close_reason_contract import required_no_reason_value
 from bank_names import BANK_NAME, source_bank_name
 from customer_bindings import customer_identifier_field
 from deadline_tables import parse_deadline_tables
@@ -484,6 +485,18 @@ def _bank_name(policy: dict) -> str:
     source = "\n".join(str(policy.get(key) or "") for key in ("opening", "global_rules", "raw_brief"))
     match = re.search(r"\b([A-Z][A-Za-z0-9&-]*(?:\s+[A-Z][A-Za-z0-9&-]*){0,4}\s+(?:Bank|Credit Union))\b", source)
     return match.group(1) if match else "the bank"
+
+
+def _all_today_question(policy: dict) -> str | None:
+    """Render the multi-product ask only when its object is explicit in source."""
+    source = "\n".join(str(policy.get(key) or "") for key in ("raw_brief", "verified_call"))
+    matches = list(re.finditer(
+        r"\bpay\s+(all\s+of\s+them|all\s+(?:the\s+)?(?:products?|payments?)|"
+        r"every\s+product)\s+today\b", source, re.I))
+    if not matches:
+        return None
+    object_words = re.sub(r"\s+", " ", matches[-1].group(1).lower()).strip()
+    return f"Can you pay {object_words} today?"
 
 
 def _opening_line(policy: dict, bank_name: str) -> str:
@@ -1440,6 +1453,24 @@ except Exception:
 """
 
 
+_MULTI_ALL_TODAY_GATE_CODE = """import json
+try:
+    status = str(vars.get('all_today_status') or '')
+    raw = vars.get('proposed_terms_json') or '[]'
+    proposals = json.loads(raw) if isinstance(raw, str) else raw
+    dated = isinstance(proposals, list) and any(
+        isinstance(item, dict) and str(item.get('date') or item.get('date_words') or
+                                       item.get('date_phrase') or item.get('raw_date') or '').strip()
+        for item in proposals)
+    shared_day = bool(str(vars.get('multi_common_date_words') or '').strip())
+    disclosure = str(vars.get('multi_disclosure_state') or '')
+    vars['multi_all_today_next'] = ('advance' if status in ('yes', 'no') or dated or shared_day or
+                                   disclosure in ('hardship', 'incomplete') else 'clarify')
+except Exception:
+    vars['multi_all_today_next'] = 'clarify'
+"""
+
+
 _MULTI_ACCOUNT_FACT_CODE = """import json
 import re
 try:
@@ -1468,8 +1499,17 @@ try:
         else:
             answer = 'I do not have that information.'
     vars['multi_account_fact_answer'] = answer
+    raw = vars.get('proposed_terms_json') or '[]'
+    proposals = json.loads(raw) if isinstance(raw, str) else raw
+    dated = isinstance(proposals, list) and any(
+        isinstance(item, dict) and str(item.get('date') or item.get('date_words') or
+                                       item.get('date_phrase') or item.get('raw_date') or '').strip()
+        for item in proposals)
+    vars['multi_account_fact_next'] = ('advance' if str(vars.get('all_today_status') or '') in ('yes', 'no') or
+                                       dated or str(vars.get('multi_common_date_words') or '').strip() else 'followup')
 except Exception:
     vars['multi_account_fact_answer'] = 'I cannot confirm that account detail right now.'
+    vars['multi_account_fact_next'] = 'followup'
 finally:
     vars['multi_account_fact_question'] = 'no'
     vars['multi_account_fact_kind'] = 'none'
@@ -1907,7 +1947,9 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     promise_fields = promise_request_fields(_api_spec(openapi, "create_promise")[2])
     note_fields = note_request_fields(_api_spec(openapi, "add_note")[2])
     transfer_fields = transfer_request_fields(_api_spec(openapi, "transfer_to_agent")[2])
-    close_fields = close_request_fields(_api_spec(openapi, "close_call")[2])
+    close_schema = _api_spec(openapi, "close_call")[2]
+    close_fields = close_request_fields(close_schema)
+    no_reason_value = required_no_reason_value(close_schema, brief or prose)
     write_flags = {}
     for operation_name in ("add_note", "transfer_to_agent", "schedule_callback"):
         path, method, _ = _api_spec(openapi, operation_name)
@@ -2192,7 +2234,7 @@ except Exception:
                                    _check("product_count", "greater_than", 1),
                                    _check("multi_account_fact_question", "equals", "yes"),
                                ]})))
-        transitions.append(_to("multi_advance", "Begin ordered product discussion after the all-today answer",
+        transitions.append(_to("multi_all_today_gate", "Check for an all-today answer or dated proposal",
                                _when(_check("product_count", "greater_than", 1))))
         single = lambda action: _when({"logic": "and", "conditions": [
             _check("product_count", "equals", "1"), _check("discussion_action", "equals", action),
@@ -2251,21 +2293,49 @@ except Exception:
                                                        if multi_enabled else []),
                                                  ],
                                                  max_turns=40,
-                                                 max_target="multi_advance" if multi_enabled else "prepare_notes")
+                                                 max_target="multi_all_today_gate" if multi_enabled else "prepare_notes")
     nodes["account_discussion"]["on_enter_first_entry_only"] = True
     if multi_enabled:
+        all_today_question = _all_today_question(policy)
+        nodes["multi_all_today_gate"] = _code_node(
+            "multi_all_today_gate", _MULTI_ALL_TODAY_GATE_CODE, "multi_all_today_clarify")
+        nodes["multi_all_today_gate"]["transitions"] = [
+            _eq("multi_advance", "multi_all_today_next", "advance"),
+            _always("multi_all_today_clarify"),
+        ]
+        nodes["multi_all_today_clarify"] = _conversation(
+            "multi_all_today_clarify",
+            "The caller has not yet answered the source policy's all-products-today question or supplied a dated payment proposal. "
+            "Answer a new verified account-fact question before any offer. If the caller merely asks a question, "
+            "does not answer, or gives an unclear response, ask the source question again without consuming a persuasion attempt. "
+            "Do not record a refusal or make a product offer in this node. No tool call is allowed.",
+            opening=all_today_question,
+            extraction=nodes["account_discussion"]["extraction_schema"],
+            transitions=transitions,
+            max_turns=40, max_target="multi_all_today_gate")
         nodes["multi_account_fact_answer"] = _code_node(
             "multi_account_fact_answer", _MULTI_ACCOUNT_FACT_CODE, "multi_account_followup")
+        nodes["multi_account_fact_answer"]["transitions"] = [
+            _eq("multi_account_fact_notice", "multi_account_fact_next", "advance"),
+            _always("multi_account_followup"),
+        ]
+        nodes["multi_account_fact_notice"] = _conversation(
+            "multi_account_fact_notice",
+            "Speak only the verified account fact prepared from get_account, then continue with the caller's already supplied payment answer. No tool call is allowed.",
+            opening="{{multi_account_fact_answer}}",
+            transitions=[_always("multi_advance")], max_turns=1, max_target="multi_advance")
+        nodes["multi_account_fact_notice"]["passthrough"] = True
+        nodes["multi_account_fact_notice"]["passthrough_default_transition"] = "multi_advance"
         nodes["multi_account_followup"] = _conversation(
             "multi_account_followup",
             "The fixed answer to the caller's verified account question was spoken on entry from get_account facts. "
             "Wait for the caller's latest reply. Answer another factual product question before any payment offer. "
             "A no to paying all products today begins the ordered per-product discussion; it does not refuse any individual product. "
             "Do not make a persuasion offer in this node. No tool call is allowed.",
-            opening="{{multi_account_fact_answer}} Can you pay all of these products today?",
+            opening=("{{multi_account_fact_answer}} " + all_today_question) if all_today_question else None,
             extraction=nodes["account_discussion"]["extraction_schema"],
             transitions=transitions,
-            max_turns=40, max_target="multi_advance")
+            max_turns=40, max_target="multi_all_today_gate")
 
     nodes["single_robot_route"] = _code_node("single_robot_route", _SINGLE_ROBOT_ROUTE_CODE, "single_robot_answer")
     nodes["single_robot_answer"] = _conversation(
@@ -2827,7 +2897,6 @@ except Exception:
         "            except Exception:\n", "                recorded = []\n",
         "            if recorded:\n",
         f"                body[{close_fields['outcome']!r}] = {outcomes['promise']!r}\n",
-        f"                body.pop({close_fields['reason']!r}, None)\n",
         "            else:\n",
         f"                body[{close_fields['outcome']!r}] = {outcomes['no_promise']!r}\n",
     ]
@@ -2835,8 +2904,17 @@ except Exception:
         close_code.append(
             f"                body[{close_fields['reason']!r}] = {(close_reason_names.get('service_error') or 'service_error')!r}\n")
     close_code.extend([
-        f"        elif {close_fields['reason']!r} and not body.get({close_fields['reason']!r}):\n",
-        f"            body.pop({close_fields['reason']!r}, None)\n",
+        f"        if {close_fields['reason']!r}:\n",
+        f"            reason_field = {close_fields['reason']!r}\n",
+        f"            no_reason = {no_reason_value!r}\n",
+        f"            reasonless_outcomes = {tuple(outcomes[role] for role in ('promise', 'paid'))!r}\n",
+        f"            if body.get({close_fields['outcome']!r}) in reasonless_outcomes:\n",
+        "                if no_reason is None:\n",
+        "                    body.pop(reason_field, None)\n",
+        "                else:\n",
+        "                    body[reason_field] = no_reason\n",
+        "            elif not body.get(reason_field):\n",
+        "                body.pop(reason_field, None)\n",
         "except Exception:\n", "    pass\n",
     ])
     close["pre_process_code"] = "".join(close_code)
