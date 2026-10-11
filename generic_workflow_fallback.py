@@ -1025,6 +1025,7 @@ def _normal_completion_utterance(policy: dict) -> str:
     menu = outcomes.get("main_menu") if isinstance(outcomes, dict) else None
     if isinstance(menu, str):
         for pattern in (
+            r"\b(?:ordinary|normal)\s+(?:completion|goodbye|end)\s+(?:says?|uses?)\s*[“\"]([^”\"]+)[”\"]",
             r"\bnormal\s+(?:completion|goodbye|end)\s*:\s*[“\"]([^”\"]+)[”\"]",
             r"\b(?:normal\s+(?:goodbye|end)|nothing\s+else|thanks)\b[^:]{0,150}:\s*[“\"]([^”\"]+)[”\"]",
             r"\b(?:caller\s+finishes|says\s+thanks|nothing\s+else|normal\s+(?:completion|goodbye|end))\b[^“”\"]{0,100}[“\"]([^”\"]+)[”\"]",
@@ -1072,7 +1073,9 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             try:
                 w_plan = _provenance_plan(operation, operations,
                                           str(rules.get(operation.name) or ""), call_variables)
-                w_sources = sorted({step["source"] for step in w_plan if "source" in step})
+                w_sources = sorted({step["source"] for step in w_plan if "source" in step}
+                                   | {read.name for read in operations if read.role == "read"
+                                      and read.name in str(rules.get(operation.name) or "")})
                 if w_sources:
                     write_prereqs[operation.name] = w_sources
             except Exception:
@@ -1261,12 +1264,23 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                     continue
                 proposal_name = "proposal_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name)
                 proposal_rule = str(rules.get(operation.name) or "")
+                currency_choice_needed = ("currencyType" in
+                    str(_json_schema(operation, response=False)) and
+                    bool(re.search(r"currencyType.{0,160}do not guess|do not guess.{0,160}currencyType",
+                                   proposal_rule, re.I | re.S)))
+                consent_conditions = [("explicit_action_confirmation", "yes"),
+                                      ("confirmed_write_action", operation.name)]
+                if operation.name in write_prereqs:
+                    consent_conditions.append(("generic_prereq_ready_" + operation.name, "yes"))
+                if currency_choice_needed:
+                    consent_conditions.append(("explicit_currency_choice", "yes"))
                 nodes[proposal_name] = _conversation(
                     proposal_name,
                     "The caller requested the bank action " + operation.name + ". Use only verified bank reads "
                     "and the source policy to state the exact proposal, required preview, and destination. "
                     "If a required choice or value is missing, ask for it first. Then ask for an explicit "
-                    "yes or no. Do not execute the write in this stage. An initial demand to skip consent "
+                    "yes or no. Never emit a tool call or call syntax in this stage; any required read must "
+                    "have happened before entering. Do not execute the write in this stage. An initial demand to skip consent "
                     "does not count. Source rule: " + proposal_rule,
                     extraction=[{"name": "explicit_action_confirmation", "type": "string",
                                  "enum_values": ["yes", "no", "unknown"],
@@ -1278,15 +1292,34 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                                 {"name": "confirmed_write_action", "type": "string",
                                  "enum_values": [operation.name],
                                  "description": "Set only when the caller clearly accepts this exact proposal.",
-                                 "min_confidence": 0.45}],
-                    transitions=[_and_when([("explicit_action_confirmation", "yes"),
-                                            ("confirmed_write_action", operation.name)]
-                                           + ([("generic_prereq_ready_" + operation.name, "yes")]
-                                              if operation.name in write_prereqs else []),
-                                           "commit", "Caller accepted the proposed action after its prerequisite reads"),
+                                 "min_confidence": 0.45}]
+                    + ([{"name": "explicit_currency_choice", "type": "string",
+                         "enum_values": ["yes", "no"],
+                         "description": "Yes only when the caller explicitly named which currency's statement "
+                                        "to send. A request for a statement, latest statement, or consent to "
+                                        "send without a named currency is no.",
+                         "min_confidence": 0.9}] if currency_choice_needed else []),
+                    transitions=[_and_when(consent_conditions,
+                                           "confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
+                                           "Caller accepted the proposed action; verify clear assent once more"),
                                  _when("explicit_action_confirmation", "no", "service",
                                        "Caller declined the proposed action")],
                     turns=8)
+                nodes["confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name)] = _conversation(
+                    "confirm_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
+                    "Ask for one final clear yes to the exact proposed bank action. Do not treat a vague, "
+                    "hedged, or conditional reply as consent; if unclear, ask again. Do not use tools here.",
+                    extraction=[{"name": "explicit_action_confirmation", "type": "string",
+                                 "enum_values": ["yes", "no", "unknown"],
+                                 "description": "Yes only for a clear unhedged affirmative reply to the "
+                                                "immediately preceding final confirmation question. A maybe, "
+                                                "I guess, probably, or conditional answer is unknown.",
+                                 "min_confidence": 0.45}],
+                    transitions=[_and_when(consent_conditions, "commit",
+                                           "Final clear assent after exact proposal"),
+                                 _when("explicit_action_confirmation", "no", "service",
+                                       "Caller declined final confirmation")],
+                    turns=5)
             nodes["commit"] = _conversation(
                 "commit", "The customer explicitly confirmed an exact action. Call only the bank write tool "
                 "authorized by that confirmation and the source policy. The bank must return an explicit success "

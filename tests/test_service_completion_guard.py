@@ -54,7 +54,10 @@ class ServiceCompletionGuardTests(unittest.TestCase):
         self.assertEqual(["proposal_saveArrangement"], _matching_targets(self.service, variables))
         self.assertEqual("llm", self.nodes["proposal_saveArrangement"]["on_enter"]["type"])
         self.assertNotIn("tools", self.nodes["proposal_saveArrangement"])
-        self.assertEqual(["commit"], _matching_targets(self.nodes["proposal_saveArrangement"], variables))
+        self.assertEqual(["confirm_saveArrangement"],
+                         _matching_targets(self.nodes["proposal_saveArrangement"], variables))
+        self.assertEqual(["commit"],
+                         _matching_targets(self.nodes["confirm_saveArrangement"], variables))
 
     def test_read_prerequisites_never_create_write_consent(self):
         state = {"generic_pending_cards": "{}", "generic_pending_preview": "{}"}
