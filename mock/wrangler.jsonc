@@ -6,7 +6,7 @@
   "workers_dev": true,
   "vars": {
     "MOCK_BASE_PATH": "",
-    "MOCK_STATE_SCOPE": "validation"
+    "MOCK_STATE_SCOPE": "scored-20261011-09f870c88fff"
   },
   "durable_objects": {
     "bindings": [
