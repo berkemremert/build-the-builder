@@ -324,7 +324,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                             for index, item in enumerate(case["products"], start=1)]
         products, state = _prepared_products(workflow, account_products, case["variables"]["now"])
         spoken_date = "the thirtieth of October"
-        state.update({"all_today_status": "no", "multi_common_date_words": spoken_date,
+        state.update({"all_today_status": "no", "multi_initial_date_spoken": "yes", "multi_common_date_words": spoken_date,
                       "proposed_terms_json": json.dumps([
                           {"product_id": "p1", "amount": 300, "date": spoken_date},
                           {"product_id": "p2", "amount": 900, "date": spoken_date},
@@ -358,7 +358,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
             workflow,
             [dict(item, product_id=f"p{index}") for index, item in enumerate(case["products"], start=1)],
             case["variables"]["now"])
-        state.update({"all_today_status": "no", "recorded_ids": "[]",
+        state.update({"all_today_status": "no", "multi_initial_date_spoken": "yes", "recorded_ids": "[]",
                       "proposed_terms_json": json.dumps([
                           {"product_id": "p1", "amount": 300, "date": "sometime"},
                           {"product_id": "p2", "amount": 900, "date": "sometime"},
@@ -380,7 +380,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                             r"august|september|october|november|december)\b")
 
         next_node = "multi_correction"
-        for raw in ("", '["300", "credit card"]', '["October twenty second"]', "", ""):
+        for raw in ("", '["300", "credit card"]', '["October twenty second"]', "", "",
+                    '["300"]'):
             if next_node != "multi_correction":
                 break
             state["multi_corrected_terms_json"] = raw
@@ -647,6 +648,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                             for index, item in enumerate(case["products"], start=1)]
         products, state = _prepared_products(workflow, account_products, case["variables"]["now"])
         state.update({"product_json": json.dumps(products), "all_today_status": "no",
+                      "multi_initial_date_spoken": "yes",
                       "proposed_terms_json": '[{"product_id":"p1","amount":510,"date":"tomorrow"}]',
                       "pending_note_reasons_json": "{}", "write_index": "0"})
         advance = _code_node_writing(workflow, "multi_offer_stage")
@@ -798,7 +800,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual(["p1"], list(json.loads(state["multi_terms_json"])))
 
         floor_state = initial_state
-        floor_state.update({"all_today_status": "no", "multi_full_too_much_ids_json": '["p3"]',
+        floor_state.update({"all_today_status": "no", "multi_initial_date_spoken": "yes",
+                            "multi_full_too_much_ids_json": '["p3"]',
                             "pending_note_reasons_json": '{"p2":"hardship"}',
                             "proposed_terms_json":
                             '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})

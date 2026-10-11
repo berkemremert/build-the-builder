@@ -130,6 +130,7 @@ class MultiAccountFactQuestionTests(unittest.TestCase):
     def test_unanswered_all_today_question_never_selects_an_offer(self) -> None:
         state = self.prepared("LONG-04")
         state.update({"multi_account_fact_question": "no", "all_today_status": "other",
+                      "multi_initial_date_spoken": "no",
                       "discussion_action": "continue", "proposed_terms_json": "[]",
                       "pending_note_reasons_json": '{"p1":"refused"}'})
         for node_name in ("account_discussion", "multi_all_today_clarify", "multi_account_followup"):
@@ -145,12 +146,25 @@ class MultiAccountFactQuestionTests(unittest.TestCase):
     def test_dated_proposal_advances_even_without_yes_no(self) -> None:
         state = self.prepared("LONG-05")
         state.update({"multi_account_fact_question": "no", "all_today_status": "other",
+                      "multi_initial_date_spoken": "yes",
                       "discussion_action": "proposal_ready",
                       "proposed_terms_json": '[{"product_id":"p1","amount":400,"date":"20 October"}]'})
         self.assertEqual("multi_all_today_gate", route(self.workflow["nodes"]["account_discussion"], state))
         run_code(self.workflow, "multi_all_today_gate", state)
         self.assertEqual("advance", state["multi_all_today_next"])
         self.assertEqual("multi_advance", route(self.workflow["nodes"]["multi_all_today_gate"], state))
+
+    def test_no_to_all_today_does_not_date_an_amount_only_card_proposal(self) -> None:
+        state = self.prepared("LONG-05")
+        state.update({"all_today_status": "no", "multi_initial_date_spoken": "no",
+                      "proposed_terms_json": '[{"product_id":"p1","amount":510,"date":"today"}]',
+                      "proposed_date_words": "today"})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertEqual({"product_id": "p1", "amount": 510.0},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertEqual(("p1", "clarify"), (state["multi_focus_product_id"], state["multi_next"]))
+        self.assertIn("exact day", state["multi_clarify_prompt"])
 
     def test_incomplete_or_unassociated_terms_do_not_start_an_offer(self) -> None:
         state = self.prepared("LONG-05")

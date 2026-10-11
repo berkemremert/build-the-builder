@@ -212,6 +212,30 @@ class Hard07ConfirmationRegression(unittest.TestCase):
         self.assertEqual("service_error", state["multi_next"])
         self.assertEqual(original, state["multi_terms_json"])
 
+    def test_card_amount_and_day_fragments_survive_unrelated_question(self) -> None:
+        state = self._state()
+        original = state["multi_terms_json"]
+        state["multi_correction_product"] = "card"
+        state["multi_correction_amount_words"] = "400"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual({"product_id": "p1", "amount": 400.0},
+                         json.loads(state["multi_correction_parts_json"]))
+        self.assertEqual(original, state["multi_terms_json"])
+        state["multi_correction_question_kind"] = "repeat_terms"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("0", state.get("multi_correction_attempts", "0"))
+        self.assertEqual({"product_id": "p1", "amount": 400.0},
+                         json.loads(state["multi_correction_parts_json"]))
+        self.assertIn("before recording", state["multi_correction_prompt"])
+        state["multi_correction_date_words"] = "Tuesday 20 October"
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("confirm", state["multi_next"])
+        self.assertEqual(400.0, json.loads(state["multi_terms_json"])["p1"]["amount"])
+        run_node(self.workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        self.assertIn("400.00 on 2026-10-20", state["confirmation_readback"])
+
 
 if __name__ == "__main__":
     unittest.main()

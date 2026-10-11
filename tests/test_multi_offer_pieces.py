@@ -304,6 +304,40 @@ class MultiOfferPiecesTests(unittest.TestCase):
                          json.loads(state["multi_terms_json"])["p1"])
         self.assertEqual({}, json.loads(state["multi_partial_terms_json"]))
 
+    def test_full_amount_words_and_cross_product_switch_keep_each_product(self) -> None:
+        state = self.prepared()
+        state.update({"multi_terms_json": '{"p1":{"product_id":"p1","amount":510,'
+                                          '"date":"Friday 16 October"}}',
+                      "multi_focus_product_id": "p2", "multi_phase": "offer",
+                      "multi_offer_action": "proposal", "multi_reply_date_spoken": "no",
+                      "multi_reply_terms_json": '[{"product_id":"p2","amount":"full 1320"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(1320.0, json.loads(state["multi_partial_terms_json"])["p2"]["amount"])
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p2","date":"Tuesday 20 October"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(1320.0, json.loads(state["multi_terms_json"])["p2"]["amount"])
+        self.assertEqual("p3", state["multi_focus_product_id"])
+
+        # A named car-loan proposal remains attached to p3 even if p2 is
+        # still the current focus when that utterance arrives.
+        state.update({"multi_terms_json": '{"p1":{"product_id":"p1","amount":510,'
+                                          '"date":"Friday 16 October"}}',
+                      "multi_partial_terms_json": '{"p2":{"product_id":"p2","date":"Tuesday 20 October"}}',
+                      "multi_focus_product_id": "p2", "multi_phase": "clarify",
+                      "multi_offer_action": "unclear", "multi_reply_date_spoken": "no",
+                      "multi_reply_terms_json": '[{"product_id":"p3","amount":"full 140"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(("p3", "clarify"), (state["multi_focus_product_id"], state["multi_next"]))
+        partial = json.loads(state["multi_partial_terms_json"])
+        self.assertEqual("Tuesday 20 October", partial["p2"]["date"])
+        self.assertEqual(140.0, partial["p3"]["amount"])
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p3","date":"Friday 23 October"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(140.0, json.loads(state["multi_terms_json"])["p3"]["amount"])
+        self.assertEqual("p2", state["multi_focus_product_id"])
+
     def test_new_card_correction_cannot_inherit_prior_car_dispute(self) -> None:
         state = self.prepared()
         original = {"p1": {"product_id": "p1", "amount": 510.0, "date": "Friday 16 October"}}
@@ -348,6 +382,21 @@ class MultiOfferPiecesTests(unittest.TestCase):
         self.assertEqual("clarify", state["multi_next"])
         self.assertEqual({"product_id": "p1"}, json.loads(state["multi_correction_parts_json"]))
         self.assertEqual("no", state["multi_confirmation_fragment"])
+
+    def test_paid_product_interruption_is_not_a_promise_fragment(self) -> None:
+        state = self.prepared()
+        original = {"p1": {"product_id": "p1", "amount": 510.0,
+                           "date": "Friday 16 October"}}
+        state.update({"multi_terms_json": json.dumps(original),
+                      "multi_notes_json": '{"p2":"paid"}',
+                      "multi_confirmation_fragment": "yes",
+                      "multi_correction_product": "personal loan",
+                      "confirmation_status": "changed"})
+        run_code(self.workflow, "clear_confirmation", state)
+        self.assertEqual("no", state["multi_confirmation_fragment"])
+        self.assertEqual(original, json.loads(state["multi_terms_json"]))
+        self.assertEqual({"p2": "paid"}, json.loads(state["multi_notes_json"]))
+        self.assertEqual("", state["confirmation_readback"])
 
 
 if __name__ == "__main__":

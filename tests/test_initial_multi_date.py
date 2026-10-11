@@ -48,7 +48,7 @@ class InitialMultiDateTests(unittest.TestCase):
 
     def test_raw_initial_day_uses_only_remaining_product_and_keeps_refusals_pending(self) -> None:
         state = self.prepared(renamed=True)
-        state.update({"proposed_date_words": "tomorrow",
+        state.update({"multi_initial_date_spoken": "yes", "proposed_date_words": "tomorrow",
                       "pending_note_reasons_json": '{"acct-B":"refused","acct-C":"refused"}',
                       "proposed_terms_json": ""})
         run_code(self.workflow, "multi_all_today_gate", state)
@@ -84,7 +84,7 @@ class InitialMultiDateTests(unittest.TestCase):
 
     def test_ambiguous_day_asks_for_product_before_any_offer(self) -> None:
         state = self.prepared(renamed=True)
-        state["proposed_date_words"] = "tomorrow"
+        state.update({"multi_initial_date_spoken": "yes", "proposed_date_words": "tomorrow"})
         run_code(self.workflow, "multi_advance", state)
         self.assertEqual("date_identify", state["multi_next"])
         self.assertEqual({}, json.loads(state["multi_terms_json"]))
@@ -102,7 +102,7 @@ class InitialMultiDateTests(unittest.TestCase):
 
     def test_identified_day_keeps_captured_amount_with_multiple_candidates(self) -> None:
         state = self.prepared()
-        state.update({"proposed_date_words": "tomorrow", "proposed_terms_json": json.dumps([
+        state.update({"multi_initial_date_spoken": "yes", "proposed_date_words": "tomorrow", "proposed_terms_json": json.dumps([
             {"product_id": "p1", "amount": 300},
             {"product_id": "p2", "amount": 500},
         ])})
@@ -124,7 +124,7 @@ class InitialMultiDateTests(unittest.TestCase):
 
     def test_invalid_identified_day_keeps_captured_amount_for_correction(self) -> None:
         state = self.prepared()
-        state.update({"proposed_date_words": "Saturday", "proposed_terms_json": json.dumps([
+        state.update({"multi_initial_date_spoken": "yes", "proposed_date_words": "Saturday", "proposed_terms_json": json.dumps([
             {"product_id": "p1", "amount": 300},
             {"product_id": "p2", "amount": 500},
         ])})
@@ -148,7 +148,7 @@ class InitialMultiDateTests(unittest.TestCase):
 
     def test_explicit_product_with_invalid_day_asks_for_valid_day(self) -> None:
         state = self.prepared(renamed=True)
-        state.update({"proposed_date_words": "Saturday", "multi_initial_date_product_id": "acct-A"})
+        state.update({"multi_initial_date_spoken": "yes", "proposed_date_words": "Saturday", "multi_initial_date_product_id": "acct-A"})
         run_code(self.workflow, "multi_advance", state)
         self.assertEqual("clarify", state["multi_next"])
         self.assertEqual({"product_id": "acct-A", "invalid_date": "Saturday"},
@@ -159,7 +159,7 @@ class InitialMultiDateTests(unittest.TestCase):
 
     def test_shared_day_still_applies_to_all_products(self) -> None:
         state = self.prepared()
-        state["multi_common_date_words"] = "tomorrow"
+        state.update({"multi_initial_date_spoken": "yes", "multi_common_date_words": "tomorrow"})
         run_code(self.workflow, "multi_advance", state)
         self.assertEqual("confirm", state["multi_next"])
         self.assertEqual({"p1", "p2", "p3"}, set(json.loads(state["multi_terms_json"])))

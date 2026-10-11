@@ -1074,7 +1074,28 @@ except Exception:
 """
 
 
-_CLEAR_CONFIRMATION_CODE = """try:
+_CLEAR_CONFIRMATION_CODE = """import json
+import re
+try:
+    if str(vars.get('multi_confirmation_fragment') or '') == 'yes':
+        name = re.sub(r'\\s+', ' ', str(vars.get('multi_correction_product') or '').lower().replace('_', ' ')).strip()
+        products = json.loads(str(vars.get('product_json') or '[]'))
+        terms = json.loads(str(vars.get('multi_terms_json') or '{}'))
+        matches = []
+        for product in products:
+            pid = str(product.get('product_id') or '')
+            if pid not in terms:
+                continue
+            label = re.sub(r'\\s+', ' ', str(product.get('label') or '').lower().replace('_', ' ')).strip()
+            aliases = {pid.lower(), label, label.split(' ending ')[0]}
+            if label.startswith('credit card'):
+                aliases.add('card')
+            if name and name in aliases:
+                matches.append(pid)
+        if len(matches) == 1:
+            vars['multi_correction_product'] = matches[0]
+        else:
+            vars['multi_confirmation_fragment'] = 'no'
     vars['confirmation_status'] = 'changed'
     vars['validation_state'] = 'invalid'
     vars['proposal_validation_state'] = 'invalid'
@@ -1468,13 +1489,13 @@ try:
     known_ids = set(str(item.get('product_id') or '') for item in products if isinstance(item, dict))
     raw = vars.get('proposed_terms_json') or '[]'
     proposals = json.loads(raw) if isinstance(raw, str) else raw
-    dated = isinstance(proposals, list) and any(
+    dated = str(vars.get('multi_initial_date_spoken') or '') == 'yes' and isinstance(proposals, list) and any(
         isinstance(item, dict) and str(item.get('product_id') or '') in known_ids and
         str(item.get('date') or item.get('date_words') or
                                        item.get('date_phrase') or item.get('raw_date') or '').strip()
         for item in proposals)
-    shared_day = bool(str(vars.get('multi_common_date_words') or '').strip())
-    individual_day = bool(str(vars.get('proposed_date_words') or '').strip())
+    shared_day = str(vars.get('multi_initial_date_spoken') or '') == 'yes' and bool(str(vars.get('multi_common_date_words') or '').strip())
+    individual_day = str(vars.get('multi_initial_date_spoken') or '') == 'yes' and bool(str(vars.get('proposed_date_words') or '').strip())
     disclosure = str(vars.get('multi_disclosure_state') or '')
     vars['multi_all_today_next'] = ('advance' if status in ('yes', 'no') or dated or shared_day or individual_day or
                                    disclosure in ('hardship', 'incomplete') else 'clarify')
@@ -1514,13 +1535,14 @@ try:
     known_ids = set(str(item.get('product_id') or '') for item in products if isinstance(item, dict))
     raw = vars.get('proposed_terms_json') or '[]'
     proposals = json.loads(raw) if isinstance(raw, str) else raw
-    dated = isinstance(proposals, list) and any(
+    dated = str(vars.get('multi_initial_date_spoken') or '') == 'yes' and isinstance(proposals, list) and any(
         isinstance(item, dict) and str(item.get('product_id') or '') in known_ids and
         str(item.get('date') or item.get('date_words') or
                                        item.get('date_phrase') or item.get('raw_date') or '').strip()
         for item in proposals)
     vars['multi_account_fact_next'] = ('advance' if str(vars.get('all_today_status') or '') in ('yes', 'no') or
-                                       dated or str(vars.get('multi_common_date_words') or '').strip() else 'followup')
+                                       dated or (str(vars.get('multi_initial_date_spoken') or '') == 'yes' and
+                                                 str(vars.get('multi_common_date_words') or '').strip()) else 'followup')
 except Exception:
     vars['multi_account_fact_answer'] = 'I cannot confirm that account detail right now.'
     vars['multi_account_fact_next'] = 'followup'
@@ -1572,6 +1594,12 @@ try:
             words = value.lower().strip()
             if words in ('full', 'full amount', 'past due', 'past_due'):
                 return due
+            if words.startswith('full '):
+                try:
+                    named_full = parse_payment_amount(words[5:])
+                except ValueError:
+                    return None
+                return due if named_full == due else None
             if words in ('floor', 'minimum', 'minimum payment', 'instalment', 'installment'):
                 return floor
             try:
@@ -1683,14 +1711,19 @@ try:
                 if pid not in notes:
                     terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=today)
         else:
-            common = str(vars.get('multi_common_date_words') or '').strip()
+            date_spoken = str(vars.get('multi_initial_date_spoken') or '') == 'yes'
+            common = str(vars.get('multi_common_date_words') or '').strip() if date_spoken else ''
             if common:
                 for pid, item in product_by_id.items():
                     if pid not in notes:
                         terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=common)
-            add_terms(vars.get('proposed_terms_json') or '')
-            raw_day = str(vars.get('proposed_date_words') or '').strip()
             proposal_items = parsed(vars.get('proposed_terms_json') or '')
+            if not date_spoken:
+                proposal_items = [dict((key, value) for key, value in item.items()
+                                       if key not in ('date', 'date_words', 'date_phrase', 'raw_date'))
+                                  for item in proposal_items if isinstance(item, dict)]
+            add_terms(proposal_items)
+            raw_day = str(vars.get('proposed_date_words') or '').strip() if date_spoken else ''
             has_structured_day = any(
                 isinstance(item, dict) and str(item.get('date_phrase') or item.get('date_words') or
                                                    item.get('raw_date') or item.get('date') or '').strip()
@@ -1807,6 +1840,22 @@ try:
                 add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
             if pid not in terms and pid not in notes:
                 notes[pid] = __HARDSHIP_REASON__
+        elif action in ('proposal', 'unclear') and any(
+                resolve_pid(item.get('product_id')) not in ('', pid)
+                for item in parsed(vars.get('multi_reply_terms_json') or '') if isinstance(item, dict)):
+            other_ids = [resolve_pid(item.get('product_id'))
+                         for item in parsed(vars.get('multi_reply_terms_json') or '') if isinstance(item, dict)]
+            add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
+            other = next((other for other in other_ids
+                          if other not in ('', pid) and other not in terms and other not in notes
+                          and other in partial), '')
+            if other:
+                pid = other
+                vars['multi_focus_product_id'] = other
+                vars['multi_offer_stage'] = '1'
+                next_step = 'clarify'
+            elif pid not in terms and pid not in notes:
+                next_step = 'clarify'
         elif str(vars.get('multi_offer_fact_question') or '') == 'yes' and action not in ('paid', 'dispute', 'hardship'):
             next_step = 'question'
         elif action == 'accepted' and phase == 'offer':
@@ -2114,6 +2163,7 @@ _MULTI_REVISE_CODE = """import json
 import datetime
 import re
 __PAYMENT_DATE_PARSER__
+parts = {}
 try:
     turns = int(vars.get('multi_correction_turns') or 0) + 1
 except Exception:
@@ -2139,6 +2189,8 @@ try:
         for pid, product in product_by_id.items():
             label = re.sub(r'\\s+', ' ', str(product.get('label') or '').lower().replace('_', ' ')).strip()
             aliases = {pid.lower(), label, label.split(' ending ')[0]}
+            if label.startswith('credit card'):
+                aliases.add('card')
             suffix = re.search(r'\\bending (\\d{4})\\b', label)
             if suffix:
                 digits = suffix.group(1)
@@ -2217,20 +2269,39 @@ try:
             prompt = 'What amount do you want to pay for that product?'
         vars['multi_correction_prompt'] = prompt
         vars['multi_next'] = 'service_error' if turns >= 10 else 'clarify'
-except Exception:
-    try:
-        attempts = int(vars.get('multi_correction_attempts') or 0) + 1
-    except Exception:
-        attempts = 1
-    vars['multi_correction_attempts'] = str(attempts)
-    vars['multi_correction_parts_json'] = '{}'
-    vars['multi_correction_prompt'] = 'Please tell me one product, its amount, and the exact day and month you want to pay.'
-    vars['multi_next'] = 'service_error' if attempts >= 3 or turns >= 10 else 'clarify'
+except Exception as error:
+    if str(error) == 'No corrected terms':
+        pid = str(parts.get('product_id') or '')
+        if not pid:
+            prompt = 'Which product do you want to change?'
+        elif 'amount' in parts:
+            prompt = 'What exact day and month do you want to pay for that product?'
+        else:
+            prompt = 'What amount and exact day and month do you want to pay for that product?'
+        question = str(vars.get('multi_correction_question_kind') or '')
+        if question == 'payment_posting':
+            prompt = 'Payments can take one business day to appear. ' + prompt
+        elif question == 'repeat_terms':
+            prompt = 'I will read the corrected terms back before recording anything. ' + prompt
+        elif question == 'other':
+            prompt = 'I do not have that information. ' + prompt
+        vars['multi_correction_prompt'] = prompt
+        vars['multi_next'] = 'service_error' if turns >= 10 else 'clarify'
+    else:
+        try:
+            attempts = int(vars.get('multi_correction_attempts') or 0) + 1
+        except Exception:
+            attempts = 1
+        vars['multi_correction_attempts'] = str(attempts)
+        vars['multi_correction_parts_json'] = '{}'
+        vars['multi_correction_prompt'] = 'Please tell me one product, its amount, and the exact day and month you want to pay.'
+        vars['multi_next'] = 'service_error' if attempts >= 3 or turns >= 10 else 'clarify'
 finally:
     vars['multi_corrected_terms_json'] = ''
     vars['multi_correction_product'] = ''
     vars['multi_correction_amount_words'] = ''
     vars['multi_correction_date_words'] = ''
+    vars['multi_correction_question_kind'] = 'none'
     vars['multi_confirmation_fragment'] = 'no'
 """
 
@@ -2602,6 +2673,8 @@ except Exception:
                                                          "description": "For a question about one product, return its exact product ID from {{account_facts}} only when the caller identifies it unambiguously by type, label, or card suffix. Leave empty for a product-list question, no question, or an ambiguous product. Do not infer a product from the current offer."},
                                                         _enum("all_today_status", ["yes", "no", "other"],
                                                               "Only for a multi-product account: yes if the latest caller answer accepts paying ALL products today; no if it rejects paying all today, including 'I cannot pay all three today'; other for factual product questions or unrelated replies. A no here is only the timing answer and does not finally refuse any individual product."),
+                                                        _enum("multi_initial_date_spoken", ["yes", "no"],
+                                                              "yes only if the latest caller answer explicitly proposes an exact PAYMENT day for at least one product or for all products. no if it only says no to paying all today, even when the all-today question contained the word today, or if it names only an amount. Never copy the question's date into a promise."),
                                                         _enum("multi_disclosure_state", ["incomplete", "hardship", "none"],
                                                               "For a multi-product account, classify ONLY the latest caller answer. hardship only when the caller clearly mentions illness, a death in the family, or job loss. incomplete when the caller trails off mid-disclosure and the missing words could determine whether a hardship rule applies; do not infer hardship or an ordinary refusal from an unfinished subject or clause. none when the answer is complete, including an ordinary no to paying all today or an unrelated statement such as losing a card. Do not treat inability to pay right now alone as hardship.",
                                                               min_confidence=0.55),
@@ -2939,7 +3012,7 @@ except Exception:
         nodes["multi_correction"] = _conversation(
             "multi_correction", "The fixed correction request was spoken on entry. Wait for the caller's answer. "
             "Do not speak, suggest, restate, or confirm a payment date in this node; the code must validate it first. "
-            "Keep all other proposed terms. Accept a product, amount, and day in separate turns; ask only for the missing part shown by the workflow. No tool call is allowed in this node.",
+            "Keep all other proposed terms. Accept a product, amount, and day in separate turns; ask only for the missing part shown by the workflow. A factual question is answered by the workflow without discarding an incomplete correction. No tool call is allowed in this node.",
             opening="{{multi_correction_prompt}}",
             extraction=[{"name": "multi_corrected_terms_json", "type": "string", "min_confidence": 0.55,
                          "description": "If the latest answer gives one or more complete corrections, return a JSON array string of product_id, amount if spoken, and RAW date words. For an incomplete answer, leave empty and fill the separate correction fields instead. Never invent missing parts."},
@@ -2949,6 +3022,8 @@ except Exception:
                          "description": "Copy only a NEW proposed payment amount explicitly spoken in the latest correction answer. Leave empty for an amount mentioned as already paid, past-due account information, or a disputed debt; those are claims, not corrected promise amounts. Do not use the previous amount as an extracted answer."},
                         {"name": "multi_correction_date_words", "type": "string", "min_confidence": 0.55,
                          "description": "Copy only the exact payment day or date explicitly spoken in the latest correction answer, in raw words. Leave empty if no date was spoken; do not reuse or convert a prior date."},
+                        _enum("multi_correction_question_kind", ["payment_posting", "repeat_terms", "other", "none"],
+                              "payment_posting if the caller asks when an already-made payment may appear; repeat_terms if they ask to hear the final corrected promises; other for another factual question; none if no factual question. A question is not an invalid correction attempt."),
                         _enum("multi_correction_claim_action", ["paid", "dispute", "none"],
                               "paid if the caller says the CURRENT overdue amount for a product was already paid; dispute if they deny owning a product, say they never had it, or that it was closed or paid off in the past. Such claims take priority over any correction amount, including a number quoted in the claim. none for a genuine promise correction."),
                         {"name": "multi_correction_claim_product_id", "type": "string", "min_confidence": 0.55,
