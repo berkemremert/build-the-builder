@@ -353,6 +353,29 @@ def _synthesize_openapi(documents: list[Path], call_model: Any, trace: Trace) ->
     return result
 
 
+def _json_tool_operations(openapi: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Keep operations the JSON API-call transport can send as conversation tools."""
+    filtered = json.loads(json.dumps(openapi))
+    omitted: list[str] = []
+    for path, path_item in list((filtered.get("paths") or {}).items()):
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in list(path_item.items()):
+            if method.lower() not in {"get", "post", "put", "patch", "delete"} or not isinstance(operation, dict):
+                continue
+            body = operation.get("requestBody") or {}
+            content = body.get("content") if isinstance(body, dict) else None
+            if isinstance(content, dict) and content and "application/json" not in content:
+                del path_item[method]
+                omitted.append(f"{method.upper()} {path}")
+        if not any(method.lower() in {"get", "post", "put", "patch", "delete"}
+                   for method in path_item):
+            del filtered["paths"][path]
+    if not filtered.get("paths"):
+        raise ValueError("Contract has no JSON-compatible conversational operations")
+    return filtered, omitted
+
+
 def _mock_openapi(openapi: dict[str, Any], mock_url: str) -> dict[str, Any]:
     """Route every operation to the organizer's mock service, including overrides."""
     url = mock_url.rstrip("/")
@@ -593,7 +616,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 source_openapi_path = out / f"{args.slot}.derived.openapi.json"
                 source_openapi_path.write_text(json.dumps(source_openapi, ensure_ascii=False, indent=2) + "\n",
                                                encoding="utf-8")
-            openapi = _mock_openapi(source_openapi, mock_url)
+            conversational_openapi, omitted = _json_tool_operations(source_openapi)
+            if omitted:
+                trace.write("case_non_json_operations_omitted", operations=omitted)
+            openapi = _mock_openapi(conversational_openapi, mock_url)
             openapi_path = out / f"{args.slot}.effective.openapi.json"
             openapi_path.write_text(json.dumps(openapi, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             trace.write("case_discovered", folder=str(folder), documents=[str(path) for path in source_documents],

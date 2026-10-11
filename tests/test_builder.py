@@ -39,6 +39,19 @@ def _fixture_model_call(prompt: str, *, purpose: str) -> dict:
 
 
 class BuilderAcceptanceTests(unittest.TestCase):
+    def test_case_omits_non_json_auth_operation_from_conversation_contract(self) -> None:
+        api = {"openapi": "3.0.3", "paths": {
+            "/oauth2/token": {"post": {"operationId": "token", "requestBody": {"content": {
+                "application/x-www-form-urlencoded": {"schema": {"type": "object"}}}},
+                "responses": {"200": {"description": "token"}}}},
+            "/cards": {"post": {"operationId": "cards", "requestBody": {"content": {
+                "application/json": {"schema": {"type": "object"}}}},
+                "responses": {"200": {"description": "cards"}}}}}}
+        filtered, omitted = builder._json_tool_operations(api)
+        self.assertEqual(["POST /oauth2/token"], omitted)
+        self.assertEqual(["/cards"], list(filtered["paths"]))
+        self.assertIn("/oauth2/token", api["paths"])
+
     def test_case_sources_follow_dates_and_summarize_large_test_fixture(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-sources-") as directory:
             folder = Path(directory) / "case"
