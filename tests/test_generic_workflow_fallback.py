@@ -85,6 +85,7 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         self.assertEqual(["lookupAccount"], [tool["function"]["name"]
                                                for tool in workflow["nodes"]["service"]["tools"]])
         send = workflow["nodes"]["commit"]["tools"][0]
+        self.assertGreater(send["config"]["timeoutMs"], 12000)
         data_fields = send["function"]["parameters"]["properties"]["body"]["properties"]["data"]["properties"]
         self.assertEqual("{{customerNumber}}", data_fields["customerNo"]["default"])
         self.assertEqual("mail", data_fields["channel"]["default"])
@@ -105,6 +106,29 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         exposed = [tool["function"]["name"] for node in workflow["nodes"].values()
                    for tool in node.get("tools", []) + node.get("pre_actions", [])]
         self.assertNotIn("token", exposed)
+
+    def test_write_requires_confirmation_of_its_own_action_and_single_attempt(self):
+        workflow = build_generic_workflow(_policy(), _spec())
+        write = workflow["nodes"]["commit"]["tools"][0]
+        source = write["pre_process_code"]
+        self.assertIn("confirmed_write_action", str(workflow["nodes"]["service"]["extraction_schema"]))
+
+        for state in ({}, {"explicit_action_confirmation": "yes",
+                           "confirmed_write_action": "anotherWrite"}):
+            config = {"url": "https://bank.example.test/arrangements", "body": {"amount": 10}}
+            with self.assertRaisesRegex(ValueError, "this exact action"):
+                exec(source, {"config": config, "vars": state})
+            self.assertEqual("", config["url"])
+            self.assertEqual({}, config["body"])
+            self.assertNotIn("generic_write_attempted_action", state)
+
+        state = {"explicit_action_confirmation": "yes", "confirmed_write_action": "saveArrangement"}
+        config = {"url": "https://bank.example.test/arrangements", "body": {"amount": 10}}
+        exec(source, {"config": config, "vars": state})
+        self.assertEqual("saveArrangement", state["generic_write_attempted_action"])
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            exec(source, {"config": config, "vars": state})
+        self.assertEqual("", config["url"])
 
     def test_describes_exact_operation_ids_and_urls(self):
         operations = describe_contract(_spec(), _policy())

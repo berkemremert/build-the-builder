@@ -293,7 +293,7 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
         for name, spec in (schema.get("properties") or {}).items()
     }
     result = {
-        "type": "function", "config": {"timeoutMs": 12000, "maxRetries": 0},
+        "type": "function", "config": {"timeoutMs": 20000, "maxRetries": 0},
         "function": {"name": operation.name, "handler": "__function__:api_call",
                      "description": rule or operation.source.get("description") or operation.source.get("summary")
                      or f"Call {operation.name} only under the source policy conditions.",
@@ -326,6 +326,8 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
             + check_source +
             "    vars['generic_write_result'] = 'confirmed' if ok else 'unknown'\n"
             f"    vars['generic_recorded_action'] = {operation.name!r} if ok else ''\n"
+            "    vars['explicit_action_confirmation'] = 'unknown'\n"
+            "    vars['confirmed_write_action'] = ''\n"
             "    data['what_to_do_next'] = ('The bank confirmed the action. Follow the exact source policy for confirmation.' "
             "if ok else 'The action is unconfirmed. Do not retry or claim success.')\n"
             "except Exception:\n"
@@ -339,6 +341,19 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
             "        vars['generic_identity_verified'] = 'true'\n"
             "except Exception:\n"
             "    pass\n"
+        )
+    if operation.role == "write":
+        result["pre_process_code"] = (
+            "if (str(vars.get('explicit_action_confirmation') or '').lower() != 'yes' or\n"
+            f"        vars.get('confirmed_write_action') != {operation.name!r}):\n"
+            "    config['url'] = ''\n"
+            "    config['body'] = {}\n"
+            "    raise ValueError('Bank write requires confirmation of this exact action')\n"
+            "if vars.get('generic_write_attempted_action'):\n"
+            "    config['url'] = ''\n"
+            "    config['body'] = {}\n"
+            "    raise ValueError('Bank write was already attempted in this call')\n"
+            f"vars['generic_write_attempted_action'] = {operation.name!r}\n"
         )
     return result
 
@@ -666,7 +681,13 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             extraction=[{"name": "explicit_action_confirmation", "type": "string",
                          "enum_values": ["yes", "no", "unknown"],
                          "description": "Yes only when the customer explicitly confirms the exact proposed bank action.",
-                         "min_confidence": 0.9}] + reason_extraction("no_promise"),
+                         "min_confidence": 0.9}]
+            + ([{"name": "confirmed_write_action", "type": "string",
+                 "enum_values": [tool["function"]["name"] for tool in write_tools],
+                 "description": "The single exact bank write action the customer explicitly confirmed. "
+                                "Leave empty when no exact action is confirmed.",
+                 "min_confidence": 0.9}] if write_tools else [])
+            + reason_extraction("no_promise"),
             transitions=([_when("explicit_action_confirmation", "yes", "commit",
                                 "Customer explicitly confirmed the action")] if write_tools else [])
             + [_when("explicit_action_confirmation", "no", "farewell", "No action authorized")],
