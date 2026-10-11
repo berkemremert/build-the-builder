@@ -26,7 +26,9 @@ async function configuredBank(implementation, env) {
       typeof implementation.loadContract !== 'function' ||
       typeof implementation.loadData !== 'function' ||
       typeof implementation.handleBankRequest !== 'function' ||
-      typeof env?.CUSTOMER_STATE?.getByName !== 'function') {
+      typeof env?.CUSTOMER_STATE?.getByName !== 'function' ||
+      typeof env?.MOCK_STATE_SCOPE !== 'string' ||
+      !env.MOCK_STATE_SCOPE.trim()) {
     return null;
   }
   const [contract, data] = await Promise.all([

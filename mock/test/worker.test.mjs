@@ -5,7 +5,7 @@ import worker, { createWorker } from '../src/index.mjs';
 const fakeState = { getByName: () => ({}) };
 const call = (app, path, options = {}, env = {}) => app.fetch(
   new Request(`https://mock.example${path}`, options),
-  { CUSTOMER_STATE: fakeState, ...env }, {},
+  { CUSTOMER_STATE: fakeState, MOCK_STATE_SCOPE: 'validation', ...env }, {},
 );
 
 test('scaffold is alive but refuses readiness and bank calls', async () => {
@@ -71,6 +71,7 @@ test('optional base prefix maps the appended contract path exactly', async () =>
   assert.equal((await call(app, '/mockish/get_account', { method: 'POST' }, env)).status, 404);
   assert.equal((await call(app, '/readyz', {}, { MOCK_BASE_PATH: 'mock' })).status, 503);
   assert.equal((await call(app, '/readyz', {}, { CUSTOMER_STATE: null })).status, 503);
+  assert.equal((await call(app, '/readyz', {}, { MOCK_STATE_SCOPE: '' })).status, 503);
 });
 
 test('missing or failing hooks never make the bank service ready', async () => {

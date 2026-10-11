@@ -16,7 +16,9 @@ it('keeps writes across new calls and a Durable Object eviction', async () => {
   expect(await secondRequest.read('promises')).toEqual([{ amount: 120 }]);
   expect(await secondRequest.read('closed')).toEqual({ outcome: 'complete' });
 
-  await evictDurableObject(env.CUSTOMER_STATE.getByName('customer:durable-customer'));
+  await evictDurableObject(env.CUSTOMER_STATE.getByName(
+    JSON.stringify(['customer-state-v1', env.MOCK_STATE_SCOPE, 'durable-customer']),
+  ));
   const afterEviction = createCustomerStateService(env).forCustomer('durable-customer');
   expect(await afterEviction.read('attempts')).toBe(1);
   expect(await afterEviction.increment('attempts')).toBe(2);
@@ -63,4 +65,20 @@ it('keeps concurrent counter updates atomic for one customer', async () => {
   const customer = createCustomerStateService(env).forCustomer('parallel-customer');
   await Promise.all(Array.from({ length: 12 }, () => customer.increment('attempts')));
   expect(await customer.read('attempts')).toBe(12);
+});
+
+it('keeps validation and scored scopes separate for the same customer ID', async () => {
+  const binding = env.CUSTOMER_STATE;
+  const validation = createCustomerStateService({
+    CUSTOMER_STATE: binding, MOCK_STATE_SCOPE: 'validation-test',
+  }).forCustomer('shared-customer');
+  const scored = createCustomerStateService({
+    CUSTOMER_STATE: binding, MOCK_STATE_SCOPE: 'scored-test',
+  }).forCustomer('shared-customer');
+  await validation.increment('attempts');
+  expect(await validation.read('attempts')).toBe(1);
+  expect(await scored.read('attempts')).toBeNull();
+  await scored.increment('attempts');
+  expect(await scored.read('attempts')).toBe(1);
+  expect(await validation.read('attempts')).toBe(1);
 });

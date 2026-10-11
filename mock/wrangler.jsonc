@@ -5,7 +5,8 @@
   "compatibility_date": "2026-10-11",
   "workers_dev": true,
   "vars": {
-    "MOCK_BASE_PATH": ""
+    "MOCK_BASE_PATH": "",
+    "MOCK_STATE_SCOPE": "validation"
   },
   "durable_objects": {
     "bindings": [
