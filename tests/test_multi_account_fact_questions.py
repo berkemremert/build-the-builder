@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from policy_compiler import compile_policy  # noqa: E402
-from workflow_generator import build_workflow  # noqa: E402
+from workflow_generator import _all_today_question, build_workflow  # noqa: E402
 
 
 def run_code(workflow: dict, name: str, state: dict) -> None:
@@ -66,7 +66,7 @@ class MultiAccountFactQuestionTests(unittest.TestCase):
         run_code(self.workflow, "multi_account_fact_answer", state)
         self.assertEqual(expected, state["multi_account_fact_answer"])
         self.assertEqual("no", state["multi_account_fact_question"])
-        self.assertEqual("Can you pay all of these products today?",
+        self.assertEqual("Can you pay all of them today?",
                          self.workflow["nodes"]["multi_account_followup"]["on_enter"]["text"].split("}} ")[1])
         self.assertEqual("{}", state["pending_note_reasons_json"])
 
@@ -83,7 +83,9 @@ class MultiAccountFactQuestionTests(unittest.TestCase):
         state.update({"multi_account_fact_question": "no", "all_today_status": "no",
                       "multi_full_too_much_ids_json": "[]", "proposed_terms_json": "[]",
                       "pending_note_reasons_json": '{"p1":"refused","p2":"refused","p3":"refused"}'})
-        self.assertEqual("multi_advance", route(self.workflow["nodes"]["multi_account_followup"], state))
+        self.assertEqual("multi_all_today_gate", route(self.workflow["nodes"]["multi_account_followup"], state))
+        run_code(self.workflow, "multi_all_today_gate", state)
+        self.assertEqual("advance", state["multi_all_today_next"])
         run_code(self.workflow, "multi_advance", state)
         self.assertEqual(("p1", "1", "offer"),
                          (state["multi_focus_product_id"], state["multi_offer_stage"], state["multi_next"]))
@@ -124,6 +126,63 @@ class MultiAccountFactQuestionTests(unittest.TestCase):
         run_code(self.workflow, "multi_account_fact_answer", state)
         self.assertNotIn("multi_terms_json", state)
         self.assertNotIn("multi_notes_json", state)
+
+    def test_unanswered_all_today_question_never_selects_an_offer(self) -> None:
+        state = self.prepared("LONG-04")
+        state.update({"multi_account_fact_question": "no", "all_today_status": "other",
+                      "discussion_action": "continue", "proposed_terms_json": "[]",
+                      "pending_note_reasons_json": '{"p1":"refused"}'})
+        for node_name in ("account_discussion", "multi_all_today_clarify", "multi_account_followup"):
+            with self.subTest(node=node_name):
+                self.assertEqual("multi_all_today_gate", route(self.workflow["nodes"][node_name], state))
+                run_code(self.workflow, "multi_all_today_gate", state)
+                self.assertEqual("clarify", state["multi_all_today_next"])
+                self.assertEqual("multi_all_today_clarify",
+                                 route(self.workflow["nodes"]["multi_all_today_gate"], state))
+                self.assertNotIn("multi_offer_stage", state)
+                self.assertNotIn("multi_notes_json", state)
+
+    def test_dated_proposal_advances_even_without_yes_no(self) -> None:
+        state = self.prepared("LONG-05")
+        state.update({"multi_account_fact_question": "no", "all_today_status": "other",
+                      "discussion_action": "proposal_ready",
+                      "proposed_terms_json": '[{"product_id":"p1","amount":400,"date":"20 October"}]'})
+        self.assertEqual("multi_all_today_gate", route(self.workflow["nodes"]["account_discussion"], state))
+        run_code(self.workflow, "multi_all_today_gate", state)
+        self.assertEqual("advance", state["multi_all_today_next"])
+        self.assertEqual("multi_advance", route(self.workflow["nodes"]["multi_all_today_gate"], state))
+
+    def test_incomplete_or_unassociated_terms_do_not_start_an_offer(self) -> None:
+        state = self.prepared("LONG-05")
+        state.update({"all_today_status": "other", "multi_common_date_words": ""})
+        for proposal in ('[{"product_id":"p1","amount":400}]',
+                         '[{"product_id":"unknown","date":"20 October"}]',
+                         'not json'):
+            with self.subTest(proposal=proposal):
+                state["proposed_terms_json"] = proposal
+                run_code(self.workflow, "multi_all_today_gate", state)
+                self.assertEqual("clarify", state["multi_all_today_next"])
+
+    def test_mixed_fact_question_and_payment_answer_retains_both(self) -> None:
+        state = self.prepared("LONG-04")
+        state.update({"multi_account_fact_question": "yes", "multi_account_fact_kind": "past_due",
+                      "multi_account_fact_product_id": "p2", "all_today_status": "no",
+                      "proposed_terms_json": '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})
+        self.assertEqual("multi_account_fact_answer", route(self.workflow["nodes"]["account_discussion"], state))
+        run_code(self.workflow, "multi_account_fact_answer", state)
+        self.assertEqual("advance", state["multi_account_fact_next"])
+        self.assertIn("640.00", state["multi_account_fact_answer"])
+        self.assertEqual("multi_account_fact_notice",
+                         route(self.workflow["nodes"]["multi_account_fact_answer"], state))
+        self.assertTrue(self.workflow["nodes"]["multi_account_fact_notice"]["passthrough"])
+        self.assertIn("Friday 16 October", state["proposed_terms_json"])
+
+    def test_all_today_reask_uses_source_object(self) -> None:
+        self.assertEqual("Can you pay all of them today?",
+                         _all_today_question({"raw_brief": (ROOT / "briefs" / "brief-b.md").read_text()}))
+        self.assertEqual("Can you pay all the products today?",
+                         _all_today_question({"raw_brief": "First ask whether the caller can pay all the products today."}))
+        self.assertIsNone(_all_today_question({"raw_brief": "No all-today question is specified."}))
 
 
 if __name__ == "__main__":

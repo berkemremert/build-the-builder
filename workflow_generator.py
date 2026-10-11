@@ -1456,10 +1456,13 @@ except Exception:
 _MULTI_ALL_TODAY_GATE_CODE = """import json
 try:
     status = str(vars.get('all_today_status') or '')
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    known_ids = set(str(item.get('product_id') or '') for item in products if isinstance(item, dict))
     raw = vars.get('proposed_terms_json') or '[]'
     proposals = json.loads(raw) if isinstance(raw, str) else raw
     dated = isinstance(proposals, list) and any(
-        isinstance(item, dict) and str(item.get('date') or item.get('date_words') or
+        isinstance(item, dict) and str(item.get('product_id') or '') in known_ids and
+        str(item.get('date') or item.get('date_words') or
                                        item.get('date_phrase') or item.get('raw_date') or '').strip()
         for item in proposals)
     shared_day = bool(str(vars.get('multi_common_date_words') or '').strip())
@@ -1499,10 +1502,12 @@ try:
         else:
             answer = 'I do not have that information.'
     vars['multi_account_fact_answer'] = answer
+    known_ids = set(str(item.get('product_id') or '') for item in products if isinstance(item, dict))
     raw = vars.get('proposed_terms_json') or '[]'
     proposals = json.loads(raw) if isinstance(raw, str) else raw
     dated = isinstance(proposals, list) and any(
-        isinstance(item, dict) and str(item.get('date') or item.get('date_words') or
+        isinstance(item, dict) and str(item.get('product_id') or '') in known_ids and
+        str(item.get('date') or item.get('date_words') or
                                        item.get('date_phrase') or item.get('raw_date') or '').strip()
         for item in proposals)
     vars['multi_account_fact_next'] = ('advance' if str(vars.get('all_today_status') or '') in ('yes', 'no') or
@@ -2276,7 +2281,7 @@ except Exception:
                                                      _enum("single_product_reason", note_codes or ["paid", "dispute", "hardship", "refused", "service_error"],
                                                            "For a one-product account only, classify a final paid, dispute, hardship, or refused result; do not fill while negotiating a promise."),
                                                      *([_enum("multi_account_fact_question", ["yes", "no"],
-                                                              "For a verified multi-product account: yes if the LATEST caller answer asks to repeat the product list or asks a factual question about a product name, card suffix, past-due amount, or days late. Keep yes after several such questions; a product question is not a payment refusal and must not consume a persuasion attempt. Also yes for a direct digital-assistant question. no for a payment answer, including 'I cannot pay all three today'."),
+                                                              "For a verified multi-product account: yes if the LATEST caller answer asks to repeat the product list or asks any factual question about the account, a product name, card suffix, past-due amount, or days late. Keep yes after several such questions; a product question is not a payment refusal and must not consume a persuasion attempt. Also yes for a direct digital-assistant question. no for a payment answer, including 'I cannot pay all three today'."),
                                                         _enum("multi_account_fact_kind", ["list", "card_suffix", "past_due", "days_late", "digital_assistant", "other", "none"],
                                                               "For the latest verified account-fact question, identify the requested fact. list means repeat all product names in get_account order. card_suffix means identify the card ending digits or which product is the named card. past_due means the exact overdue amount. days_late means the number of days late. digital_assistant means whether you are a digital assistant. other means an unrelated question; none means no question. Never turn a payment answer into a question."),
                                                         {"name": "multi_account_fact_product_id", "type": "string", "min_confidence": 0.55,
@@ -2328,7 +2333,7 @@ except Exception:
         nodes["multi_account_fact_notice"]["passthrough_default_transition"] = "multi_advance"
         nodes["multi_account_followup"] = _conversation(
             "multi_account_followup",
-            "The fixed answer to the caller's verified account question was spoken on entry from get_account facts. "
+            "Speak the prepared answer {{multi_account_fact_answer}} from get_account facts and ask the source policy's all-products-today question if it has not already been spoken on entry. "
             "Wait for the caller's latest reply. Answer another factual product question before any payment offer. "
             "A no to paying all products today begins the ordered per-product discussion; it does not refuse any individual product. "
             "Do not make a persuasion offer in this node. No tool call is allowed.",

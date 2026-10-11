@@ -646,7 +646,11 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                       "pending_note_reasons_json": "{}", "write_index": "0"})
         advance = _code_node_writing(workflow, "multi_offer_stage")
         offer = _code_node_writing(workflow, "multi_offer_state")
-        self.assertEqual(advance, _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        self.assertEqual("multi_all_today_gate",
+                         _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        _run_code_node(workflow, "multi_all_today_gate", state)
+        self.assertEqual("advance", state["multi_all_today_next"])
+        self.assertEqual(advance, _first_engine_route(workflow["nodes"]["multi_all_today_gate"], state))
         _run_code_node(workflow, advance, state)
         self.assertEqual("offer", state["multi_next"])
         self.assertEqual("p2", state["multi_focus_product_id"])
