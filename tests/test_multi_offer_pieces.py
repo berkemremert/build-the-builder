@@ -30,10 +30,10 @@ class MultiOfferPiecesTests(unittest.TestCase):
                                  str(ROOT / "briefs" / "brief-b.md")], str(api_path), None)
         cls.workflow = build_workflow(policy, api)
 
-    def prepared(self) -> dict:
+    def prepared(self, now: str | None = None) -> dict:
         case = next(item for item in json.loads((ROOT / "long-call-stress.json").read_text())
                     if item["id"] == "LONG-05")
-        state = {"now": case["variables"]["now"], "account_products": [
+        state = {"now": now or case["variables"]["now"], "account_products": [
             dict(item, product_id=f"p{index}") for index, item in enumerate(case["products"], 1)
         ]}
         run_code(self.workflow, "prepare_account", state)
@@ -232,6 +232,47 @@ class MultiOfferPiecesTests(unittest.TestCase):
         self.assertEqual({"product_id": "p1", "amount": 400.0, "date": "tomorrow"},
                          json.loads(state["multi_terms_json"])["p1"])
         self.assertEqual("p2", state["multi_focus_product_id"])
+
+    def test_invalid_holiday_day_is_not_offered_with_full_amount(self) -> None:
+        state = self.prepared("2026-10-25T11:00")
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"credit card",'
+                                                '"date":"tomorrow"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(("p1", "1", "clarify"),
+                         (state["multi_focus_product_id"], state["multi_offer_stage"], state["multi_next"]))
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertEqual({"product_id": "p1", "invalid_date": "tomorrow"},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertIn("exact business day", state["multi_clarify_prompt"])
+        self.assertNotIn("tomorrow", state["multi_clarify_prompt"])
+        self.assertNotIn("510.00", state["multi_clarify_prompt"])
+
+        # Caller corrects the day; only then may the assistant propose full due.
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"credit card",'
+                                                '"date":"27 October"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual({"product_id": "p1", "date": "27 October"},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertIn("510.00", state["multi_clarify_prompt"])
+        self.assertIn("27 October", state["multi_clarify_prompt"])
+
+    def test_day_after_product_deadline_is_not_offered(self) -> None:
+        state = self.prepared()
+        products = json.loads(state["product_json"])
+        products[0]["deadline"] = "2026-10-14"
+        state["product_json"] = json.dumps(products)
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":"credit card",'
+                                                '"date":"tomorrow"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual({"product_id": "p1", "invalid_date": "tomorrow"},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertIn("2026-10-14", state["multi_clarify_prompt"])
+        self.assertNotIn("tomorrow", state["multi_clarify_prompt"])
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
 
     def test_paid_claim_wins_over_same_turn_question(self) -> None:
         state = self.prepared()

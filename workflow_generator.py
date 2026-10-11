@@ -1530,7 +1530,9 @@ finally:
 
 
 _MULTI_ADVANCE_CODE = """import json
+import datetime
 import re
+__PAYMENT_DATE_PARSER__
 try:
     products = json.loads(str(vars.get('product_json') or '[]'))
     product_by_id = dict((str(item.get('product_id') or ''), item) for item in products)
@@ -1577,6 +1579,16 @@ try:
             except ValueError:
                 return None
         return number if floor <= number <= due else None
+    def allowed_partial_day(words, product):
+        try:
+            today = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00')).date()
+            day = parse_payment_date(words, today)
+            deadline = str(product.get('deadline') or '')
+            return (day >= today and day.weekday() in set(__WEEKDAYS__) and
+                    day.isoformat() not in set(__HOLIDAYS__) and
+                    (not deadline or day <= datetime.date.fromisoformat(deadline)))
+        except (TypeError, ValueError):
+            return False
     def note_reason(value):
         reason = str(value or '').strip().lower().replace(' ', '_')
         if reason in ('paid', 'already_paid', 'previously_paid', 'paid_already'):
@@ -1612,7 +1624,9 @@ try:
                 amount = resolve_amount(supplied_amount, product_by_id[pid])
             if amount is None:
                 if spoken_date:
-                    partial[pid] = dict(product_id=pid, date=spoken_date)
+                    partial[pid] = (dict(product_id=pid, date=spoken_date)
+                                    if allowed_partial_day(spoken_date, product_by_id[pid]) else
+                                    dict(product_id=pid, invalid_date=spoken_date))
                 continue
             if not date:
                 if supplied_amount is not None and str(supplied_amount).strip():
@@ -1784,6 +1798,9 @@ try:
             label = str(product_by_id[pid].get('label') or pid)
             saved = partial.get(pid, {})
             vars['multi_clarify_prompt'] = (
+                'What exact business day on or before ' + str(product_by_id[pid].get('deadline')) +
+                ' would you pay ' + label + '?' if saved.get('invalid_date') and product_by_id[pid].get('deadline') else
+                'What exact business day would you pay ' + label + '?' if saved.get('invalid_date') else
                 'Can you pay the full ' + format(float(product_by_id[pid].get('past_due') or 0), '.2f') +
                 ' for ' + label + ' on ' + str(saved['date']) + '?' if saved.get('date') and 'amount' not in saved else
                 'What exact day would you pay ' + label + '?' if saved.get('amount') is not None else
@@ -1806,6 +1823,9 @@ try:
             saved = partial[focus]
             label = str(product_by_id[focus].get('label') or focus)
             vars['multi_clarify_prompt'] = (
+                'What exact business day on or before ' + str(product_by_id[focus].get('deadline')) +
+                ' would you pay ' + label + '?' if saved.get('invalid_date') and product_by_id[focus].get('deadline') else
+                'What exact business day would you pay ' + label + '?' if saved.get('invalid_date') else
                 'Can you pay the full ' + format(float(product_by_id[focus].get('past_due') or 0), '.2f') +
                 ' for ' + label + ' on ' + str(saved['date']) + '?' if saved.get('date') and 'amount' not in saved else
                 'What exact day would you pay ' + label + '?')
@@ -2653,6 +2673,9 @@ except Exception:
 
     if multi_enabled:
         multi_advance_code = (_MULTI_ADVANCE_CODE
+                              .replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)
+                              .replace("__HOLIDAYS__", repr(holidays))
+                              .replace("__WEEKDAYS__", repr(weekdays))
                               .replace("__NOTE_CODES__", repr(note_codes))
                               .replace("__REFUSAL_REASON__", repr(reason_names.get("refused") or "refused"))
                               .replace("__PAID_REASON__", repr(reason_names.get("paid") or "paid"))
