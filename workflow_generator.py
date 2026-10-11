@@ -18,6 +18,7 @@ from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
 from source_code_mappings import explicit_code_mappings
+from policy_capabilities import requires_multi_product
 
 
 _PAYMENT_AMOUNT_SOURCE = inspect.getsource(parse_payment_amount)
@@ -1858,13 +1859,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
                               ("global_rules", "opening", "identity", "verified_call", "outcomes", "tool_policy", "constraints", "raw_brief"))
     offer_last_business_day = "last business day of this week" in source_policy.lower()
     fixed_single_floor_offer = offer_last_business_day and bool(re.search(r"offer the floor,? once", source_policy, re.I))
-    multi_constraints = policy.get("constraints") or {}
-    product_limits = str(multi_constraints.get("product_limits") or "") if isinstance(multi_constraints, dict) else ""
-    multi_enabled = bool(re.search(
-        r"\b(?:all|multiple|several|up to (?:three|3)|one to (?:three|3)) products\b|"
-        r"\bproducts? one by one\b|\beach product.{0,35}\border\b",
-        str(policy.get("verified_call") or "") + "\n" + product_limits, re.I,
-    ))
+    multi_enabled = requires_multi_product(policy)
     # Extracted summaries can omit the source's exact offer schedule. Keep the
     # source text in the decision so an authorized offer can be spoken as fixed
     # TTS, without a free-form model turn before the bank write.
