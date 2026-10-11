@@ -75,6 +75,21 @@ class RequiredParameterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "credential header"):
             required_header_bindings(api, "/get_account", "post")
 
+    def test_optional_query_does_not_block_required_header(self) -> None:
+        api = synthetic_api()
+        api["paths"]["/get_account"]["post"]["parameters"] = [
+            _parameter("locale", "query", required=False, default="en"),
+            _parameter("X-Channel", "header", enum=["voice", "web"], default="voice")]
+        self.assertEqual("voice", required_header_bindings(api, "/get_account", "post")
+                         ["X-Channel"]["default"])
+
+    def test_conflicting_header_default_and_enum_fail_closed(self) -> None:
+        api = synthetic_api()
+        api["paths"]["/get_account"]["post"]["parameters"] = [
+            _parameter("X-Channel", "header", enum=["voice"], default="web")]
+        with self.assertRaisesRegex(ValueError, "needs one fixed"):
+            required_header_bindings(api, "/get_account", "post")
+
 
 if __name__ == "__main__":
     unittest.main()
