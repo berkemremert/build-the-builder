@@ -376,6 +376,27 @@ def _json_tool_operations(openapi: dict[str, Any]) -> tuple[dict[str, Any], list
     return filtered, omitted
 
 
+def _compact_generic_prompt(workflow: dict[str, Any], policy: dict[str, Any]) -> bool:
+    """Use the model-compiled policy in a large agent prompt, keeping full source in artifacts."""
+    prompt = workflow.get("system_prompt")
+    raw = policy.get("raw_brief")
+    marker = "\n\nSOURCE POLICY:\n"
+    if (not isinstance(prompt, str) or not isinstance(raw, str) or len(raw) < 50_000
+            or marker not in prompt):
+        return False
+    constraints = policy.get("constraints") or {}
+    if isinstance(constraints, dict) and constraints.get("extraction_status") == "source_only":
+        return False
+    keys = ("global_rules", "opening", "identity", "verified_call", "outcomes",
+            "tool_policy", "constraints")
+    if any(not policy.get(key) for key in keys):
+        return False
+    compiled = "\n\n".join(f"{key.upper()}:\n{json.dumps(policy[key], ensure_ascii=False)}"
+                            for key in keys)
+    workflow["system_prompt"] = prompt.split(marker, 1)[0] + marker + compiled
+    return True
+
+
 def _mock_openapi(openapi: dict[str, Any], mock_url: str) -> dict[str, Any]:
     """Route every operation to the organizer's mock service, including overrides."""
     url = mock_url.rstrip("/")
@@ -668,6 +689,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if generic_workflow:
             from generic_workflow_fallback import build_generic_workflow
             workflow = build_generic_workflow(policy, openapi)
+            if _compact_generic_prompt(workflow, policy):
+                trace.write("workflow_prompt_compacted", raw_source_chars=len(policy["raw_brief"]),
+                            prompt_chars=len(workflow["system_prompt"]))
             trace.write("workflow_generator_selected", kind="contract_driven",
                         operation_names=sorted(contract_names))
         else:

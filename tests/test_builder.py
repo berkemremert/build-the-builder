@@ -39,6 +39,23 @@ def _fixture_model_call(prompt: str, *, purpose: str) -> dict:
 
 
 class BuilderAcceptanceTests(unittest.TestCase):
+    def test_large_model_compiled_policy_keeps_agent_prompt_compact(self) -> None:
+        raw = "Older source text. " * 4_000
+        policy = {"raw_brief": raw, "global_rules": "Latest decision governs.",
+                  "opening": "Greet caller.", "identity": "Prior IVR check.",
+                  "verified_call": "Read the supported account facts.",
+                  "outcomes": {"done": "End"}, "tool_policy": {"lookup": "Read only"},
+                  "constraints": {"extraction_status": "model"}}
+        workflow = {"system_prompt": "Preamble\n\nSOURCE POLICY:\n" + raw}
+        self.assertTrue(builder._compact_generic_prompt(workflow, policy))
+        self.assertIn("Latest decision governs.", workflow["system_prompt"])
+        self.assertNotIn("Older source text.", workflow["system_prompt"])
+        self.assertLess(len(workflow["system_prompt"]), 2_000)
+        self.assertEqual(raw, policy["raw_brief"])
+        source_only = dict(policy, constraints={"extraction_status": "source_only"})
+        unchanged = {"system_prompt": "Preamble\n\nSOURCE POLICY:\n" + raw}
+        self.assertFalse(builder._compact_generic_prompt(unchanged, source_only))
+
     def test_case_omits_non_json_auth_operation_from_conversation_contract(self) -> None:
         api = {"openapi": "3.0.3", "paths": {
             "/oauth2/token": {"post": {"operationId": "token", "requestBody": {"content": {
