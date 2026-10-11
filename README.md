@@ -69,4 +69,30 @@ Use the ID for the corresponding A or B agent. The runner prints each case's res
 
 ## Final submission
 
-The organizer's current final format asks for one exported workflow, its matching trace, an own Cloudflare mock URL, and a `submission.json` manifest. Follow the [final submission package guide](docs/final-submission.md) to stage and check those files. The original [kit rules](docs/kit-readme-v3.md#the-final) remain available for background; the current organizer format controls the package.
+The final builder takes the case folder and your deployed mock's HTTPS origin as two positional arguments. The mock must run on Cloudflare Workers, implement the service contract in that folder, and remain reachable during the organizer's simulations. Use `OPENROUTER_API_KEY` for the `openai/gpt-6-sol` builder model and `FREYA_API_KEY` for Freya publication. No `OPENAI_API_KEY` is needed. This command reads the case folder at run time; it does not require copying its bank rules into repository code.
+
+```bash
+source env.sh
+python3 builder.py "{case_folder}" "{mock_url}" --slot final-case --out out/final-case
+```
+
+The successful live run writes `out/final-case/final-case.workflow.json` (the Freya export) and `out/final-case/final-case.trace.jsonl` (the matching builder trace). Confirm the trace ends with `status: ok` and records the published Freya version. Keep the two files together; a local workflow or a trace from a different run is not a valid pair. The `out/` directory is ignored by Git.
+
+Stage the chosen export and trace, commit those artifact files, then generate the manifest against the resulting commit. Replace `out/final-case` below if the chosen run used another output directory. The `{case_folder}` and `{mock_url}` strings in `--run-command` are organizer placeholders and must remain literal.
+
+```bash
+python3 tools/final_submission.py stage \
+  --workflow out/final-case/final-case.workflow.json \
+  --trace out/final-case/final-case.trace.jsonl
+git add submission_artifacts/final-case.workflow.json submission_artifacts/final-case.trace.jsonl
+git commit -m "Add final workflow export and trace"
+git push origin main
+python3 tools/final_submission.py manifest \
+  --workflow submission_artifacts/final-case.workflow.json \
+  --trace submission_artifacts/final-case.trace.jsonl \
+  --mock-url "{mock_url}" \
+  --run-command 'python3 builder.py "{case_folder}" "{mock_url}" --slot final-case --out out/final-case'
+python3 tools/final_submission.py check submission.json
+```
+
+The checker confirms the current commit, source-file fingerprints, trace/export identity, and credential scan. If you commit again, regenerate `submission.json` so its `commit` field matches HEAD. The three files to send are `submission.json`, the exported workflow, and its trace. The organizer's deadline is **Sunday 11 October 2026, 20:00 UTC (23:00 Istanbul)**; the submission address is `yavuz@freyavoice.ai`. See the [final submission package guide](docs/final-submission.md) for the full checklist. The original [kit rules](docs/kit-readme-v3.md#the-final) remain available for background; the current organizer format controls the package.
