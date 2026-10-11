@@ -1716,9 +1716,17 @@ try:
             target = resolve_pid(vars.get('multi_initial_date_product_id'))
             raw_day = str(vars.get('multi_initial_date_words') or '').strip()
             if target in product_by_id and target not in notes and raw_day:
-                partial[target] = (dict(product_id=target, date=raw_day) if
-                                   allowed_partial_day(raw_day, product_by_id[target]) else
-                                   dict(product_id=target, invalid_date=raw_day))
+                saved = partial.get(target, {})
+                if allowed_partial_day(raw_day, product_by_id[target]):
+                    if saved.get('amount') is not None:
+                        terms[target] = dict(product_id=target, amount=saved['amount'], date=raw_day)
+                        partial.pop(target, None)
+                    else:
+                        partial[target] = dict(product_id=target, date=raw_day)
+                else:
+                    partial[target] = dict(product_id=target, invalid_date=raw_day)
+                    if saved.get('amount') is not None:
+                        partial[target]['amount'] = saved['amount']
                 vars['multi_initial_date_words'] = ''
                 vars['multi_initial_date_attempts'] = '0'
             else:

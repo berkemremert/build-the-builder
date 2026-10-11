@@ -100,6 +100,52 @@ class InitialMultiDateTests(unittest.TestCase):
         self.assertEqual({"acct-C": {"product_id": "acct-C", "date": "tomorrow"}},
                          json.loads(state["multi_partial_terms_json"]))
 
+    def test_identified_day_keeps_captured_amount_with_multiple_candidates(self) -> None:
+        state = self.prepared()
+        state.update({"proposed_date_words": "tomorrow", "proposed_terms_json": json.dumps([
+            {"product_id": "p1", "amount": 300},
+            {"product_id": "p2", "amount": 500},
+        ])})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("date_identify", state["multi_next"])
+        self.assertEqual({"p1": {"product_id": "p1", "amount": 300.0},
+                          "p2": {"product_id": "p2", "amount": 500.0}},
+                         json.loads(state["multi_partial_terms_json"]))
+
+        state["multi_initial_date_product_id"] = "p1"
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual({"p1": {"product_id": "p1", "amount": 300.0, "date": "tomorrow"}},
+                         json.loads(state["multi_terms_json"]))
+        self.assertEqual({"p2": {"product_id": "p2", "amount": 500.0}},
+                         json.loads(state["multi_partial_terms_json"]))
+        self.assertEqual(("p2", "clarify"),
+                         (state["multi_focus_product_id"], state["multi_next"]))
+        self.assertNotIn("510.00", state["multi_clarify_prompt"])
+
+    def test_invalid_identified_day_keeps_captured_amount_for_correction(self) -> None:
+        state = self.prepared()
+        state.update({"proposed_date_words": "Saturday", "proposed_terms_json": json.dumps([
+            {"product_id": "p1", "amount": 300},
+            {"product_id": "p2", "amount": 500},
+        ])})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("date_identify", state["multi_next"])
+
+        state["multi_initial_date_product_id"] = "p1"
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual({"product_id": "p1", "amount": 300.0, "invalid_date": "Saturday"},
+                         json.loads(state["multi_partial_terms_json"])["p1"])
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertIn("exact business day", state["multi_clarify_prompt"])
+        self.assertNotIn("Saturday", state["multi_clarify_prompt"])
+        self.assertNotIn("510.00", state["multi_clarify_prompt"])
+
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": '[{"product_id":"p1","date":"19 October"}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual({"product_id": "p1", "amount": 300.0, "date": "19 October"},
+                         json.loads(state["multi_terms_json"])["p1"])
+
     def test_explicit_product_with_invalid_day_asks_for_valid_day(self) -> None:
         state = self.prepared(renamed=True)
         state.update({"proposed_date_words": "Saturday", "multi_initial_date_product_id": "acct-A"})
