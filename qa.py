@@ -38,7 +38,7 @@ _NODE_TYPES = frozenset({"conversation", "api_request", "code", "end_call"})
 _SECRET = re.compile(
     r"(?:\bfak_[A-Za-z0-9_-]{8,}\b|\bsk-[A-Za-z0-9_-]{8,}\b|"
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|"
-    r"\bBearer\s+(?!\{\{|\$\{)[A-Za-z0-9._~+/-]{12,})",
+    r"\bBearer\s+(?!authentication\b|authorization\b|credentials?\b|\{\{|\$\{)[A-Za-z0-9._~+/-]{12,})",
     re.I,
 )
 

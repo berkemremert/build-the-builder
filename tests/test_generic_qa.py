@@ -11,10 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from generic_workflow_fallback import build_generic_workflow
-from qa import validate_generic_workflow
+from qa import _SECRET, validate_generic_workflow
 
 
 class GenericRequestValidationTests(unittest.TestCase):
+    def test_secret_check_distinguishes_bearer_prose_from_credentials(self):
+        self.assertIsNone(_SECRET.search("Use Bearer authentication for service calls."))
+        self.assertIsNotNone(_SECRET.search("Authorization: Bearer abcdefghijklmnop"))
+
     def setUp(self):
         self.spec = {"openapi": "3.0.3", "servers": [{"url": "https://example.test"}],
                      "paths": {"/read": {"post": {"operationId": "readAccount",
