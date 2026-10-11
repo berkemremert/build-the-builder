@@ -856,7 +856,13 @@ try:
                 notes[pid] = reason_map.get('service_error') or 'service_error'
             elif pid not in notes:
                 candidate = str(vars.get('single_product_reason') or '')
-                if candidate in note_codes:
+                if not note_codes:
+                    canonical = next((role for role, code in reason_map.items() if code == candidate), candidate)
+                    if canonical in ('paid', 'dispute', 'hardship', 'refused', 'service_error'):
+                        notes[pid] = canonical
+                    else:
+                        notes[pid] = 'refused'
+                elif candidate in note_codes:
                     notes[pid] = candidate
                 elif candidate in reason_map and reason_map[candidate] in note_codes:
                     notes[pid] = reason_map[candidate]
@@ -1887,15 +1893,24 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     bank_name = _bank_name(policy)
     source_policy = "\n".join(str(policy.get(key) or "") for key in
                               ("global_rules", "opening", "identity", "verified_call", "outcomes", "tool_policy", "constraints", "raw_brief"))
-    offer_last_business_day = "last business day of this week" in source_policy.lower()
+    offer_last_business_day = bool(re.search(
+        r"\b(?:last|final)\s+(?:business|working)\s+day|"
+        r"(?:closest|next)\s+friday|"
+        r"friday\s+of\s+(?:this|the\s+following|next)\s+week\b",
+        source_policy, re.I
+    ))
     fixed_single_floor_offer = offer_last_business_day and bool(re.search(r"offer the floor,? once", source_policy, re.I))
     multi_enabled = requires_multi_product(policy)
     # Extracted summaries can omit the source's exact offer schedule. Keep the
     # source text in the decision so an authorized offer can be spoken as fixed
     # TTS, without a free-form model turn before the bank write.
     offer_source = "\n".join(str(policy.get(key) or "") for key in ("raw_brief", "verified_call"))
-    fixed_multi_offers = ("last business day of this week" in offer_source.lower() and
-                          bool(re.search(r"attempt\s*2.{0,100}floor.{0,100}deadline", offer_source, re.I)))
+    fixed_multi_offers = (bool(re.search(
+        r"\b(?:last|final)\s+(?:business|working)\s+day|"
+        r"(?:closest|next)\s+friday|"
+        r"friday\s+of\s+(?:this|the\s+following|next)\s+week\b",
+        offer_source, re.I
+    )) and bool(re.search(r"attempt\s*2.{0,100}floor.{0,100}deadline", offer_source, re.I)))
 
     verify_hook = (_VERIFY_HOOK.replace("__COMPLETE_FIELD__", repr(identity_response["complete"]))
                    .replace("__ANSWER_FIELD__", repr(identity_response["answer"]))
@@ -1994,14 +2009,26 @@ except Exception:
                      _eq("finish_no_callback", "third_party_status", "no_callback")],
         max_turns=5, max_target="finish_no_callback")
 
+    def _pieces_prompt(field_name: str) -> str:
+        human = field_name.replace("_", " ")
+        return (
+            f"Callers may provide {human} in pieces across multiple turns. "
+            f"Never call verify_identity on an incomplete or partial answer. "
+            f"Never guess, pad, or submit fewer digits or components than required by the API. "
+            f"If only partial information or incomplete digits are given, prompt politely for the remaining part, "
+            f"assemble the complete value across turns, and call verify_identity ONLY once the complete {human} is provided. "
+        )
+
     dob_prompt = identity_base + (f"Ask for the customer's {identity_fields[0].replace('_', ' ')}, one security question at a time. "
                                   "Format answers exactly as required by the supplied API and policy. "
-                                  "Call verify_identity for each answer. Follow any service hint and remaining-attempt count exactly. "
+                                  + _pieces_prompt(identity_fields[0]) +
+                                  "Call verify_identity once you have the complete answer. Follow any service hint and remaining-attempt count exactly. "
                                   "If an answer fails, ask this same question again. On final failure follow the policy's escalation guidance. "
                                   "A first refusal or question about the call purpose routes to the one-time security explanation. A second refusal or call-purpose question closes through the workflow. Never print tool-call syntax or claim the call is already closed. "
                                   "Do not reveal the account. After tool result, speak or call the next tool.")
     phone_prompt = identity_base + (f"The first security answer passed. Ask only for the customer's {identity_fields[1].replace('_', ' ')}. "
-                                    f"Call verify_identity with each answer. Do not ask {identity_fields[0].replace('_', ' ')} again. "
+                                    + _pieces_prompt(identity_fields[1]) +
+                                    f"Call verify_identity once you have the complete answer. Do not ask {identity_fields[0].replace('_', ' ')} again. "
                                     "Use the service's remaining-attempt count and the policy's failure rule. "
                                     "A first refusal or call-purpose question routes to the one-time security explanation. A second refusal or call-purpose question closes through the workflow. Never print tool-call syntax or claim the call is already closed. "
                                     "After tool result, speak or call the next tool.")
@@ -2020,13 +2047,13 @@ except Exception:
     ]
     nodes["identity_dob"] = _conversation("identity_dob", dob_prompt, tools=[verify_dob],
                                            extraction=[_enum("identity_intent", ["declined", "answered", "other"],
-                                                             f"Classify ONLY the latest caller answer. declined if the caller refuses the security question OR asks what the call is about, why you are calling, or why security is needed before answering—even if they do not say no. answered only if they give {identity_fields[0].replace('_', ' ')}; other otherwise. A call-purpose question must not be other."),
+                                                             f"Classify ONLY the latest caller answer. declined if the caller refuses the security question OR asks what the call is about, why you are calling, or why security is needed before answering—even if they do not say no. answered only if they give the complete {identity_fields[0].replace('_', ' ')} (partial pieces or incomplete values are other); other otherwise. A call-purpose question must not be other."),
                                                        _enum("identity_purpose_question", ["yes", "no"],
                                                              "yes if the latest caller answer asks what this call is about, why you are calling, or demands the purpose before giving security details. no otherwise. Treat this independently of whether identity_intent is declined or other.")],
                                            transitions=identity_transitions(False), max_turns=8, max_target="finish_identity_failed")
     nodes["identity_phone"] = _conversation("identity_phone", phone_prompt, tools=[verify_phone],
                                              extraction=[_enum("identity_intent", ["declined", "answered", "other"],
-                                                               f"Classify ONLY the latest caller answer. declined if the caller refuses the security question OR asks what the call is about, why you are calling, or why security is needed before answering—even if they do not say no. answered only if they give {identity_fields[1].replace('_', ' ')}; other otherwise. A call-purpose question must not be other."),
+                                                               f"Classify ONLY the latest caller answer. declined if the caller refuses the security question OR asks what the call is about, why you are calling, or why security is needed before answering—even if they do not say no. answered only if they give the complete {identity_fields[1].replace('_', ' ')} (partial pieces or incomplete values are other); other otherwise. A call-purpose question must not be other."),
                                                          _enum("identity_purpose_question", ["yes", "no"],
                                                                "yes if the latest caller answer asks what this call is about, why you are calling, or demands the purpose before giving security details. no otherwise. Treat this independently of whether identity_intent is declined or other.")],
                                              transitions=identity_transitions(True), max_turns=8, max_target="finish_identity_failed")

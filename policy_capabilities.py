@@ -5,13 +5,16 @@ from __future__ import annotations
 import re
 
 
+_ITEM_NOUN = r"(?:products?|accounts?|items?|debts?|balances?)"
 _MULTI_PRODUCT = re.compile(
-    r"\b(?:one\s*(?:to|through|[-–])\s*(?:three|3)|"
-    r"up\s+to\s+(?:three|3)|two\s+or\s+more|multiple|several)\s+products\b|"
-    r"\b(?:all|each)\s+(?:of\s+)?(?:the\s+)?products\b|"
-    r"\bproducts?\s+one\s+by\s+one\b|"
-    r"\bmore\s+than\s+one\s+product\b|"
-    r"\beach\s+product.{0,35}\border\b",
+    rf"\b(?:one\s*(?:to|through|[-–]|or)\s*(?:two|three|2|3)|"
+    rf"between\s+one\s+and\s+(?:two|three|2|3)|"
+    rf"up\s+to\s+(?:two|three|2|3)|two\s+or\s+more|multiple|several)\s+{_ITEM_NOUN}\b|"
+    rf"\b(?:all|each)\s+(?:of\s+)?(?:the\s+)?{_ITEM_NOUN}\b|"
+    rf"\b{_ITEM_NOUN}\s+one\s+by\s+one\b|"
+    rf"\bmore\s+than\s+one\s+{_ITEM_NOUN}\b|"
+    rf"\bper-(?:account|product)\b|"
+    rf"\beach\s+{_ITEM_NOUN}.{{0,35}}\border\b",
     re.IGNORECASE | re.DOTALL,
 )
 

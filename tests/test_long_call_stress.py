@@ -82,6 +82,31 @@ class LongCallStressTests(unittest.TestCase):
                             business_days += 1
                     self.assertLessEqual(day, deadline)
 
+    def test_identity_prompts_handle_split_and_pieces_answers(self) -> None:
+        from policy_compiler import compile_policy
+        from workflow_generator import build_workflow
+        openapi_path = ROOT / "tools" / "openapi.json"
+        openapi = json.loads(openapi_path.read_text(encoding="utf-8"))
+        brief_paths = [str(ROOT / "briefs" / "brief-a.md"), str(ROOT / "briefs" / "brief-b.md")]
+        policy = compile_policy(brief_paths, str(openapi_path), None)
+        workflow = build_workflow(policy, openapi)
+
+        dob_node = workflow["nodes"]["identity_dob"]
+        phone_node = workflow["nodes"]["identity_phone"]
+
+        self.assertIn("pieces", dob_node["task_message"].lower())
+        self.assertIn("never call verify_identity on an incomplete or partial answer", dob_node["task_message"].lower())
+        self.assertIn("pieces", phone_node["task_message"].lower())
+        self.assertIn("never call verify_identity on an incomplete or partial answer", phone_node["task_message"].lower())
+        self.assertIn("never guess, pad", phone_node["task_message"].lower())
+
+        dob_schema = next(s for s in dob_node["extraction_schema"] if s["name"] == "identity_intent")
+        phone_schema = next(s for s in phone_node["extraction_schema"] if s["name"] == "identity_intent")
+        self.assertIn("complete", dob_schema["description"].lower())
+        self.assertIn("partial pieces or incomplete values are other", dob_schema["description"].lower())
+        self.assertIn("complete", phone_schema["description"].lower())
+        self.assertIn("partial pieces or incomplete values are other", phone_schema["description"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()
