@@ -1171,11 +1171,21 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             "then name all present no-debt currency blocks in one sentence; a missing block is not zero. "
             "Ask about another eligible card before any other offer. Use read tools only when their policy conditions hold. Before a bank write, "
             "state the exact proposed action and obtain the customer's explicit confirmation. If no action is "
-            "authorized, follow the source's normal completion outcome. Do not imply any write was recorded here.",
+            "authorized, continue to handle any new customer request. Finish only when the caller clearly says "
+            "there is nothing else to do. A courtesy thank-you followed by a new request is not completion. "
+            "Do not imply any write was recorded here.",
             tools=read_tools,
             extraction=[{"name": "explicit_action_confirmation", "type": "string",
                          "enum_values": ["yes", "no", "unknown"],
                          "description": "Yes only when the customer explicitly confirms the exact proposed bank action.",
+                         "min_confidence": 0.9},
+                        {"name": "caller_finished", "type": "string",
+                         "enum_values": ["yes", "no"],
+                         "description": "Judge the caller's latest turn. Yes only if the caller clearly says "
+                                        "no further help or transaction is wanted and makes no new request. "
+                                        "Set no when the turn contains a question, new request, pending action, "
+                                        "or a thank-you followed by a request. Declining one offered action "
+                                        "alone is not finishing the call.",
                          "min_confidence": 0.9}]
             + ([{"name": "confirmed_write_action", "type": "string",
                  "enum_values": [tool["function"]["name"] for tool in write_tools],
@@ -1185,7 +1195,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             + reason_extraction("no_promise"),
             transitions=([_when("explicit_action_confirmation", "yes", "commit",
                                 "Customer explicitly confirmed the action")] if write_tools else [])
-            + [_when("explicit_action_confirmation", "no", "farewell", "No action authorized")],
+            + [_when("caller_finished", "yes", "farewell", "Caller clearly has no further request")],
             turns=20)
         if write_tools:
             nodes["commit"] = _conversation(
