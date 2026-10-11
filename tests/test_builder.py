@@ -268,20 +268,20 @@ class BuilderAcceptanceTests(unittest.TestCase):
         self.assertEqual("Bearer sk-offline", request.get_header("Authorization"))
         self.assertEqual(900, opener.open.call_args.kwargs["timeout"])
 
-    def test_missing_openai_key_fails_without_router_or_cli_fallback(self) -> None:
+    def test_missing_both_model_keys_fails_without_cli_fallback(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-no-key-") as directory:
             out = Path(directory) / "out"
             env = os.environ.copy()
             env["PATH"] = ""
             env.pop("OPENAI_API_KEY", None)
-            env["OPENROUTER_API_KEY"] = "sk-or-v1-ignored"
+            env.pop("OPENROUTER_API_KEY", None)
             command = [sys.executable, str(ROOT / "builder.py"), "--brief", str(ROOT / "briefs/brief-a.md"),
                        "--openapi", str(ROOT / "tools/openapi.json"), "--slot", "missing-key",
                        "--out", str(out), "--no-live"]
             completed = subprocess.run(command, cwd=ROOT, env=env, capture_output=True,
                                        text=True, timeout=30, check=False)
             self.assertEqual(1, completed.returncode)
-            self.assertIn("OPENAI_API_KEY is required", completed.stderr)
+            self.assertIn("OPENAI_API_KEY or OPENROUTER_API_KEY is required", completed.stderr)
             rows = [json.loads(line) for line in (out / "missing-key.trace.jsonl").read_text().splitlines()]
             self.assertIn("model_unavailable", [row["event"] for row in rows])
             self.assertEqual("failed", rows[-1]["status"])
