@@ -17,6 +17,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
 from api_parameters import required_header_bindings
 from api_servers import operation_url
 from account_item_bindings import product_item_fields
+from business_calendar import business_weekdays
 from bank_names import BANK_NAME, source_bank_name
 from deadline_tables import parse_deadline_tables
 from identity_order import latest_explicit_identity_order
@@ -730,7 +731,7 @@ except Exception:
 """
 
 
-def _prepare_code(holidays: list[str], item_bindings: dict, bands: list[dict],
+def _prepare_code(holidays: list[str], weekdays: tuple[int, ...], item_bindings: dict, bands: list[dict],
                   offer_last_business_day: bool, collection_field: str) -> str:
     id_field = item_bindings["product_id"]
     kind_field = item_bindings["kind"]
@@ -758,21 +759,25 @@ try:
     now = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00'))
     today = now.date()
     holidays = set({holidays!r})
+    weekdays = set({weekdays!r})
     def business(day):
-        return day.weekday() < 5 and day.isoformat() not in holidays
+        return day.weekday() in weekdays and day.isoformat() not in holidays
     def nth(day, count):
         for ignored in range(count):
             day += datetime.timedelta(days=1)
             while not business(day):
                 day += datetime.timedelta(days=1)
         return day
-    friday = today + datetime.timedelta(days=4 - today.weekday())
-    while not business(friday):
-        friday -= datetime.timedelta(days=1)
-    if friday <= today:
-        friday = today + datetime.timedelta(days=11 - today.weekday())
-        while not business(friday):
-            friday -= datetime.timedelta(days=1)
+    week_start = today - datetime.timedelta(days=today.weekday())
+    friday = None
+    for week in range(53):
+        dates = [week_start + datetime.timedelta(days=7 * week + index) for index in weekdays]
+        choices = [day for day in dates if day > today and business(day)]
+        if choices:
+            friday = max(choices)
+            break
+    if friday is None:
+        raise ValueError('No future business day for offer')
     result = []
     lines = []
     for index, item in enumerate(raw):
@@ -920,8 +925,9 @@ try:
     now = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00'))
     today = now.date()
     holidays = set(__HOLIDAYS__)
+    weekdays = set(__WEEKDAYS__)
     def business(day):
-        return day.weekday() < 5 and day.isoformat() not in holidays
+        return day.weekday() in weekdays and day.isoformat() not in holidays
     seen = set()
     confirmed = []
     adjustments = []
@@ -1018,6 +1024,7 @@ try:
     now = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00'))
     today = now.date()
     holidays = set(__HOLIDAYS__)
+    weekdays = set(__WEEKDAYS__)
     confirmed = []
     seen = set()
     for term in raw:
@@ -1033,7 +1040,7 @@ try:
             raise ValueError('Invalid amount')
         day = datetime.date.fromisoformat(str(term.get('date') or ''))
         deadline = str(product.get('deadline') or '')
-        if day < today or day.weekday() >= 5 or day.isoformat() in holidays or (deadline and day > datetime.date.fromisoformat(deadline)):
+        if day < today or day.weekday() not in weekdays or day.isoformat() in holidays or (deadline and day > datetime.date.fromisoformat(deadline)):
             raise ValueError('Invalid date')
         confirmed.append(dict(product_id=pid, amount=amount, date=day.isoformat()))
     vars['pending_promises_json'] = json.dumps(confirmed)
@@ -1851,6 +1858,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     identity_path, identity_method, _ = _api_spec(openapi, "verify_identity")
     identity_response = identity_response_fields(openapi["paths"][identity_path][identity_method.lower()])
     holidays = _holiday_dates(policy)
+    weekdays = business_weekdays(policy)
     bands = _deadline_bands(policy)
     identity_selector, _ = identity_selector_field(_api_spec(openapi, "verify_identity")[2])
     identity_fields = _identity_fields(openapi, policy)
@@ -1891,6 +1899,23 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     verify_phone = _api_tool(openapi, "verify_identity", fixed={identity_selector: identity_fields[1]},
                              description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
     callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=_CALLBACK_HOOK)
+    callback_schema = _api_spec(openapi, "schedule_callback")[2]
+    callback_date_fields = [field for field, spec in (callback_schema.get("properties") or {}).items()
+                            if isinstance(spec, dict) and (spec.get("format") == "date" or
+                                re.search(r"(?:^|_)(?:date|day)$", field))]
+    if len(callback_date_fields) != 1:
+        raise ValueError("schedule_callback OpenAPI must identify one callback date field")
+    callback["pre_process_code"] = f"""import datetime
+body = config.get('body')
+if not isinstance(body, dict):
+    raise ValueError('Callback body is missing')
+day = datetime.date.fromisoformat(str(body.get({callback_date_fields[0]!r}) or ''))
+today = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00')).date()
+if day < today:
+    raise ValueError('Callback date is in the past')
+if day > today and (day.weekday() not in {weekdays!r} or day.isoformat() in {holidays!r}):
+    raise ValueError('Callback date is not a business day')
+"""
     account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")
     promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
     note = _api_tool(openapi, "add_note", description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=_NOTE_HOOK)
@@ -1959,6 +1984,8 @@ except Exception:
         "third_party", identity_base +
         "A third party answered. Ask when the named customer can be reached. Apply the exact callback dates, hours, and retry limit in the policy. "
         "Use {{now}} and these bank holidays from the policy: " + (", ".join(holidays) if holidays else "none specified") + ". "
+        "Business weekdays from the source are " + ", ".join(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")[day] for day in weekdays) + ". "
+        "Calculate the next business day from {{now}}, these weekdays, and the listed holidays. "
         "If a proposal is outside the permitted window, follow the policy's correction rule. "
         "If an exact valid day/time is accepted, call schedule_callback with ISO date and HH:MM, then follow its result. "
         "Do not ask security questions, share account details, or accept an offer to pay from this person. "
@@ -2042,7 +2069,7 @@ except Exception:
         "pre_actions": [account], "response_mapping": [{"path": "data." + collection_field, "variable": "account_products"}],
         "transitions": [_always("prepare_account")],
     }
-    nodes["prepare_account"] = _code_node("prepare_account", _prepare_code(holidays, item_bindings, bands, offer_last_business_day, collection_field), "account_discussion")
+    nodes["prepare_account"] = _code_node("prepare_account", _prepare_code(holidays, weekdays, item_bindings, bands, offer_last_business_day, collection_field), "account_discussion")
     nodes["prepare_account"]["transitions"] = [
         _eq("account_unavailable", "product_count", "0"), _always("account_discussion")]
     nodes["account_unavailable"] = _conversation(
@@ -2404,7 +2431,8 @@ except Exception:
         "prepare_confirmation", _with_amount_parser(
             _PREPARE_CONFIRMATION_CODE
             .replace("__PAYMENT_DATE_PARSER__", _PAYMENT_DATE_SOURCE)
-            .replace("__HOLIDAYS__", repr(holidays))), "account_discussion")
+            .replace("__HOLIDAYS__", repr(holidays))
+            .replace("__WEEKDAYS__", repr(weekdays))), "account_discussion")
     nodes["prepare_confirmation"]["transitions"] = [
         _eq("confirmation", "proposal_validation_state", "ready"),
         *([_to("service_unavailable", "Correction attempts exhausted without valid terms",
@@ -2477,6 +2505,7 @@ except Exception:
     # Validation also selects the first write, so a confirmed proposal needs
     # one sandbox call between the caller's yes and create_promise.
     validate_and_select_code = (_VALIDATE_CONFIRMATION_CODE.replace("__HOLIDAYS__", repr(holidays))
+                                .replace("__WEEKDAYS__", repr(weekdays))
                                 + "\n" + select_promise_code)
     nodes["validate_confirmation"] = _code_node(
         "validate_confirmation", validate_and_select_code, "account_discussion")
