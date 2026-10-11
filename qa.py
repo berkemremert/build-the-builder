@@ -16,7 +16,8 @@ from itertools import product
 from pathlib import Path
 
 from api_bindings import (account_response_collection, identity_response_fields,
-                          note_request_fields, promise_request_fields)
+                          identity_selector_field, note_request_fields,
+                          promise_request_fields)
 from openapi_resolver import normalize_openapi
 
 
@@ -399,6 +400,16 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"{where}: const does not send a value; use default or let the model fill it")
             if field == "customer_id" and spec.get("default") != "{{customer_id}}":
                 errors.append(f"{where}: set default to {{{{customer_id}}}} from call variables")
+        if name == "verify_identity":
+            try:
+                selector, choices = identity_selector_field(schema)
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                chosen = (body_props.get(selector) or {}).get("default")
+                if chosen not in choices:
+                    errors.append(f"{location}.body.properties.{selector}.default: "
+                                  f"bind a fixed security selector from {choices!r}")
         if name == "create_promise" and placement == "pre_action":
             try:
                 semantic_fields = promise_request_fields(schema)

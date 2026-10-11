@@ -5,7 +5,9 @@ from __future__ import annotations
 import unittest
 
 from api_bindings import identity_selector_field
-from probe_changed_brief import synthetic_api
+from probe_changed_brief import synthetic_api, synthetic_policy
+from qa import validate_workflow
+from workflow_generator import build_workflow
 
 
 class IdentitySelectorTests(unittest.TestCase):
@@ -23,6 +25,15 @@ class IdentitySelectorTests(unittest.TestCase):
         }}
         with self.assertRaisesRegex(ValueError, "unambiguous security selector"):
             identity_selector_field(schema)
+
+    def test_qa_requires_fixed_selector_on_verify_tools(self) -> None:
+        api = synthetic_api()
+        workflow = build_workflow(synthetic_policy(), api)
+        body = (workflow["nodes"]["identity_dob"]["tools"][0]["function"]
+                ["parameters"]["properties"]["body"]["properties"])
+        body["field"]["default"] = "{{field}}"
+        self.assertTrue(any("bind a fixed security selector" in error
+                            for error in validate_workflow(workflow, api)))
 
 
 if __name__ == "__main__":
