@@ -15,8 +15,10 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
 from api_parameters import required_header_bindings
+from api_servers import operation_url
 from account_item_bindings import product_item_fields
 from deadline_tables import parse_deadline_tables
+from identity_order import latest_explicit_identity_order
 from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
@@ -204,17 +206,6 @@ def _promise_response_contract(openapi: dict) -> tuple[list[str], str, list[str]
     return success_codes, next(iter(flags)), false_codes, no_write_codes
 
 
-def _url(openapi: dict, path: str) -> str:
-    servers = openapi.get("servers") or []
-    if not servers or not servers[0].get("url"):
-        raise ValueError("OpenAPI must contain a server URL")
-    base = servers[0]["url"].rstrip("/")
-    # A server URL may already contain the version path.
-    if base.endswith(path):
-        return base
-    return base + "/" + path.lstrip("/")
-
-
 def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
               description: str = "", post_code: str = "") -> dict:
     path, method, schema = _api_spec(openapi, name)
@@ -230,7 +221,7 @@ def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
         leaf["default"] = fixed[field] if field in fixed else "{{" + field + "}}"
         properties[field] = leaf
     params = {"type": "object", "properties": {
-        "url": {"type": "string", "default": _url(openapi, path)},
+        "url": {"type": "string", "default": operation_url(openapi, path, method)},
         "method": {"type": "string", "default": method},
         "headers": {"type": "object", "properties": headers},
         "body": {"type": "object", "properties": properties, "required": schema.get("required") or []},
@@ -364,6 +355,9 @@ def _queue_for(openapi: dict, role: str, policy: dict) -> str:
 def _identity_fields(openapi: dict, policy: dict) -> list[str]:
     schema = _api_spec(openapi, "verify_identity")[2]
     _, values = identity_selector_field(schema)
+    explicit = latest_explicit_identity_order(str(policy.get("raw_brief") or ""), values)
+    if explicit:
+        return explicit
     source = "\n".join(str(policy.get(key) or "") for key in ("identity", "raw_brief"))
     aliases = {
         "date_of_birth": ("date of birth", "birth date", "dob"),

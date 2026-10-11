@@ -7,10 +7,22 @@ import unittest
 from api_bindings import identity_selector_field
 from probe_changed_brief import synthetic_api, synthetic_policy
 from qa import validate_workflow
-from workflow_generator import build_workflow
+from workflow_generator import _identity_fields, build_workflow
 
 
 class IdentitySelectorTests(unittest.TestCase):
+    def test_later_source_memo_replaces_extracted_identity_order(self) -> None:
+        api = synthetic_api()
+        policy = synthetic_policy(identity="Ask birth year first, then passcode.")
+        policy["raw_brief"] += (
+            "\nLater memo: replace identity order. Ask passcode first, then birth year.\n"
+        )
+        self.assertEqual(["passcode", "birth_year"], _identity_fields(api, policy))
+        workflow = build_workflow(policy, api)
+        body = (workflow["nodes"]["identity_dob"]["tools"][0]["function"]
+                ["parameters"]["properties"]["body"]["properties"])
+        self.assertEqual("passcode", body["field"]["default"])
+
     def test_renamed_selector_uses_its_enum(self) -> None:
         schema = synthetic_api()["paths"]["/verify_identity"]["post"]
         schema = schema["requestBody"]["content"]["application/json"]["schema"]
