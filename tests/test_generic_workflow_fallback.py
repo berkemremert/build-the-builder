@@ -38,13 +38,19 @@ def _spec() -> dict:
                     "required": ["customer_id", "amount"]}, result="recorded")},
                 "/interaction-end": {"post": _operation(
                     "finishInteraction", "Close call", request={"type": "object", "properties": {
-                        "outcome": {"type": "string"}}, "required": ["outcome"]}, result="closed")},
+                        "outcome": {"type": "string", "enum": ["promise", "no_promise", "not_verified", "not_reached"]},
+                        "reason": {"type": "string", "description": "Required for every outcome except promise."}},
+                        "required": ["outcome"]}, result="closed")},
             }}
 
 
 def _policy() -> dict:
     return {"raw_brief": "Synthetic source: verify the customer before discussing the account. "
-                         "Record an arrangement only after exact customer confirmation.",
+                         "Record an arrangement only after exact customer confirmation.\n"
+                         "| Outcome | Reason | When |\n| --- | --- | --- |\n"
+                         "| `no_promise` | `refused`, `service_error` | no confirmed arrangement |\n"
+                         "| `not_verified` | `failed`, `declined` | security did not pass |\n"
+                         "| `not_reached` | `wrong_number`, `unclear` | customer not reached |",
             "tool_policy": {"checkPerson": "Check the customer's own answer.",
                             "fetchPortfolio": "Read only after identity passes.",
                             "saveArrangement": "Record only after exact confirmation.",
@@ -69,7 +75,9 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         self.assertEqual(["checkPerson"], [tool["function"]["name"] for tool in nodes["verification"]["tools"]])
         self.assertEqual(["fetchPortfolio"], [tool["function"]["name"] for tool in nodes["service"]["tools"]])
         self.assertEqual(["saveArrangement"], [tool["function"]["name"] for tool in nodes["commit"]["tools"]])
-        self.assertEqual(["finishInteraction"], [tool["function"]["name"] for tool in nodes["closing"]["tools"]])
+        self.assertEqual(["finishInteraction"], [tool["function"]["name"] for tool in nodes["closing"]["pre_actions"]])
+        self.assertEqual("api_request", nodes["closing"]["node_type"])
+        self.assertEqual("ended", nodes["closing"]["passthrough_default_transition"])
         verification_edges = nodes["verification"]["transitions"]
         self.assertTrue(all("checkPerson_response.data.verified" in str(edge) for edge in verification_edges))
         self.assertIn("explicit_action_confirmation", str(nodes["service"]["transitions"]))
@@ -97,6 +105,26 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         del spec["paths"]["/check-person"]
         with self.assertRaisesRegex(ValueError, "callable identity operation"):
             build_generic_workflow(_policy(), spec)
+
+    def test_close_request_uses_confirmed_state_and_rejects_second_attempt(self):
+        workflow = build_generic_workflow(_policy(), _spec())
+        source = workflow["nodes"]["closing"]["pre_actions"][0]["pre_process_code"]
+        body = {}
+        state = {"caller_role": "customer", "generic_identity_verified": "true",
+                 "generic_write_result": "confirmed", "generic_recorded_action": "saveArrangement",
+                 "generic_close_reason": "refused"}
+        exec(source, {"config": {"body": body}, "vars": state})
+        self.assertEqual({"outcome": "promise"}, body)
+        self.assertEqual("true", state["generic_close_attempted"])
+        with self.assertRaisesRegex(ValueError, "already attempted"):
+            exec(source, {"config": {"body": {}}, "vars": state})
+
+    def test_close_request_rejects_unknown_reason(self):
+        workflow = build_generic_workflow(_policy(), _spec())
+        source = workflow["nodes"]["closing"]["pre_actions"][0]["pre_process_code"]
+        state = {"caller_role": "customer", "generic_identity_verified": "true"}
+        with self.assertRaisesRegex(ValueError, "source-approved close reason"):
+            exec(source, {"config": {"body": {}}, "vars": state})
 
     def test_unsupported_required_query_operation_is_omitted(self):
         spec = copy.deepcopy(_spec())

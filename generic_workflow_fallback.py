@@ -12,7 +12,9 @@ from dataclasses import dataclass
 
 from api_parameters import required_header_bindings
 from api_servers import operation_url
+from identity_order import latest_explicit_identity_order
 from openapi_resolver import normalize_openapi
+from source_code_mappings import explicit_code_mappings
 
 
 _METHODS = {"get", "post", "put", "patch", "delete"}
@@ -140,7 +142,8 @@ def _identity_completion_field(operation: _Operation) -> str | None:
     return next(iter(candidates)) if not full and len(candidates) == 1 else None
 
 
-def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | None = None) -> dict:
+def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | None = None,
+          fixed: dict | None = None) -> dict:
     url = operation_url(openapi, operation.path, operation.method)
     headers = {"Content-Type": {"type": "string", "default": "application/json"}}
     headers.update(required_header_bindings(openapi, operation.path, operation.method))
@@ -156,7 +159,12 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
                 "description": spec.get("description") or f"{name} for {operation.name}."}
         if "enum" in spec:
             leaf["enum"] = spec["enum"]
-        if "const" in spec:
+        if name in (fixed or {}):
+            if ("enum" in spec and fixed[name] not in spec["enum"] and
+                    not re.fullmatch(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}", str(fixed[name]))):
+                raise ValueError(f"{operation.name} fixed value for {name!r} is outside OpenAPI enum")
+            leaf["default"] = fixed[name]
+        elif "const" in spec:
             leaf["default"] = spec["const"]
         elif "default" in spec:
             leaf["default"] = spec["default"]
@@ -188,12 +196,158 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
             "        result['data'] = data\n"
             f"    ok = str(result.get('status_code') or '').startswith('2') and data.get({result_field!r}) is True\n"
             "    vars['generic_write_result'] = 'confirmed' if ok else 'unknown'\n"
+            f"    vars['generic_recorded_action'] = {operation.name!r} if ok else ''\n"
             "    data['what_to_do_next'] = ('The bank confirmed the action. Follow the exact source policy for confirmation.' "
             "if ok else 'The action is unconfirmed. Do not retry or claim success.')\n"
             "except Exception:\n"
             "    pass\n"
         )
+    elif result_field and operation.role == "verify":
+        result["post_process_code"] = (
+            "try:\n"
+            "    data = result.get('data') if isinstance(result, dict) else None\n"
+            f"    if str(result.get('status_code') or '').startswith('2') and isinstance(data, dict) and data.get({result_field!r}) is True:\n"
+            "        vars['generic_identity_verified'] = 'true'\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
     return result
+
+
+def _outcome_codes(source: str, close: _Operation) -> tuple[str, dict[str, str], str | None, dict[str, set[str]]]:
+    schema = (((close.source.get("requestBody") or {}).get("content") or {})
+              .get("application/json") or {}).get("schema") or {}
+    properties = schema.get("properties") or {}
+    outcome_fields = [(name, spec) for name, spec in properties.items()
+                      if re.search(r"outcome|disposition|call_result", name, re.I)
+                      and isinstance(spec, dict) and isinstance(spec.get("enum"), list)]
+    if len(outcome_fields) != 1:
+        raise ValueError("Close operation needs one outcome enum to close deterministically")
+    outcome_field, outcome_spec = outcome_fields[0]
+    values = [value for value in outcome_spec["enum"] if isinstance(value, str)]
+    explicit = explicit_code_mappings(source, "outcome", values)
+    codes = {}
+    for role in ("promise", "no_promise", "not_verified", "not_reached", "transferred"):
+        if role in explicit:
+            codes[role] = explicit[role]
+        elif role in values:
+            codes[role] = role
+        else:
+            matches = [value for value in values if re.search(role.replace("_", r"[_ -]?"), value, re.I)]
+            if len(matches) == 1:
+                codes[role] = matches[0]
+    required = ("promise", "no_promise", "not_verified", "not_reached")
+    if any(role not in codes for role in required):
+        raise ValueError(f"Close outcome enum cannot map required roles {required!r} from source/OpenAPI")
+    reason_fields = [name for name in properties if re.search(r"reason", name, re.I)]
+    reason_field = reason_fields[0] if len(reason_fields) == 1 else None
+    if len(reason_fields) > 1:
+        raise ValueError("Close operation has ambiguous reason fields")
+    reasons: dict[str, set[str]] = {}
+    headers = None
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            headers = None
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        normalized = [cell.strip(" `*").lower() for cell in cells]
+        if "outcome" in normalized and "reason" in normalized:
+            headers = (normalized.index("outcome"), normalized.index("reason"))
+            continue
+        if headers is None or max(headers) >= len(cells) or all(re.fullmatch(r":?-{3,}:?", c) for c in normalized):
+            continue
+        outcome_tokens = re.findall(r"`([^`]+)`", cells[headers[0]])
+        reason_tokens = re.findall(r"`([^`]+)`", cells[headers[1]])
+        if len(outcome_tokens) == 1 and reason_tokens:
+            reasons.setdefault(outcome_tokens[0], set()).update(reason_tokens)
+    if reason_field and re.search(r"required|must", str(properties[reason_field].get("description") or ""), re.I):
+        for role in ("no_promise", "not_verified", "not_reached"):
+            if not reasons.get(codes[role]):
+                raise ValueError(f"Source does not define close reasons for {codes[role]!r}")
+    return outcome_field, codes, reason_field, reasons
+
+
+def _close_tool(openapi: dict, close: _Operation, source: str, rule: str,
+                write_operations: list[_Operation]) -> dict:
+    outcome_field, codes, reason_field, reasons = _outcome_codes(source, close)
+    action_outcomes = {}
+    for operation in write_operations:
+        label = operation.name.lower()
+        role = ("promise" if re.search(r"promise|arrangement|pledge", label) else
+                "transferred" if re.search(r"transfer|handoff", label) else
+                "not_reached" if re.search(r"callback|schedule", label) else
+                "no_promise" if re.search(r"note|record.reason", label) else None)
+        if role in codes:
+            action_outcomes[operation.name] = codes[role]
+    tool = _tool(openapi, close, rule, fixed={outcome_field: "{{generic_close_outcome}}"})
+    tool["pre_process_code"] = (
+        "body = config.get('body')\n"
+        "if not isinstance(body, dict):\n"
+        "    raise ValueError('Close request body is unavailable')\n"
+        "if vars.get('generic_close_attempted') == 'true':\n"
+        "    raise ValueError('Close already attempted')\n"
+        f"codes = {codes!r}\n"
+        f"action_outcomes = {action_outcomes!r}\n"
+        f"allowed_reasons = dict((key, set(values)) for key, values in {[(key, sorted(values)) for key, values in reasons.items()]!r})\n"
+        "if vars.get('generic_write_result') == 'confirmed':\n"
+        "    outcome = action_outcomes.get(str(vars.get('generic_recorded_action') or ''))\n"
+        "elif vars.get('generic_identity_verified') == 'true':\n"
+        "    outcome = codes['no_promise']\n"
+        "elif vars.get('caller_role') == 'customer':\n"
+        "    outcome = codes['not_verified']\n"
+        "else:\n"
+        "    outcome = codes['not_reached']\n"
+        "if not outcome:\n"
+        "    raise ValueError('Cannot determine truthful close outcome')\n"
+        "reason = str(vars.get('generic_close_reason') or '')\n"
+        "if not reason and outcome == codes['not_reached']:\n"
+        "    role = str(vars.get('caller_role') or '')\n"
+        "    candidates = [entry for entry in allowed_reasons.get(outcome, set()) "
+        "if (role == 'wrong_number' and 'wrong' in entry.lower()) or "
+        "(role == 'third_party' and 'no_callback' in entry.lower()) or "
+        "(role == 'unknown' and 'unclear' in entry.lower())]\n"
+        "    if len(candidates) == 1:\n"
+        "        reason = candidates[0]\n"
+        "if outcome not in allowed_reasons:\n"
+        "    reason = ''\n"
+        "if outcome in allowed_reasons and reason not in allowed_reasons[outcome]:\n"
+        "    raise ValueError('Cannot determine source-approved close reason')\n"
+        f"body[{outcome_field!r}] = outcome\n"
+        + (f"if reason:\n    body[{reason_field!r}] = reason\nelse:\n    body.pop({reason_field!r}, None)\n"
+           if reason_field else "") +
+        "vars['generic_close_attempted'] = 'true'\n"
+    )
+    return tool
+
+
+def _identity_steps(operation: _Operation, source: str) -> tuple[str, list[str]] | None:
+    """Find the source-ordered security selectors when the API declares them."""
+    schema = (((operation.source.get("requestBody") or {}).get("content") or {})
+              .get("application/json") or {}).get("schema") or {}
+    choices = []
+    for name, spec in (schema.get("properties") or {}).items():
+        values = spec.get("enum") if isinstance(spec, dict) else None
+        if isinstance(values, list) and len(values) >= 2 and all(isinstance(value, str) for value in values):
+            choices.append((name, values))
+    if len(choices) != 1:
+        return None
+    field, values = choices[0]
+    explicit = latest_explicit_identity_order(source, values)
+    return field, explicit or values
+
+
+def _question_result_field(operation: _Operation, complete_field: str) -> str | None:
+    fields = set()
+    for status, response in (operation.source.get("responses") or {}).items():
+        if not str(status).startswith("2") or not isinstance(response, dict):
+            continue
+        schema = ((response.get("content") or {}).get("application/json") or {}).get("schema") or {}
+        for name, spec in (schema.get("properties") or {}).items():
+            if (name != complete_field and isinstance(spec, dict) and spec.get("type") == "boolean"
+                    and re.search(r"verif|passed|correct|accepted", name, re.I)):
+                fields.add(name)
+    return next(iter(fields)) if len(fields) == 1 else None
 
 
 def _when(variable: str, value: str, target: str, description: str) -> dict:
@@ -263,7 +417,32 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     verify_op = verify[0] if verified else None
     read_tools = [tools[op.name] for op in operations if op.role == "read" and op.name in tools]
     write_tools = [tools[op.name] for op in operations if op.role == "write" and op.name in tools and proof[op.name]]
-    close_tools = [tools[op.name] for op in operations if op.role == "close" and op.name in tools]
+    close_operations = [op for op in operations if op.role == "close" and op.name in tools]
+    if len(close_operations) > 1:
+        raise ValueError("OpenAPI has more than one callable close operation")
+    close_operation = close_operations[0] if close_operations else None
+    close_tool = (_close_tool(openapi, close_operation, source,
+                              str(rules.get(close_operation.name) or ""),
+                              [op for op in operations if op.role == "write" and op.name in tools])
+                  if close_operation else None)
+    close_reasons = _outcome_codes(source, close_operation)[3] if close_operation else {}
+    close_codes = _outcome_codes(source, close_operation)[1] if close_operation else {}
+    service_errors = [value for value in close_reasons.get(close_codes.get("no_promise", ""), set())
+                      if re.search(r"service.*error|system.*error|technical.*error", value, re.I)]
+    if len(service_errors) == 1:
+        for write_tool in write_tools:
+            write_tool["post_process_code"] += (
+                "try:\n"
+                "    if vars.get('generic_write_result') == 'unknown':\n"
+                f"        vars['generic_close_reason'] = {service_errors[0]!r}\n"
+                "except Exception:\n"
+                "    pass\n"
+            )
+    def reason_extraction(role: str) -> list[dict]:
+        values = sorted(close_reasons.get(close_codes.get(role, ""), set()))
+        return ([{"name": "generic_close_reason", "type": "string", "enum_values": values,
+                 "description": "Choose only the source-approved reason explicitly supported by the caller or bank result.",
+                 "min_confidence": 0.9}] if values else [])
     system_prompt = (
         "Follow the supplied bank policy exactly. Never disclose account or debt details before the bank explicitly "
         "confirms identity. Never invent account facts, terms, tool results, or a successful write. "
@@ -276,7 +455,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             "the customer before requesting any account information. Do not mention debt or account details.",
             extraction=[{"name": "caller_role", "type": "string",
                          "enum_values": ["customer", "third_party", "wrong_number", "unknown"],
-                         "description": "Confirmed role of the person speaking.", "min_confidence": 0.75}],
+                         "description": "Confirmed role of the person speaking.", "min_confidence": 0.75}]
+            + reason_extraction("not_reached"),
             transitions=[_when("caller_role", "customer", "verification" if verified else "farewell",
                                "Customer is on the line"), _always("farewell")],
             turns=4),
@@ -284,22 +464,48 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                      "on_enter": {"type": "tts", "text": "Thank you. Goodbye."},
                      "task_message": "End the call. Do not claim an action succeeded unless the bank confirmed it.",
                      "passthrough": True,
-                     "passthrough_default_transition": "closing" if close_tools else "ended",
-                     "transitions": [_always("closing" if close_tools else "ended")]},
+                     "passthrough_default_transition": "closing" if close_tool else "ended",
+                     "transitions": [_always("closing" if close_tool else "ended")]},
         "ended": _end_node(),
     }
     if verified:
         assert verify_op is not None
-        nodes["verification"] = _conversation(
-            "verification", "Follow every identity step and attempt limit in the source policy. Ask for the "
-            "speaker's own answers. Use the identity tool only for those answers. Continue only when the bank "
-            "response explicitly confirms verification. If verification fails, end without disclosing account details.",
-            tools=[tools[verify_op.name]],
-            transitions=[_when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "true", "service",
-                               "Bank confirmed identity"),
-                         _when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "True", "service",
-                               "Bank confirmed identity")],
-            turns=6)
+        steps = _identity_steps(verify_op, source)
+        per_question = _question_result_field(verify_op, proof[verify_op.name])
+        if steps and len(steps[1]) > 1 and per_question:
+            field, values = steps
+            for index, value in enumerate(values):
+                node_name = "verification" if index == 0 else f"verification_{index + 1}"
+                next_node = f"verification_{index + 2}" if index + 1 < len(values) else None
+                edges = [_when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "true",
+                               "service", "Bank confirmed full identity"),
+                         _when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "True",
+                               "service", "Bank confirmed full identity")]
+                if next_node:
+                    edges.extend([
+                        _when(f"{verify_op.name}_response.data.{per_question}", "true", next_node,
+                              "Current security answer passed"),
+                        _when(f"{verify_op.name}_response.data.{per_question}", "True", next_node,
+                              "Current security answer passed"),
+                    ])
+                nodes[node_name] = _conversation(
+                    node_name, f"Ask only for the customer's {value.replace('_', ' ')} under the source policy. "
+                    "Use the bank identity tool for their own answer. Do not disclose account information until "
+                    "the bank explicitly confirms every required check. Respect the source attempt limit.",
+                    tools=[_tool(openapi, verify_op, str(rules.get(verify_op.name) or ""),
+                                 proof[verify_op.name], fixed={field: value})],
+                    extraction=reason_extraction("not_verified"), transitions=edges, turns=6)
+        else:
+            nodes["verification"] = _conversation(
+                "verification", "Follow every identity step and attempt limit in the source policy. Ask for the "
+                "speaker's own answers. Use the identity tool only for those answers. Continue only when the bank "
+                "response explicitly confirms verification. If verification fails, end without disclosing account details.",
+                tools=[tools[verify_op.name]], extraction=reason_extraction("not_verified"),
+                transitions=[_when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "true", "service",
+                                   "Bank confirmed identity"),
+                             _when(f"{verify_op.name}_response.data.{proof[verify_op.name]}", "True", "service",
+                                   "Bank confirmed identity")],
+                turns=6)
         nodes["service"] = _conversation(
             "service", "The bank confirmed identity. Follow the source policy for account discussion, calculations, "
             "offers, and exceptions. Use read tools only when their policy conditions hold. Before a bank write, "
@@ -309,7 +515,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             extraction=[{"name": "explicit_action_confirmation", "type": "string",
                          "enum_values": ["yes", "no", "unknown"],
                          "description": "Yes only when the customer explicitly confirms the exact proposed bank action.",
-                         "min_confidence": 0.9}],
+                         "min_confidence": 0.9}] + reason_extraction("no_promise"),
             transitions=([_when("explicit_action_confirmation", "yes", "commit",
                                 "Customer explicitly confirmed the action")] if write_tools else [])
             + [_when("explicit_action_confirmation", "no", "farewell", "No action authorized")],
@@ -323,9 +529,10 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                 transitions=[_when("generic_write_result", "confirmed", "farewell", "Write confirmed"),
                              _when("generic_write_result", "unknown", "farewell", "Write unconfirmed")],
                 turns=3)
-    if close_tools:
-        nodes["closing"] = _conversation(
-            "closing", "Use the source policy and actual call result to record a truthful call disposition. "
-            "Call the closing tool once, then end. Never claim it succeeded without an explicit bank response.",
-            tools=close_tools, transitions=[], turns=2, timeout="ended")
+    if close_tool:
+        nodes["closing"] = {
+            "name": "closing", "node_type": "api_request", "on_enter": {"type": "silent"},
+            "passthrough": True, "passthrough_default_transition": "ended",
+            "pre_actions": [close_tool], "transitions": [_always("ended")],
+        }
     return {"initial_node": "opening", "system_prompt": system_prompt, "nodes": nodes}
