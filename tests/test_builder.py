@@ -14,6 +14,7 @@ import time
 import unittest
 from unittest import mock
 import urllib.error
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,115 @@ def _fixture_model_call(prompt: str, *, purpose: str) -> dict:
 
 
 class BuilderAcceptanceTests(unittest.TestCase):
+    def test_two_positional_arguments_select_case_mode_defaults(self) -> None:
+        with mock.patch.object(sys, "argv", ["builder.py", "/tmp/final-case", "https://mock.example/base"]), \
+             mock.patch.object(builder, "run", return_value={"ok": True}) as execute, \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(0, builder.main())
+        args = execute.call_args.args[0]
+        self.assertEqual("/tmp/final-case", args.case_folder)
+        self.assertEqual("https://mock.example/base", args.mock_url)
+        self.assertEqual("final-case", args.slot)
+        self.assertEqual("out/final-case", args.out)
+
+    def test_case_folder_discovers_sources_and_routes_every_tool_to_mock(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="btb-case-") as directory:
+            folder = Path(directory) / "Turkish case"
+            folder.mkdir()
+            (folder / "README.md").write_text("Genel açıklama ve servis kuralları.", encoding="utf-8")
+            (folder / "BRIEF.md").write_text("Kart ekstresi borcu için görüşme kuralları.", encoding="utf-8")
+            (folder / "questions.json").write_text('{"soru":"Ödeme tarihi?"}', encoding="utf-8")
+            with zipfile.ZipFile(folder / "conversation.docx", "w") as archive:
+                archive.writestr("word/document.xml",
+                                 '<w:document xmlns:w="urn:test"><w:body><w:p><w:r><w:t>Merhaba müşteri</w:t>'
+                                 '</w:r></w:p></w:body></w:document>')
+            api = json.loads((ROOT / "tools/openapi.json").read_text(encoding="utf-8"))
+            for path_item in api["paths"].values():
+                path_item["servers"] = [{"url": "https://old.example/path"}]
+                for operation in path_item.values():
+                    if isinstance(operation, dict):
+                        operation["servers"] = [{"url": "https://old.example/operation"}]
+            (folder / "service.json").write_text(json.dumps(api), encoding="utf-8")
+            out = Path(directory) / "out"
+            args = argparse.Namespace(case_folder=str(folder), mock_url="https://mock.example/api",
+                                      brief=None, openapi=None, slot="synthetic", out=str(out),
+                                      no_live=True, no_test=True)
+            with mock.patch.object(builder, "_model_caller", return_value=_fixture_model_call):
+                result = builder.run(args)
+            effective = json.loads(Path(result["effective_openapi"]).read_text(encoding="utf-8"))
+            self.assertEqual([{"url": "https://mock.example/api"}], effective["servers"])
+            self.assertTrue(all("servers" not in item for item in effective["paths"].values()))
+            self.assertTrue(all("servers" not in operation for item in effective["paths"].values()
+                                for operation in item.values() if isinstance(operation, dict)))
+            workflow = json.loads(Path(result["workflow"]).read_text(encoding="utf-8"))
+            self.assertEqual([], validate_workflow(workflow, effective))
+            workflow_text = json.dumps(workflow)
+            self.assertIn("https://mock.example/api/verify_identity", workflow_text)
+            self.assertNotIn("old.example", workflow_text)
+            policy = json.loads(Path(result["policy"]).read_text(encoding="utf-8"))
+            self.assertIn("Merhaba müşteri", policy["raw_brief"])
+            self.assertIn("Kart ekstresi", policy["raw_brief"])
+            self.assertIn("Ödeme tarihi", policy["raw_brief"])
+            events = [json.loads(line) for line in Path(result["trace"]).read_text().splitlines()]
+            self.assertEqual(4, sum(row["event"] == "case_document_extracted" for row in events))
+            self.assertEqual("ok", events[-1]["status"])
+
+    def test_mock_url_rejects_credentials_and_query(self) -> None:
+        for url in ("https://user:password@mock.example", "https://mock.example/?token=secret", "file:///tmp/mock"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                builder._mock_openapi({"paths": {}}, url)
+
+    def test_prose_service_contract_uses_model_then_validates_workflow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="btb-prose-contract-") as directory:
+            folder = Path(directory) / "case"
+            folder.mkdir()
+            (folder / "BRIEF.md").write_text("Müşteri araması kuralları.", encoding="utf-8")
+            (folder / "service.txt").write_text(
+                "The documented service has GET /get_account and POST /create_promise with explicit schemas.",
+                encoding="utf-8")
+            api = json.loads((ROOT / "tools/openapi.json").read_text(encoding="utf-8"))
+            calls = []
+
+            def model(prompt: str, *, purpose: str):
+                calls.append(purpose)
+                if purpose == "extract documented service contract":
+                    self.assertIn("service.txt", prompt)
+                    self.assertIn("Müşteri", prompt)
+                    return api
+                return _fixture_model_call(prompt, purpose=purpose)
+
+            args = argparse.Namespace(case_folder=str(folder), mock_url="https://mock.example/bank",
+                                      brief=None, openapi=None, slot="prose", out=str(Path(directory) / "out"),
+                                      no_live=True, no_test=True)
+            with mock.patch.object(builder, "_model_caller", return_value=model):
+                result = builder.run(args)
+            self.assertEqual(["extract documented service contract",
+                              "compile bank brief and tool policy"], calls)
+            self.assertTrue((Path(args.out) / "prose.derived.openapi.json").is_file())
+            self.assertIn("https://mock.example/bank/get_account",
+                          Path(result["workflow"]).read_text(encoding="utf-8"))
+            events = [json.loads(line) for line in Path(result["trace"]).read_text().splitlines()]
+            self.assertIn("contract_synthesis_passed", [row["event"] for row in events])
+            self.assertNotIn("The documented service", Path(result["trace"]).read_text())
+
+    def test_incomplete_prose_contract_fails_without_workflow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="btb-prose-invalid-") as directory:
+            folder = Path(directory) / "case"
+            folder.mkdir()
+            (folder / "BRIEF.md").write_text("Bank policy.", encoding="utf-8")
+            (folder / "service.txt").write_text("Service details are missing.", encoding="utf-8")
+            args = argparse.Namespace(case_folder=str(folder), mock_url="https://mock.example",
+                                      brief=None, openapi=None, slot="invalid-contract",
+                                      out=str(Path(directory) / "out"), no_live=True, no_test=True)
+            with mock.patch.object(builder, "_model_caller",
+                                   return_value=lambda *_a, **_kw: '{"error":"no endpoint methods"}'):
+                with self.assertRaisesRegex(ValueError, "no endpoint methods"):
+                    builder.run(args)
+            self.assertFalse((Path(args.out) / "invalid-contract.workflow.json").exists())
+            events = [json.loads(line) for line in
+                      (Path(args.out) / "invalid-contract.trace.jsonl").read_text().splitlines()]
+            self.assertEqual("failed", events[-1]["status"])
+
     def test_openai_trace_and_request_do_not_expose_prompt_or_key(self) -> None:
         with tempfile.TemporaryDirectory(prefix="btb-model-trace-") as directory:
             trace = builder.Trace(Path(directory) / "trace.jsonl", time.monotonic())

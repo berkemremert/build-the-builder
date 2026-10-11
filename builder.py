@@ -5,6 +5,7 @@
       --slot brief-a --out out
     python3 builder.py --brief briefs/brief-a.md --brief briefs/brief-b.md \
       --openapi tools/openapi.json --slot brief-b --out out --no-live
+    python3 builder.py CASE_FOLDER MOCK_URL --slot final-case --out out/final-case
 
 The policy and workflow are always generated from the supplied files. Live mode
 saves, publishes, exports, and (for recognizable public practice briefs) tests
@@ -24,11 +25,15 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
+import xml.etree.ElementTree as ET
+import zipfile
 
 from policy_compiler import compile_policy
 
@@ -113,6 +118,234 @@ def _within_budget(started: float):
 
 def _input_fingerprint(path: Path) -> dict[str, str]:
     return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def _case_inputs(folder: Path) -> tuple[list[Path], Path | None, dict[str, Any] | None]:
+    """Find policy documents and an optional machine-readable API contract."""
+    if not folder.is_dir():
+        raise ValueError(f"Case folder is not a directory: {folder}")
+    candidates = sorted((path for path in folder.rglob("*") if path.is_file() and
+                         not any(part.startswith(".") or part.lower() in {"out", "output", "__pycache__"}
+                                 for part in path.relative_to(folder).parts)),
+                        key=lambda path: str(path.relative_to(folder)).lower())
+    contracts: list[tuple[Path, dict[str, Any]]] = []
+    documents: list[Path] = []
+    for path in candidates:
+        suffix = path.suffix.lower()
+        if suffix not in {".md", ".txt", ".json", ".yaml", ".yml", ".pdf",
+                          ".docx", ".xlsx", ".pptx", ".png", ".jpg", ".jpeg", ".webp"}:
+            continue
+        if path.stat().st_size > 20_000_000:
+            raise ValueError(f"Case document exceeds 20 MB: {path}")
+        if suffix in {".json", ".yaml", ".yml"}:
+            raw = path.read_text(encoding="utf-8")
+            if suffix == ".json":
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    data = None
+            else:
+                try:
+                    import yaml  # type: ignore[import-not-found]
+                except ImportError as error:
+                    if re.search(r"(?m)^\s*(?:openapi|swagger):", raw):
+                        try:
+                            converted = subprocess.run(
+                                ["ruby", "-rjson", "-ryaml", "-e",
+                                 "puts JSON.generate(YAML.safe_load(STDIN.read, aliases: true))"],
+                                input=raw, capture_output=True, text=True, timeout=30, check=True)
+                            data = json.loads(converted.stdout)
+                        except (FileNotFoundError, subprocess.CalledProcessError) as convert_error:
+                            raise RuntimeError("Install PyYAML or Ruby to read the case's YAML OpenAPI contract") from convert_error
+                    else:
+                        data = None
+                else:
+                    data = yaml.safe_load(raw)
+            if isinstance(data, dict) and ("openapi" in data or "swagger" in data) and isinstance(data.get("paths"), dict):
+                contracts.append((path, data))
+                continue
+        documents.append(path)
+    if len(contracts) > 1:
+        raise ValueError(f"Expected at most one OpenAPI contract in {folder}; found {len(contracts)}")
+    if not documents:
+        raise ValueError(f"No policy or case documents found in {folder}")
+
+    def document_order(path: Path) -> tuple[int, str]:
+        name = path.name.lower()
+        priority = (3 if "amendment" in name or "addendum" in name else
+                    2 if name.startswith("brief") else
+                    0 if name.startswith("readme") else 1)
+        return priority, str(path.relative_to(folder)).lower()
+
+    contract = contracts[0] if contracts else (None, None)
+    return sorted(documents, key=document_order), contract[0], contract[1]
+
+
+def _extract_case_text(path: Path) -> str:
+    """Extract case prose locally without sending it to a conversion service."""
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".txt", ".json", ".yaml", ".yml"}:
+        return path.read_text(encoding="utf-8")
+    if suffix == ".pdf":
+        result = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                                capture_output=True, text=True, timeout=90, check=True)
+        if result.stdout.strip():
+            return result.stdout
+        with tempfile.TemporaryDirectory(prefix="btb-pdf-ocr-") as directory:
+            prefix = str(Path(directory) / "page")
+            subprocess.run(["pdftoppm", "-r", "160", "-png", str(path), prefix],
+                           capture_output=True, text=True, timeout=300, check=True)
+            pages = sorted(Path(directory).glob("page-*.png"))
+            text = []
+            for page in pages:
+                ocr = subprocess.run(["tesseract", str(page), "stdout", "-l", "tur+eng"],
+                                     capture_output=True, text=True, timeout=90, check=True)
+                text.append(ocr.stdout)
+        if any(page.strip() for page in text):
+            return "\n\n".join(text)
+        raise ValueError(f"PDF has no extractable text: {path}")
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        result = subprocess.run(["tesseract", str(path), "stdout", "-l", "tur+eng"],
+                                capture_output=True, text=True, timeout=90, check=True)
+        if result.stdout.strip():
+            return result.stdout
+        raise ValueError(f"Image OCR produced no text: {path}")
+    if suffix == ".xlsx":
+        with zipfile.ZipFile(path) as archive:
+            strings = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                strings = ["".join(node.text or "" for node in item.iter()
+                                   if node.tag.rsplit("}", 1)[-1] == "t")
+                           for item in root if item.tag.rsplit("}", 1)[-1] == "si"]
+            sheets = []
+            for name in sorted(name for name in archive.namelist()
+                               if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)):
+                root = ET.fromstring(archive.read(name))
+                rows = []
+                for row in root.iter():
+                    if row.tag.rsplit("}", 1)[-1] != "row":
+                        continue
+                    values = []
+                    for cell in row:
+                        if cell.tag.rsplit("}", 1)[-1] != "c":
+                            continue
+                        value = next((node.text or "" for node in cell.iter()
+                                      if node.tag.rsplit("}", 1)[-1] == "v"), "")
+                        if cell.get("t") == "s" and value.isdecimal():
+                            value = strings[int(value)] if int(value) < len(strings) else value
+                        elif cell.get("t") == "inlineStr":
+                            value = "".join(node.text or "" for node in cell.iter()
+                                            if node.tag.rsplit("}", 1)[-1] == "t")
+                        values.append(value)
+                    if values:
+                        rows.append("\t".join(values))
+                if rows:
+                    sheets.append(name + "\n" + "\n".join(rows))
+        if sheets:
+            return "\n\n".join(sheets)
+        raise ValueError(f"Spreadsheet has no extractable cells: {path}")
+    if suffix in {".docx", ".pptx"}:
+        with zipfile.ZipFile(path) as archive:
+            if suffix == ".docx":
+                names = [name for name in archive.namelist() if name.startswith("word/") and
+                         (name == "word/document.xml" or name.startswith("word/header") or
+                          name.startswith("word/footer") or name in {"word/footnotes.xml", "word/endnotes.xml"})]
+            elif suffix == ".pptx":
+                names = [name for name in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name) or
+                         re.fullmatch(r"ppt/notesSlides/notesSlide\d+\.xml", name)]
+            chunks = []
+            for name in sorted(names):
+                root = ET.fromstring(archive.read(name))
+                words = [node.text for node in root.iter() if node.tag.rsplit("}", 1)[-1] in
+                         {"t", "v"} and node.text]
+                if words:
+                    chunks.append(name + "\n" + " ".join(words))
+        if chunks:
+            return "\n\n".join(chunks)
+        raise ValueError(f"Office document has no extractable text: {path}")
+    raise ValueError(f"Unsupported case document: {path}")
+
+
+def _materialize_case_documents(folder: Path, documents: list[Path], out: Path,
+                                slot: str, trace: Trace) -> list[Path]:
+    sources = out / f"{slot}.case-sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    result = []
+    total = 0
+    for index, path in enumerate(documents, 1):
+        extracted = _extract_case_text(path)
+        if not extracted.strip():
+            raise ValueError(f"Case document has no text: {path}")
+        relative = str(path.relative_to(folder))
+        content = f"ORIGINAL CASE SOURCE: {relative}\n\n{extracted}\n"
+        total += len(content.encode("utf-8"))
+        if total > 1_000_000:
+            raise ValueError("Case source text exceeds 1 MB; split or summarize documents explicitly")
+        target = sources / f"{index:03d}.txt"
+        target.write_text(content, encoding="utf-8")
+        trace.write("case_document_extracted", source=_input_fingerprint(path),
+                    extracted_path=str(target), text_chars=len(extracted))
+        result.append(target)
+    return result
+
+
+def _synthesize_openapi(documents: list[Path], call_model: Any, trace: Trace) -> dict[str, Any]:
+    """Extract only explicit service operations when no OpenAPI file was supplied."""
+    sources = "\n\n".join(path.read_text(encoding="utf-8") for path in documents)
+    prompt = (
+        "Extract the service/API contract from these case documents into one OpenAPI 3.0 JSON object. "
+        "Use only explicit service contract facts in the documents. Do not infer endpoints, HTTP methods, "
+        "operationId values, field names, field types, enum values, required flags, authentication, or response fields "
+        "from conversation examples or common banking conventions. Preserve exact endpoint paths, operation IDs when documented, "
+        "request and response schemas, parameters, security schemes, and descriptions where documented. "
+        "If a service operation lacks a documented path, method, request shape, or response shape, return "
+        "{\"error\":\"specific missing contract details\"} instead of guessing. "
+        "Use an empty servers array; the caller's mock base URL will be installed by the builder. "
+        "Return JSON only.\n\nCASE DOCUMENTS:\n" + sources
+    )
+    trace.write("contract_synthesis_start", purpose="extract documented service contract",
+                source_files=[str(path) for path in documents], prompt_chars=len(prompt))
+    raw = call_model(prompt, purpose="extract documented service contract")
+    try:
+        result = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError as error:
+        raise ValueError("Model returned invalid service contract JSON") from error
+    if not isinstance(result, dict) or result.get("error"):
+        raise ValueError("Service contract could not be extracted: " +
+                         str(result.get("error") if isinstance(result, dict) else "invalid model output"))
+    paths = result.get("paths")
+    if not isinstance(result.get("openapi"), str) or not isinstance(paths, dict) or not paths:
+        raise ValueError("Extracted service contract is missing OpenAPI version or paths")
+    operations = [(path, method, spec) for path, path_item in paths.items()
+                  if isinstance(path_item, dict) for method, spec in path_item.items()
+                  if method.lower() in {"get", "post", "put", "patch", "delete"}]
+    if not operations or any(not path.startswith("/") or not isinstance(spec, dict) or
+                             not isinstance(spec.get("responses"), dict) or not spec["responses"] or
+                             (method.lower() in {"post", "put", "patch"} and "requestBody" not in spec)
+                             for path, method, spec in operations):
+        raise ValueError("Extracted service contract has incomplete operation definitions")
+    trace.write("contract_synthesis_passed", operation_count=len(operations),
+                operations=[method.upper() + " " + path for path, method, _ in operations])
+    return result
+
+
+def _mock_openapi(openapi: dict[str, Any], mock_url: str) -> dict[str, Any]:
+    """Route every operation to the organizer's mock service, including overrides."""
+    url = mock_url.rstrip("/")
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Mock URL must be an absolute HTTP(S) base URL without credentials, query, or fragment")
+    result = json.loads(json.dumps(openapi))
+    result["servers"] = [{"url": url}]
+    for path_item in (result.get("paths") or {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        path_item.pop("servers", None)
+        for operation in path_item.values():
+            if isinstance(operation, dict):
+                operation.pop("servers", None)
+    return result
 
 
 def _new_slot_published_version(freya: Any, workflow_id: str) -> tuple[int, str]:
@@ -299,14 +532,41 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     out = Path(args.out).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     trace = Trace(out / f"{args.slot}.trace.jsonl", begun)
-    briefs = [Path(path).expanduser().resolve() for path in args.brief]
-    openapi_path = Path(args.openapi).expanduser().resolve()
-    trace.write("start", slot=args.slot, briefs=[str(path) for path in briefs], openapi=str(openapi_path), no_live=args.no_live)
+    case_folder = getattr(args, "case_folder", None)
+    mock_url = getattr(args, "mock_url", None)
     summary: dict[str, Any] = {"slot": args.slot, "trace": str(trace.path)}
+    model_call = None
     try:
-        trace.write("inputs", briefs=[_input_fingerprint(path) for path in briefs], openapi=_input_fingerprint(openapi_path))
-        openapi = json.loads(openapi_path.read_text(encoding="utf-8"))
-        model_call = _model_caller(trace, begun)
+        if case_folder:
+            folder = Path(case_folder).expanduser().resolve()
+            source_documents, source_openapi_path, source_openapi = _case_inputs(folder)
+            briefs = _materialize_case_documents(folder, source_documents, out, args.slot, trace)
+            if source_openapi is None:
+                trace.write("case_contract_missing", source_documents=[_input_fingerprint(path) for path in source_documents])
+                model_call = _model_caller(trace, begun)
+                source_openapi = _synthesize_openapi(briefs, model_call, trace)
+                source_openapi_path = out / f"{args.slot}.derived.openapi.json"
+                source_openapi_path.write_text(json.dumps(source_openapi, ensure_ascii=False, indent=2) + "\n",
+                                               encoding="utf-8")
+            openapi = _mock_openapi(source_openapi, mock_url)
+            openapi_path = out / f"{args.slot}.effective.openapi.json"
+            openapi_path.write_text(json.dumps(openapi, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            trace.write("case_discovered", folder=str(folder), documents=[str(path) for path in source_documents],
+                        source_openapi=str(source_openapi_path), mock_url=mock_url)
+        else:
+            briefs = [Path(path).expanduser().resolve() for path in args.brief]
+            source_openapi_path = Path(args.openapi).expanduser().resolve()
+            openapi_path = source_openapi_path
+            openapi = json.loads(openapi_path.read_text(encoding="utf-8"))
+        trace.write("start", slot=args.slot, briefs=[str(path) for path in briefs], openapi=str(openapi_path), no_live=args.no_live)
+        trace.write("inputs", briefs=[_input_fingerprint(path) for path in briefs],
+                    source_documents=[_input_fingerprint(path) for path in source_documents] if case_folder else None,
+                    openapi=_input_fingerprint(source_openapi_path),
+                    effective_openapi=_input_fingerprint(openapi_path))
+        if case_folder:
+            summary["effective_openapi"] = str(openapi_path)
+        if model_call is None:
+            model_call = _model_caller(trace, begun)
         model_degraded = model_call is None
         try:
             policy = compile_policy([str(path) for path in briefs], str(openapi_path), model_call)
@@ -388,13 +648,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--brief", action="append", required=True, help="Brief path; repeat in precedence order")
-    parser.add_argument("--openapi", required=True, help="Bank tool OpenAPI JSON")
-    parser.add_argument("--slot", required=True, help="Reusable Freya workflow slot")
-    parser.add_argument("--out", required=True, help="Output directory for artifacts and trace")
+    parser.add_argument("case_folder", nargs="?", help="Case folder supplied by the organizer")
+    parser.add_argument("mock_url", nargs="?", help="Mock bank service base URL for case-folder mode")
+    parser.add_argument("--brief", action="append", help="Brief path; repeat in precedence order")
+    parser.add_argument("--openapi", help="Bank tool OpenAPI JSON")
+    parser.add_argument("--slot", help="Reusable Freya workflow slot")
+    parser.add_argument("--out", help="Output directory for artifacts and trace")
     parser.add_argument("--no-live", action="store_true", help="Generate locally without Freya save/export/test")
     parser.add_argument("--no-test", action="store_true", help="Save and export but skip the public practice simulation")
     args = parser.parse_args()
+    if args.case_folder or args.mock_url:
+        if not args.case_folder or not args.mock_url or args.brief or args.openapi:
+            parser.error("case-folder mode needs CASE_FOLDER MOCK_URL and no --brief/--openapi flags")
+        folder_name = Path(args.case_folder).expanduser().name
+        args.slot = args.slot or re.sub(r"[^A-Za-z0-9_.-]+", "-", folder_name).strip(".-")[:80] or "final-case"
+        args.out = args.out or str(Path("out") / args.slot)
+    else:
+        if not args.brief or not args.openapi or not args.slot or not args.out:
+            parser.error("practice mode needs --brief, --openapi, --slot, and --out")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", args.slot) or args.slot in {".", ".."}:
         parser.error("--slot must be a simple name using letters, digits, dot, underscore or hyphen")
     try:
