@@ -1187,6 +1187,33 @@ except Exception:
 """
 
 
+_SINGLE_HARDSHIP_FOLLOWUP_CODE = """import json
+try:
+    action = str(vars.get('single_support_action') or '')
+    raw = vars.get('proposed_terms_json') or ''
+    raw = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], str):
+        raw = [json.loads(raw[0])]
+    if isinstance(raw, dict):
+        raw = [raw]
+    products = json.loads(str(vars.get('product_json') or '[]'))
+    term = raw[0] if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict) else {}
+    product = products[0] if len(products) == 1 else {}
+    named = str(term.get('product_id') or '').strip().lower()
+    pid = str(product.get('product_id') or '')
+    label = str(product.get('label') or '').strip().lower()
+    if named in ('', pid.lower(), label) and str(term.get('date_phrase') or term.get('date_words') or
+                                                  term.get('raw_date') or term.get('date') or '').strip():
+        term['product_id'] = pid
+        vars['proposed_terms_json'] = json.dumps([term])
+        vars['single_hardship_next'] = 'proposal'
+    else:
+        vars['single_hardship_next'] = 'declined' if action == 'declined' else 'clarify'
+except Exception:
+    vars['single_hardship_next'] = 'declined' if str(vars.get('single_support_action') or '') == 'declined' else 'clarify'
+"""
+
+
 _SINGLE_ROBOT_ROUTE_CODE = """try:
     action = str(vars.get('discussion_action') or '')
     terms = str(vars.get('proposed_terms_json') or '').strip()
@@ -2380,6 +2407,11 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
         r"friday\s+of\s+(?:this|the\s+following|next)\s+week\b",
         offer_source, re.I
     )) and bool(re.search(r"attempt\s*2.{0,100}floor.{0,100}deadline", offer_source, re.I)))
+    human_help_first = bool(re.search(
+        r"ask\s+once\s+whether\s+(?:you|the\s+digital\s+assistant)\s+can\s+help\s+first|"
+        r"ask\s+once\s+if\s+(?:you|the\s+digital\s+assistant)\s+can\s+help\s+first|"
+        r"offer\s+to\s+help\s+first\s+before\s+transferr",
+        source_policy, re.I))
 
     verify_hook = (_VERIFY_HOOK.replace("__COMPLETE_FIELD__", repr(identity_response["complete"]))
                    .replace("__ANSWER_FIELD__", repr(identity_response["answer"]))
@@ -2585,12 +2617,24 @@ except Exception:
         _check("product_count", "equals", "1"), _check("single_sensitive_intent", "equals", intent),
     ]})
     transitions = [
-        _eq("transfer_human", "discussion_action", "transfer_human"),
+        _eq("human_first_help" if human_help_first else "transfer_human",
+            "discussion_action", "transfer_human"),
+        _to("single_hardship_proposal_notice", "A hardship caller volunteered a payment day",
+            _when({"logic": "and", "conditions": [
+                _check("product_count", "equals", "1"),
+                _check("single_sensitive_intent", "equals", "hardship"),
+                _check("discussion_action", "equals", "proposal_ready"),
+            ]})),
         _to("single_hardship", "Hardship takes priority over restructuring", single_intent("hardship")),
         _to("single_paid_notice", "Current past-due amount was paid",
             _when({"logic": "and", "conditions": [
                 _check("product_count", "equals", "1"),
                 _check("single_current_due_paid_claim", "equals", "yes"),
+            ]})),
+        _to("prepare_notes", "Single-product debt is disputed",
+            _when({"logic": "and", "conditions": [
+                _check("product_count", "equals", "1"),
+                _check("single_product_reason", "equals", reason_names.get("dispute") or "dispute"),
             ]})),
         _to("transfer_restructuring", "Caller requests lower instalments or a new payment plan",
             _when({"logic": "and", "conditions": [
@@ -2689,6 +2733,20 @@ except Exception:
                                                  max_turns=40,
                                                  max_target="multi_all_today_gate" if multi_enabled else "prepare_notes")
     nodes["account_discussion"]["on_enter_first_entry_only"] = True
+    if human_help_first:
+        nodes["human_first_help"] = _conversation(
+            "human_first_help",
+            "The caller requested a human. The source-required offer to help first was spoken on entry. "
+            "Wait for the latest answer. If they still want a human, transfer to the general queue. "
+            "If they accept your help, continue the verified discussion without another transfer offer. "
+            "No tool call is allowed in this node.",
+            opening="Can I help you first?",
+            extraction=[_enum("human_help_action", ["insists", "accepts_help", "other"],
+                              "insists if the caller still requests a human or declines digital assistance; "
+                              "accepts_help if they agree to continue with the digital assistant; other otherwise.")],
+            transitions=[_eq("transfer_human", "human_help_action", "insists"),
+                         _always("account_discussion")],
+            max_turns=1, max_target="account_discussion")
     if multi_enabled:
         all_today_question = _all_today_question(policy)
         nodes["multi_all_today_gate"] = _code_node(
@@ -2819,6 +2877,15 @@ except Exception:
     nodes["single_date_capture"]["transitions"] = [
         _eq("prepare_confirmation", "single_date_state", "ready"), _always("service_unavailable")]
 
+    nodes["single_hardship_proposal_notice"] = _conversation(
+        "single_hardship_proposal_notice",
+        "The caller volunteered a dated payment while disclosing hardship. Speak one short sympathy sentence and offer support availability on entry. "
+        "Do not make a persuasion offer. Continue to the deterministic amount and date validation without asking the caller to repeat terms. "
+        "No tool call is allowed in this node.",
+        opening="I'm sorry to hear that. I can connect you with our customer support team if you would like.",
+        transitions=[_always("single_proposal_gate")], max_turns=1, max_target="single_proposal_gate")
+    nodes["single_hardship_proposal_notice"]["passthrough"] = True
+    nodes["single_hardship_proposal_notice"]["passthrough_default_transition"] = "single_proposal_gate"
     nodes["single_hardship"] = _conversation(
         "single_hardship",
         "The caller disclosed hardship. The one short sympathy sentence and support offer were spoken on entry. Wait for the latest answer. Do not persuade, repeat the sympathy sentence, or describe a restructuring plan. If they decline support, close as hardship. If they themselves propose an exact payment day or amount with a day, validate that proposal. No tool call is allowed here.",
@@ -2829,9 +2896,15 @@ except Exception:
                      "description": "Only if the latest caller answer independently proposes a payment with an exact day, return a one-element JSON array with product_id, amount, and raw date words. Use full past-due amount if only the day is stated. Leave empty otherwise."}],
         transitions=[_eq("transfer_support", "single_support_action", "accepted"),
                      _eq("transfer_human", "single_support_action", "transfer_human"),
-                     _eq("prepare_confirmation", "single_support_action", "proposal"),
-                     _eq("single_hardship_declined", "single_support_action", "declined")],
+                     _eq("single_hardship_followup", "single_support_action", "proposal"),
+                     _eq("single_hardship_followup", "single_support_action", "declined")],
         max_turns=2, max_target="single_hardship_declined")
+    nodes["single_hardship_followup"] = _code_node(
+        "single_hardship_followup", _SINGLE_HARDSHIP_FOLLOWUP_CODE, "single_hardship_declined")
+    nodes["single_hardship_followup"]["transitions"] = [
+        _eq("single_proposal_gate", "single_hardship_next", "proposal"),
+        _eq("single_exact_date", "single_hardship_next", "clarify"),
+        _always("single_hardship_declined")]
     nodes["single_hardship_declined"] = _code_node(
         "single_hardship_declined",
         _SINGLE_CLOSE_CODE.replace("__REASON__", repr(reason_names.get("hardship") or "hardship")), "prepare_notes")

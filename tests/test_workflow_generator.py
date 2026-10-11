@@ -1509,7 +1509,10 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         state["single_support_action"] = "accepted"
         self.assertEqual("transfer_support", _first_engine_route(workflow["nodes"]["single_hardship"], state))
         state["single_support_action"] = "declined"
-        self.assertEqual("single_hardship_declined", _first_engine_route(workflow["nodes"]["single_hardship"], state))
+        self.assertEqual("single_hardship_followup", _first_engine_route(workflow["nodes"]["single_hardship"], state))
+        _run_code_node(workflow, "single_hardship_followup", state)
+        self.assertEqual("single_hardship_declined",
+                         _first_engine_route(workflow["nodes"]["single_hardship_followup"], state))
         _run_code_node(workflow, "single_hardship_declined", state)
         _run_code_node(workflow, "prepare_notes", state)
         _run_code_node(workflow, "finalize", state)
@@ -2203,6 +2206,63 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         _run_code_node(workflow, "finalize", state)
         self.assertEqual("unresolved", state["close_outcome"])
         self.assertEqual("declined", state["close_reason"])
+
+
+    def test_single_human_request_gets_source_required_help_offer_first(self) -> None:
+        workflow = self._build("brief-a.md")
+        state = {"product_count": "1", "discussion_action": "transfer_human"}
+        self.assertEqual("human_first_help", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        self.assertIn("help you first", workflow["nodes"]["human_first_help"]["on_enter"]["text"].lower())
+        state["human_help_action"] = "insists"
+        self.assertEqual("transfer_human", _first_engine_route(workflow["nodes"]["human_first_help"], state))
+
+    def test_single_dispute_reason_closes_even_when_action_is_continue(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "credit_card", "card_last4": "4821",
+             "past_due": 420, "minimum_payment": 126, "days_late": 6},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "product_count": "1",
+                      "discussion_action": "continue", "single_sensitive_intent": "none",
+                      "single_product_reason": "dispute", "recorded_ids": "[]"})
+        self.assertEqual("prepare_notes", _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        _run_code_node(workflow, "prepare_notes", state)
+        _run_code_node(workflow, "finalize", state)
+        self.assertEqual(("no_promise", "dispute"), (state["close_outcome"], state["close_reason"]))
+
+    def test_hardship_with_volunteered_terms_reaches_validated_readback(self) -> None:
+        workflow = self._build("brief-a.md")
+        products, state = _prepared_products(workflow, [
+            {"product_id": "p1", "type": "personal_loan", "past_due": 780,
+             "instalment_amount": 260, "days_late": 21},
+        ], "2026-10-14T11:00")
+        state.update({"product_json": json.dumps(products), "product_count": "1",
+                      "discussion_action": "proposal_ready", "single_sensitive_intent": "hardship",
+                      "proposed_terms_json": json.dumps([{"product_id": "p1", "amount": 780,
+                                                         "date": "next Tuesday 20 October"}])})
+        self.assertEqual("single_hardship_proposal_notice",
+                         _first_engine_route(workflow["nodes"]["account_discussion"], state))
+        self.assertIn("sorry", workflow["nodes"]["single_hardship_proposal_notice"]["on_enter"]["text"].lower())
+        self.assertEqual("single_proposal_gate",
+                         _first_engine_route(workflow["nodes"]["single_hardship_proposal_notice"], state))
+        _run_code_node(workflow, "single_proposal_gate", state)
+        self.assertEqual("prepare_confirmation",
+                         _first_engine_route(workflow["nodes"]["single_proposal_gate"], state))
+        _run_code_node(workflow, "prepare_confirmation", state)
+        self.assertEqual("ready", state["proposal_validation_state"], state.get("proposal_error"))
+        self.assertEqual({"product_id": "p1", "amount": 780.0, "date": "2026-10-20"},
+                         json.loads(state["readback_terms_json"])[0])
+
+        followup = dict(state, proposed_terms_json=json.dumps([json.dumps({
+            "product_id": "personal loan", "amount": 780, "date": "20 October"})]),
+            single_support_action="declined")
+        self.assertEqual("single_hardship_followup",
+                         _first_engine_route(workflow["nodes"]["single_hardship"], followup))
+        _run_code_node(workflow, "single_hardship_followup", followup)
+        self.assertEqual("single_proposal_gate",
+                         _first_engine_route(workflow["nodes"]["single_hardship_followup"], followup))
+        _run_code_node(workflow, "prepare_confirmation", followup)
+        self.assertEqual("ready", followup["proposal_validation_state"], followup.get("proposal_error"))
 
 
 if __name__ == "__main__":
