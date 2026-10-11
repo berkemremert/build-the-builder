@@ -15,7 +15,8 @@ from collections import deque
 from itertools import product
 from pathlib import Path
 
-from api_bindings import account_collection_field, promise_request_fields
+from api_bindings import (account_response_collection, identity_response_fields,
+                          note_request_fields, promise_request_fields)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -43,7 +44,7 @@ def _walk(value, path="workflow"):
             yield from _walk(child, f"{path}[{index}]")
 
 
-def _condition_has_verification(condition) -> bool:
+def _condition_has_verification(condition, complete_variable: str | None = None) -> bool:
     """Recognize a positive, deterministic identity gate on an edge."""
     if not isinstance(condition, dict):
         return False
@@ -51,12 +52,15 @@ def _condition_has_verification(condition) -> bool:
     if isinstance(children, list):
         logic = condition.get("logic")
         if logic == "and":
-            return any(_condition_has_verification(c) for c in children)
+            return any(_condition_has_verification(c, complete_variable) for c in children)
         if logic == "or":
-            return bool(children) and all(_condition_has_verification(c) for c in children)
+            return bool(children) and all(_condition_has_verification(c, complete_variable) for c in children)
         return False
     variable = str(condition.get("variable", "")).lower()
     operand = str(condition.get("operand", "")).lower()
+    if complete_variable is not None:
+        return (condition.get("operator") == "equals" and variable == complete_variable.lower()
+                and operand in {"true", "verified", "passed", "success"})
     identity_variable = (
         "all_verified" in variable or
         ("identity" in variable or "verification" in variable) and
@@ -231,6 +235,25 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
     }
     if not expected_urls:
         errors.append("openapi.servers and paths must define absolute tool URLs")
+    identity_operations = [operation for path, methods in openapi["paths"].items()
+                           if isinstance(methods, dict)
+                           for method, operation in methods.items()
+                           if method.lower() in {"get", "post", "put", "patch", "delete"}
+                           and isinstance(operation, dict)
+                           and (operation.get("operationId") == "verify_identity" or
+                                not operation.get("operationId") and path.rstrip("/").split("/")[-1] == "verify_identity")]
+    identity_complete_variable = None
+    identity_response_names: set[str] = set()
+    if len(identity_operations) == 1:
+        try:
+            identity_semantics = identity_response_fields(identity_operations[0])
+            identity_complete_variable = "verify_identity_response.data." + identity_semantics["complete"]
+            for code, response in (identity_operations[0].get("responses") or {}).items():
+                if str(code).isdigit() and 200 <= int(code) < 300 and isinstance(response, dict):
+                    schema = (response.get("content") or {}).get("application/json", {}).get("schema") or {}
+                    identity_response_names.update((schema.get("properties") or {}).keys())
+        except ValueError as exc:
+            errors.append(f"verify_identity OpenAPI: {exc}")
     tool_locations: dict[str, set[str]] = {}
 
     def check_mapping(mapping, location: str) -> None:
@@ -383,6 +406,18 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                     default = (body_props.get(field) or {}).get("default")
                     if default != "{{" + variable + "}}":
                         errors.append(f"{location}.body.properties.{field}.default: bind {role} to {{{{{variable}}}}}")
+        if name == "add_note" and placement == "pre_action":
+            try:
+                semantic_fields = note_request_fields(schema)
+            except ValueError as exc:
+                errors.append(f"{location}: {exc}")
+            else:
+                for role, variable in (("product", "pending_note_product_id"),
+                                       ("reason", "pending_note_reason")):
+                    field = semantic_fields[role]
+                    default = (body_props.get(field) or {}).get("default")
+                    if default != "{{" + variable + "}}":
+                        errors.append(f"{location}.body.properties.{field}.default: bind {role} to {{{{{variable}}}}}")
 
     edges: dict[str, list[tuple[str, bool, bool]]] = {}
     for name, node in all_nodes.items():
@@ -443,10 +478,8 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
             if fn.get("name") == "get_account" and url in expected_urls:
                 api_path, api_method = expected_urls[url]
                 operation = openapi["paths"][api_path][api_method]
-                response_schema = (((operation.get("responses") or {}).get("200") or {})
-                                   .get("content", {}).get("application/json", {}).get("schema", {}))
                 try:
-                    collection = account_collection_field(response_schema)
+                    collection, _ = account_response_collection(operation)
                 except ValueError as exc:
                     errors.append(f"{loc}: {exc}")
                 else:
@@ -477,7 +510,11 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 continue
             if target != "__previous__":
                 condition = transition.get("condition")
-                edges[name].append((target, _condition_has_verification(condition),
+                for variable in _condition_variables(condition):
+                    prefix = "verify_identity_response.data."
+                    if variable.startswith(prefix) and identity_response_names and variable[len(prefix):] not in identity_response_names:
+                        errors.append(f"{tloc}: {variable} is absent from verify_identity OpenAPI response")
+                edges[name].append((target, _condition_has_verification(condition, identity_complete_variable),
                                     _condition_has_confirmation(condition)))
         for field in ("passthrough_default_transition", "max_turn_transition"):
             target = node.get(field)

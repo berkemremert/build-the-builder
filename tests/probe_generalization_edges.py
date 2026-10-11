@@ -1,12 +1,12 @@
 """Explicit local probes for changed OpenAPI contracts.
 
-These tests use only invented data from probe_changed_brief and deliberately
-sit outside default ``test_*.py`` discovery until the generator supports them.
-Run with ``python3 tests/probe_generalization_edges.py``.
+These tests use only invented data from probe_changed_brief. Run with
+``python3 tests/probe_generalization_edges.py``.
 """
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import sys
 import unittest
@@ -66,6 +66,31 @@ class OpenApiGeneralityEdges(unittest.TestCase):
         self.assertEqual([{"path": "data.accounts", "variable": "account_products"}],
                          workflow["nodes"]["load_account"]["response_mapping"])
         self.assertEqual([], validate_workflow(workflow, api))
+
+    def test_qa_rejects_unmapped_note_and_identity_fields(self) -> None:
+        api = synthetic_api()
+        policy = synthetic_policy()
+        policy["verified_call"] = "Process each product one by one and note any without a promise."
+        workflow = build_workflow(policy, api)
+        broken_note = copy.deepcopy(workflow)
+        _body(broken_note, "add_note_call")["account_ref"]["default"] = "{{account_ref}}"
+        self.assertTrue(any("bind product" in error for error in validate_workflow(broken_note, api)))
+
+        broken_identity = copy.deepcopy(workflow)
+        gate = broken_identity["nodes"]["identity_phone"]["transitions"][0]["condition"]
+        for condition in gate["conditions"]:
+            condition["variable"] = "verify_identity_response.data.nonexistent"
+        errors = validate_workflow(broken_identity, api)
+        self.assertTrue(any("absent from verify_identity" in error for error in errors))
+        self.assertTrue(any("verified" in error.lower() for error in errors))
+
+    def test_ambiguous_identity_response_fails_closed(self) -> None:
+        api = synthetic_api()
+        response = (api["paths"]["/verify_identity"]["post"]["responses"]["200"]
+                    ["content"]["application/json"]["schema"]["properties"])
+        response["complete"] = {"type": "boolean"}
+        with self.assertRaisesRegex(ValueError, "ambiguous result fields"):
+            build_workflow(synthetic_policy(), api)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from api_bindings import account_collection_field, promise_request_fields
+from api_bindings import (account_response_collection, identity_response_fields,
+                          note_request_fields, promise_request_fields)
 
 
 def _check(variable: str, operator: str, operand: Any = "") -> dict:
@@ -506,13 +507,13 @@ _VERIFY_HOOK = """try:
     result.pop('header', None)
     data = result.get('data') if isinstance(result, dict) else None
     if isinstance(data, dict):
-        if data.get('all_verified') is True:
+        if data.get(__COMPLETE_FIELD__) is True:
             data['what_to_do_next'] = 'Identity is fully verified. Continue to account lookup.'
-        elif data.get('verified') is True:
+        elif data.get(__ANSWER_FIELD__) is True:
             data['what_to_do_next'] = 'This answer passed. Ask only the next security question.'
         elif data.get('hint'):
             data['what_to_do_next'] = 'The service returned a hint. Apply the exact hint-handling rule in the policy before retrying.'
-        elif data.get('wrong_answers_left') == 0:
+        elif data.get(__REMAINING_FIELD__) == 0:
             data['what_to_do_next'] = 'Security check ended. Follow the policy failure guidance; disclose no account information.'
         else:
             data['what_to_do_next'] = 'This answer did not pass. Ask the same question again without revealing the correct answer.'
@@ -1705,9 +1706,11 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     if not isinstance(tool_policy, dict):
         tool_policy = {}
     account_path, account_method, _ = _api_spec(openapi, "get_account")
-    response_schema = (openapi.get("paths") or {}).get(account_path, {}).get(account_method.lower(), {}).get("responses", {}).get("200", {}).get("content", {}).get("application/json", {}).get("schema", {})
-    collection_field = account_collection_field(response_schema)
+    account_operation = openapi["paths"][account_path][account_method.lower()]
+    collection_field, response_schema = account_response_collection(account_operation)
     item_fields = response_schema.get("properties", {}).get(collection_field, {}).get("items", {}).get("properties", {})
+    identity_path, identity_method, _ = _api_spec(openapi, "verify_identity")
+    identity_response = identity_response_fields(openapi["paths"][identity_path][identity_method.lower()])
     holidays = _holiday_dates(policy)
     bands = _deadline_bands(policy)
     identity_fields = _identity_fields(openapi, policy)
@@ -1715,6 +1718,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     reason_names, close_reason_names, note_codes, close_codes = _reason_names(openapi, policy)
     promise_success_codes, promise_result_flag, promise_false_codes, promise_no_write_codes = _promise_response_contract(openapi)
     promise_fields = promise_request_fields(_api_spec(openapi, "create_promise")[2])
+    note_fields = note_request_fields(_api_spec(openapi, "add_note")[2])
     promise_bindings = {promise_fields["product"]: "{{pending_product_id}}",
                         promise_fields["amount"]: "{{pending_amount}}",
                         promise_fields["date"]: "{{pending_date}}"}
@@ -1740,10 +1744,13 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     fixed_multi_offers = ("last business day of this week" in offer_source.lower() and
                           bool(re.search(r"attempt\s*2.{0,100}floor.{0,100}deadline", offer_source, re.I)))
 
+    verify_hook = (_VERIFY_HOOK.replace("__COMPLETE_FIELD__", repr(identity_response["complete"]))
+                   .replace("__ANSWER_FIELD__", repr(identity_response["answer"]))
+                   .replace("__REMAINING_FIELD__", repr(identity_response["remaining"])))
     verify_dob = _api_tool(openapi, "verify_identity", fixed={"field": identity_fields[0]},
-                           description=f"Check the customer's {identity_fields[0].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=_VERIFY_HOOK)
+                           description=f"Check the customer's {identity_fields[0].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
     verify_phone = _api_tool(openapi, "verify_identity", fixed={"field": identity_fields[1]},
-                             description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=_VERIFY_HOOK)
+                             description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
     callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=_CALLBACK_HOOK)
     account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")
     promise = _api_tool(openapi, "create_promise", description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
@@ -1759,11 +1766,11 @@ except Exception:
     note["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
-        vars['pending_note_product_id'] = str(body.get('product_id') or '')
-        vars['pending_note_reason'] = str(body.get('reason') or '')
+        vars['pending_note_product_id'] = str(body.get(__PRODUCT_FIELD__) or '')
+        vars['pending_note_reason'] = str(body.get(__REASON_FIELD__) or '')
 except Exception:
     pass
-"""
+""".replace("__PRODUCT_FIELD__", repr(note_fields["product"])).replace("__REASON_FIELD__", repr(note_fields["reason"]))
     transfer["pre_process_code"] = """try:
     body = config.get('body')
     if isinstance(body, dict):
@@ -1829,8 +1836,8 @@ except Exception:
                                     "A first refusal or call-purpose question routes to the one-time security explanation. A second refusal or call-purpose question closes through the workflow. Never print tool-call syntax or claim the call is already closed. "
                                     "After tool result, speak or call the next tool.")
     identity_transitions = lambda success: [
-        _bool("load_account" if success else "identity_phone", "verify_identity_response.data.all_verified" if success else "verify_identity_response.data.verified", "Security answer passed"),
-        _to("finish_identity_failed", "Three wrong answers", _when(_check("verify_identity_response.data.wrong_answers_left", "equals", "0"))),
+        _bool("load_account" if success else "identity_phone", "verify_identity_response.data." + identity_response["complete" if success else "answer"], "Security answer passed"),
+        _to("finish_identity_failed", "Security attempts exhausted", _when(_check("verify_identity_response.data." + identity_response["remaining"], "equals", "0"))),
         _to("identity_decline", "Purpose question without a security answer",
             _when({"logic": "and", "conditions": [
                 _check("identity_purpose_question", "equals", "yes"),
@@ -2402,7 +2409,7 @@ except Exception:
     nodes["select_note"]["transitions"] = [
         _eq("add_note_call", "note_write_state", "notes"), _always("finalize")]
     note_engine = _api_tool(openapi, "add_note", fixed={
-        "product_id": "{{pending_note_product_id}}", "reason": "{{pending_note_reason}}"},
+        note_fields["product"]: "{{pending_note_product_id}}", note_fields["reason"]: "{{pending_note_reason}}"},
         description="Record one deferred non-promise reason after the discussion has ended and no transfer is pending.", post_code=_NOTE_HOOK)
     note_engine["pre_process_code"] = note["pre_process_code"]
     for node_name, failure_target in (("add_note_call", "retry_note_call"),
