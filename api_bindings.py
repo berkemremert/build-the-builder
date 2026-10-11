@@ -7,6 +7,44 @@ import re
 from openapi_resolver import response_schemas
 
 
+def identity_selector_field(schema: dict) -> tuple[str, list[str]]:
+    """Find the request field that chooses which security answer to verify.
+
+    A unique multi-value string enum is sufficient. When the API has several
+    such enums, require a clear selector name or description; do not guess.
+    """
+    candidates: list[tuple[int, str, list[str]]] = []
+    for field, spec in (schema.get("properties") or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        values = spec.get("enum")
+        if not isinstance(values, list) or len(values) < 2 or not all(
+                isinstance(value, str) and value for value in values):
+            continue
+        kind = spec.get("type")
+        if kind not in (None, "string"):
+            continue
+        words = set(re.sub(r"[^a-z0-9]+", "_", field.lower()).strip("_").split("_"))
+        description = str(spec.get("description") or "").lower()
+        score = 0
+        if words & {"field", "question", "challenge", "check", "factor"}:
+            score += 2
+        if words & {"identity", "security", "verification", "verify"}:
+            score += 1
+        if re.search(r"\b(?:which|choose|select)\b.{0,50}\b(?:question|field|check|factor)\b", description):
+            score += 2
+        candidates.append((score, field, values))
+    if len(candidates) == 1:
+        _, field, values = candidates[0]
+        return field, values
+    if candidates:
+        best = max(score for score, _, _ in candidates)
+        winners = [(field, values) for score, field, values in candidates if score == best]
+        if best > 0 and len(winners) == 1:
+            return winners[0]
+    raise ValueError("verify_identity request needs one unambiguous security selector with at least two enum values")
+
+
 def promise_request_fields(schema: dict) -> dict[str, str]:
     """Map product, amount and date to their unambiguous API field names."""
     properties = schema.get("properties") or {}
