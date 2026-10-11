@@ -48,5 +48,55 @@ class GenericRequestValidationTests(unittest.TestCase):
         self.assertTrue(any("invented" in error and "absent from OpenAPI" in error for error in errors))
 
 
+class GenericWriteSafetyTests(unittest.TestCase):
+    def test_successful_send_marker_exposes_guarded_write(self):
+        read_schema = {"type": "object", "properties": {
+            "data": {"type": "object", "properties": {
+                "bucketX": {"type": "object"}, "bucketY": {"type": "object"}}},
+            "ok": {"type": "boolean", "description": "True on success."}}}
+        send_request = {"type": "object", "properties": {"data": {"type": "object",
+            "properties": {"currencyType": {"type": "string", "enum": ["X", "Y"]}}}}}
+        send_response = {"type": "object", "properties": {"data": {"type": "object",
+            "properties": {"exitState": {"type": "string", "description": "DONE on a successful send."}}},
+            "result": {"type": "object", "description": 'Success is HTTP 200 with returnCode "1".',
+                       "properties": {"returnCode": {"type": "string"}}}}}
+        def response(schema):
+            return {"200": {"description": "Success", "content": {"application/json": {"schema": schema}}}}
+        spec = {"openapi": "3.0.3", "servers": [{"url": "https://example.test"}], "paths": {
+            "/read": {"post": {"operationId": "readPortfolio", "summary": "Read portfolio",
+                                "responses": response(read_schema)}},
+            "/send": {"post": {"operationId": "sendReport", "summary": "Send report",
+                                "requestBody": {"content": {"application/json": {"schema": send_request}}},
+                                "responses": response(send_response)}}}}
+        policy = {"raw_brief": "The upstream IVR already authenticated the caller.",
+                  "tool_policy": {"readPortfolio": "Read portfolio before sending.",
+                                  "sendReport": "Use readPortfolio. Do not guess currencyType for a multi-currency send."}}
+        workflow = build_generic_workflow(policy, spec)
+        self.assertEqual([], validate_generic_workflow(workflow, spec))
+        send = workflow["nodes"]["commit"]["tools"][0]
+        self.assertEqual("sendReport", send["function"]["name"])
+
+        for response, accepted in (({"data": {"bucketX": {}, "bucketY": None}}, True),
+                                   ({"data": {"bucketX": {}, "bucketY": {}}}, False)):
+            state = {"generic_read_evidence": __import__("json").dumps({"readPortfolio": {
+                "request": {}, "response": response}}),
+                "explicit_action_confirmation": "yes", "confirmed_write_action": "sendReport"}
+            config = {"url": "https://example.test/send", "body": {"data": {"currencyType": "X"}}}
+            if accepted:
+                exec(send["pre_process_code"], {"config": config, "vars": state})
+                self.assertEqual("https://example.test/send", config["url"])
+            else:
+                with self.assertRaisesRegex(ValueError, "uniquely established"):
+                    exec(send["pre_process_code"], {"config": config, "vars": state})
+                self.assertEqual("", config["url"])
+        state = {}
+        exec(send["post_process_code"], {"result": {"status_code": 200,
+             "data": {"data": {"exitState": "DONE"}, "result": {"returnCode": "1"}}}, "vars": state})
+        self.assertEqual("confirmed", state["generic_write_result"])
+        exec(send["post_process_code"], {"result": {"status_code": 200,
+             "data": {"data": {"exitState": "DONE"}, "result": {"returnCode": "0"}}}, "vars": state})
+        self.assertEqual("unknown", state["generic_write_result"])
+
+
 if __name__ == "__main__":
     unittest.main()

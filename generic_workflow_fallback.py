@@ -212,6 +212,13 @@ def _result_checks(operation: _Operation) -> list[tuple[tuple[str, ...], object]
                         raw = value.group(1)
                         checks.append((child_path, int(raw) if child.get("type") == "integer" and raw.isdecimal()
                                        else raw))
+                elif re.search(r"\b(?:on|for)\s+(?:a\s+)?successful\b", nested_description, re.I):
+                    value = re.search(r"\b([A-Za-z0-9_-]+)\s+(?:on|for)\s+(?:a\s+)?successful\b",
+                                      nested_description, re.I)
+                    if value:
+                        raw = value.group(1)
+                        checks.append((child_path, int(raw) if child.get("type") == "integer" and raw.isdecimal()
+                                       else raw))
                 elif (len(child.get("enum") or []) == 1 and
                       re.search(r"\b(?:exit.?state|response.?code|result.?status|success.?code)\b", name, re.I)):
                     checks.append((child_path, child["enum"][0]))
@@ -219,6 +226,9 @@ def _result_checks(operation: _Operation) -> list[tuple[tuple[str, ...], object]
             for name in properties:
                 match = re.search(r"\b" + re.escape(name) + r"\s*[`\"']([^`\"']+)[`\"']\s+"
                                   r"(?:indicates?|means?)\s+success\b", description, re.I)
+                if not match:
+                    match = re.search(r"\bsuccess(?:ful)?\b[^.;\n]{0,100}?\b" + re.escape(name)
+                                      + r"\s*[`\"']([^`\"']+)[`\"']", description, re.I)
                 if match:
                     checks.append(((*path, name), match.group(1)))
 
@@ -407,7 +417,8 @@ def _provenance_plan(operation: _Operation, operations: list[_Operation], rule: 
                 plan.append({"kind": "response_not_equal", "field": path,
                              "source": op.name, "source_path": source_path, "scope": scope})
 
-    if re.search(r"choice\s+is\s+established", rule, re.I) and re.search(r"multi[- ]currency", rule, re.I):
+    if (re.search(r"multi[- ]currency", rule, re.I) and
+            re.search(r"choice\s+is\s+established|do\s+not\s+guess|choice\s+is\s+unresolved", rule, re.I)):
         for path in data_paths:
             field_schema = _schema_at_path(_json_schema(operation, response=False), path)
             values = field_schema.get("enum") or []
