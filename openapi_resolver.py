@@ -66,8 +66,21 @@ def resolve_schema(schema: dict, document: dict, *, location: str = "schema",
     """Expand local refs and allOf, including nested property and item schemas."""
     if not isinstance(schema, dict):
         raise ValueError(f"OpenAPI {location} must be an object")
-    if "oneOf" in schema or "anyOf" in schema or "not" in schema:
+    if "not" in schema:
         raise ValueError(f"Unsupported OpenAPI schema union/negation at {location}")
+    union = next((key for key in ("oneOf", "anyOf") if key in schema), None)
+    if union:
+        branches = schema[union]
+        if (not isinstance(branches, list) or len(branches) != 2 or
+                not all(isinstance(branch, dict) for branch in branches) or
+                {branch.get("type") for branch in branches} not in
+                ({"string", "number"}, {"string", "integer"})):
+            raise ValueError(f"Unsupported OpenAPI schema union/negation at {location}")
+        # A string is one of the explicitly accepted wire formats. Selecting
+        # it lets the API-call tool send a single stable type without guessing.
+        selected = next(branch for branch in branches if branch["type"] == "string")
+        schema = _merge_schema({key: value for key, value in schema.items() if key != union},
+                               selected, location)
     base: dict = {}
     if "$ref" in schema:
         reference = schema["$ref"]

@@ -39,6 +39,18 @@ def referenced_api() -> dict:
 
 
 class OpenApiResolverTests(unittest.TestCase):
+    def test_unconstrained_string_or_number_accepts_string_wire_form(self) -> None:
+        api = synthetic_api()
+        schema = {"description": "String or number is accepted", "oneOf": [
+            {"type": "string"}, {"type": "number"}]}
+        self.assertEqual({"description": "String or number is accepted", "type": "string"},
+                         resolve_schema(schema, api))
+        self.assertEqual({"type": "string", "enum": ["1", "2"]},
+                         resolve_schema({"oneOf": [{"type": "integer", "minimum": 1, "maximum": 2},
+                                                   {"type": "string", "enum": ["1", "2"]}]}, api))
+        with self.assertRaisesRegex(ValueError, "Unsupported OpenAPI schema union"):
+            resolve_schema({"oneOf": [{"type": "string"}, {"type": "boolean"}]}, api)
+
     def test_component_request_response_and_nested_item_refs(self) -> None:
         api = referenced_api()
         original = copy.deepcopy(api)
