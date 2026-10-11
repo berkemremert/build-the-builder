@@ -46,12 +46,27 @@ class PaymentDateTests(unittest.TestCase):
             "2026-10-15": datetime.date(2026, 10, 15),
             "this Friday": datetime.date(2026, 10, 16),
             "next Friday": datetime.date(2026, 10, 23),
+            "Thursday next week": datetime.date(2026, 10, 22),
+            "Friday of next week": datetime.date(2026, 10, 23),
             "Friday": datetime.date(2026, 10, 16),
             "tomorrow": datetime.date(2026, 10, 15),
         }
         for phrase, expected in cases.items():
             with self.subTest(phrase=phrase):
                 self.assertEqual(expected, parse_payment_date(phrase, today))
+
+    def test_weekday_next_week_uses_following_calendar_week(self) -> None:
+        friday = datetime.date(2026, 10, 16)
+        self.assertEqual(datetime.date(2026, 10, 19),
+                         parse_payment_date("Monday of next week", friday))
+        self.assertEqual(datetime.date(2026, 10, 23),
+                         parse_payment_date("next Friday", friday))
+        self.assertEqual(datetime.date(2026, 10, 16),
+                         parse_payment_date("this Friday", friday))
+        for phrase in ("Thursday next week, this Thursday", "this Friday next week",
+                       "Thursday of next week, October 15", "Thursday next week 2026-10-15"):
+            with self.subTest(phrase=phrase), self.assertRaises(ValueError):
+                parse_payment_date(phrase, datetime.date(2026, 10, 14))
 
     def test_explicit_correction_uses_last_complete_date(self) -> None:
         today = datetime.date(2026, 10, 14)
@@ -126,6 +141,14 @@ class GeneratedConfirmationDateTests(unittest.TestCase):
         state = self._prepare("the sixteenth of January")
         self.assertEqual("ready", state["proposal_validation_state"], state["proposal_error"])
         self.assertEqual("2027-01-14", json.loads(state["readback_terms_json"])[0]["date"])
+
+    def test_generated_confirmation_resolves_next_week_word_order(self) -> None:
+        for phrase, expected in (("Thursday next week", "2026-10-22"),
+                                 ("Friday of next week", "2026-10-23")):
+            with self.subTest(phrase=phrase):
+                state = self._prepare(phrase, now="2026-10-14T11:00", deadline="2026-10-30")
+                self.assertEqual("ready", state["proposal_validation_state"], state["proposal_error"])
+                self.assertEqual(expected, json.loads(state["readback_terms_json"])[0]["date"])
 
     def test_generated_validation_uses_corrected_date(self) -> None:
         for phrase in ("21 October, sorry, I mean 20 October",

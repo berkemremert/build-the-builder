@@ -34,12 +34,29 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
     if phrase == "tomorrow":
         return today + datetime.timedelta(days=1)
 
+    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    weekday_pattern = "|".join(weekdays)
+    spoken_weekdays = {match.group() for match in re.finditer(r"\b(?:" + weekday_pattern + r")\b", phrase)}
+    if len(spoken_weekdays) > 1:
+        raise ValueError("Conflicting payment dates")
+    week_cues = {match.group(1) for match in re.finditer(
+        r"\b(next|this)\s+(?:week|" + weekday_pattern + r")\b", phrase)}
+    if len(week_cues) > 1:
+        raise ValueError("Conflicting payment dates")
+    week_cue = next(iter(week_cues)) if week_cues else None
+    week_start = today - datetime.timedelta(days=today.weekday())
+    selected_week = week_start + datetime.timedelta(days=7 if week_cue == "next" else 0)
+
     iso_matches = list(re.finditer(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", phrase))
     if len(iso_matches) > 1:
         raise ValueError("Ambiguous payment dates")
     if iso_matches:
         iso_day = datetime.date.fromisoformat(iso_matches[0].group())
         if relative_day is not None and iso_day != relative_day:
+            raise ValueError("Conflicting payment dates")
+        if spoken_weekdays and iso_day.weekday() != weekdays.index(next(iter(spoken_weekdays))):
+            raise ValueError("Day and weekday disagree")
+        if week_cue and not selected_week <= iso_day < selected_week + datetime.timedelta(days=7):
             raise ValueError("Conflicting payment dates")
         return iso_day
     phrase = re.sub(r"[\s-]+", " ", phrase)
@@ -74,7 +91,6 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
 
     months = ("january", "february", "march", "april", "may", "june",
               "july", "august", "september", "october", "november", "december")
-    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
     named_days = dict((name, index + 1) for index, name in enumerate((
         "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
         "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
@@ -151,18 +167,17 @@ def parse_payment_date(raw: str, today: datetime.date) -> datetime.date:
                 raise ValueError("Invalid payment date")
         if weekday is not None and candidate.weekday() != weekday:
             raise ValueError("Day and weekday disagree")
+        if week_cue and not selected_week <= candidate < selected_week + datetime.timedelta(days=7):
+            raise ValueError("Conflicting payment dates")
         if relative_day is not None and candidate != relative_day:
             raise ValueError("Conflicting payment dates")
         return candidate
 
     if weekday is not None:
-        if re.search(r"\bnext\s+" + weekdays[weekday] + r"\b", phrase):
-            offset = 7 - today.weekday() + weekday
-        elif re.search(r"\bthis\s+" + weekdays[weekday] + r"\b", phrase):
-            offset = weekday - today.weekday()
+        if week_cue:
+            candidate = selected_week + datetime.timedelta(days=weekday)
         else:
-            offset = (weekday - today.weekday()) % 7
-        candidate = today + datetime.timedelta(days=offset)
+            candidate = today + datetime.timedelta(days=(weekday - today.weekday()) % 7)
         if relative_day is not None and candidate != relative_day:
             raise ValueError("Conflicting payment dates")
         return candidate
