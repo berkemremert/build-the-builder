@@ -32,6 +32,7 @@ from api_servers import operation_url  # noqa: E402
 
 METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 REFERENCE = re.compile(r"^\{\{([A-Za-z0-9_.-]+)\}\}$")
+USER_AGENT = "Mozilla/5.0 (build-the-builder)"
 
 
 class SmokeError(Exception):
@@ -256,6 +257,7 @@ class _NoRedirect(HTTPRedirectHandler):
 def _send(url: str, method: str, body: Any, headers: dict, timeout: float, max_bytes: int) -> tuple[int, Any, str]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = Request(url, data=data, method=method.upper(), headers={"Accept": "application/json",
+                      "User-Agent": USER_AGENT,
                       **({"Content-Type": "application/json"} if data is not None else {}), **headers})
     try:
         response = build_opener(_NoRedirect).open(request, timeout=timeout)

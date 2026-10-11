@@ -10,7 +10,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.parse import urlsplit
 
 
@@ -199,6 +199,23 @@ class MockContractSmokeTests(unittest.TestCase):
         self.assertIn("PASS", output.getvalue())
         self.assertNotIn("SYNTHETIC", output.getvalue())
         self.assertNotIn(self.base_url, output.getvalue())
+
+
+class TransportTests(unittest.TestCase):
+    def test_requests_use_browser_user_agent(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"status":"alive"}'
+        response.status = 200
+        response.headers = {"Content-Type": "application/json"}
+        with patch.object(smoke, "build_opener") as build_opener:
+            build_opener.return_value.open.return_value = response
+            status, body, _ = smoke._send(
+                "https://mock.example/healthz", "get", None, {}, 5, 1024)
+            request = build_opener.return_value.open.call_args.args[0]
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"status": "alive"})
+        self.assertEqual(request.get_header("User-agent"), smoke.USER_AGENT)
 
 
 if __name__ == "__main__":
