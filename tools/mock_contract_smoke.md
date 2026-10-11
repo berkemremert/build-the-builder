@@ -20,6 +20,9 @@ real requests and may exercise writes declared in the cases, so use dedicated
 seeded customers. `/healthz` and `/readyz` are at the Worker origin root and
 are outside the bank OpenAPI operations.
 
+The default per-request timeout is 20 seconds to allow slower successful
+responses. Set `--timeout` higher if the deployed service needs more time.
+
 The cases file is JSON. Give every OpenAPI operation at least one step whose
 expected status or statuses are all 2xx. Steps run in order within each scenario. A complete
 synthetic example appears in `tests/test_mock_contract_smoke.py`.

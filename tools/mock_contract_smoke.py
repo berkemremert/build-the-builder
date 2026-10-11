@@ -281,7 +281,7 @@ def _send(url: str, method: str, body: Any, headers: dict, timeout: float, max_b
         raise SmokeError("response contains invalid JSON") from exc
 
 
-def run(contract: dict, cases: dict, base_url: str, *, timeout: float = 10,
+def run(contract: dict, cases: dict, base_url: str, *, timeout: float = 20,
         max_bytes: int = 1_000_000) -> list[str]:
     """Execute supplied scenarios; return safe messages with no input values."""
     try:
@@ -380,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", required=True, help="JSON file with seeded scenarios")
     parser.add_argument("--base-url", required=True,
                         help="Deployed HTTPS mock URL matching the contract servers entry")
-    parser.add_argument("--timeout", type=float, default=10)
+    parser.add_argument("--timeout", type=float, default=20)
     args = parser.parse_args(argv)
     try:
         messages = run(_load_json(args.contract), _load_json(args.cases), args.base_url, timeout=args.timeout)
