@@ -39,6 +39,33 @@ def _fixture_model_call(prompt: str, *, purpose: str) -> dict:
 
 
 class BuilderAcceptanceTests(unittest.TestCase):
+    def test_case_sources_follow_dates_and_summarize_large_test_fixture(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="btb-sources-") as directory:
+            folder = Path(directory) / "case"
+            (folder / "sources" / "meetings").mkdir(parents=True)
+            (folder / "sources" / "emails").mkdir(parents=True)
+            (folder / "test-environment").mkdir()
+            (folder / "BRIEF.md").write_text("Overview", encoding="utf-8")
+            (folder / "sources" / "emails" / "2026-10-09-recap.txt").write_text(
+                "Later decision", encoding="utf-8")
+            (folder / "sources" / "meetings" / "2026-10-07-session.txt").write_text(
+                "Earlier decision", encoding="utf-8")
+            fixture = {"description": "Synthetic customers", "customers": [
+                {"customerNumber": str(index), "privateSample": "x" * 300}
+                for index in range(400)]}
+            (folder / "test-environment" / "customers.json").write_text(
+                json.dumps(fixture), encoding="utf-8")
+            documents, _, _ = builder._case_inputs(folder)
+            self.assertLess(documents.index(folder / "sources" / "meetings" / "2026-10-07-session.txt"),
+                            documents.index(folder / "sources" / "emails" / "2026-10-09-recap.txt"))
+            out = Path(directory) / "out"
+            trace = builder.Trace(out / "trace.jsonl", time.monotonic())
+            sources = builder._materialize_case_documents(folder, documents, out, "synthetic", trace)
+            text = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+            self.assertLess(text.index("Earlier decision"), text.index("Later decision"))
+            self.assertIn("Record count: 400", text)
+            self.assertNotIn("x" * 300, text)
+
     def test_two_positional_arguments_select_case_mode_defaults(self) -> None:
         with mock.patch.object(sys, "argv", ["builder.py", "/tmp/final-case", "https://mock.example/base"]), \
              mock.patch.object(builder, "run", return_value={"ok": True}) as execute, \

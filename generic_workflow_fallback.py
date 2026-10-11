@@ -497,6 +497,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                      "Never disclose account or debt details before the bank explicitly confirms identity. ")
     system_prompt = (
         "Follow the supplied bank policy exactly. " + identity_rule + call_context +
+        "When source statements conflict, follow the most recent explicit bank decision; an older draft or "
+        "current IVR script does not override a later approved change. Treat open questions as unresolved. "
         "Never invent account facts, terms, tool results, or a successful write. "
         "If a required tool is unavailable or its result is ambiguous, explain that the action cannot be confirmed. "
         "Never retry an uncertain write. Use only tools available in the current stage.\n\nSOURCE POLICY:\n" + source

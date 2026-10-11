@@ -170,12 +170,15 @@ def _case_inputs(folder: Path) -> tuple[list[Path], Path | None, dict[str, Any] 
     if not documents:
         raise ValueError(f"No policy or case documents found in {folder}")
 
-    def document_order(path: Path) -> tuple[int, str]:
+    def document_order(path: Path) -> tuple[int, str, str]:
         name = path.name.lower()
-        priority = (3 if "amendment" in name or "addendum" in name else
-                    2 if name.startswith("brief") else
-                    0 if name.startswith("readme") else 1)
-        return priority, str(path.relative_to(folder)).lower()
+        if name.startswith("readme"):
+            return 0, "", str(path.relative_to(folder)).lower()
+        if name.startswith("brief"):
+            return 1, "", str(path.relative_to(folder)).lower()
+        dated = re.match(r"(\d{4}-\d{2}-\d{2})", name)
+        return (3 if dated else 2, dated.group(1) if dated else "",
+                str(path.relative_to(folder)).lower())
 
     contract = contracts[0] if contracts else (None, None)
     return sorted(documents, key=document_order), contract[0], contract[1]
@@ -274,10 +277,30 @@ def _materialize_case_documents(folder: Path, documents: list[Path], out: Path,
     result = []
     total = 0
     for index, path in enumerate(documents, 1):
-        extracted = _extract_case_text(path)
+        relative = str(path.relative_to(folder))
+        fixture_path = any(re.search(r"(?:^|[-_])(?:test|fixture|sample)(?:[-_]|$)", part, re.I)
+                           for part in path.relative_to(folder).parts)
+        if path.suffix.lower() == ".json" and path.stat().st_size > 100_000 and fixture_path:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            record_lists = ([(name, value) for name, value in data.items()
+                             if isinstance(value, list) and len(value) >= 10 and
+                             all(isinstance(row, dict) for row in value)]
+                            if isinstance(data, dict) else [])
+            if record_lists:
+                record_name, rows = max(record_lists, key=lambda item: len(item[1]))
+                sample_keys = sorted({key for row in rows[:10] for key in row})
+                extracted = ("TEST FIXTURE METADATA ONLY; individual synthetic records are excluded from policy "
+                             "compilation. The original source is retained and fingerprinted in the trace.\n"
+                             f"Description: {str(data.get('description') or '')[:500]}\n"
+                             f"Record set: {record_name}\nRecord count: {len(rows)}\n"
+                             f"Fields: {', '.join(sample_keys)}")
+                trace.write("case_fixture_summarized", source=_input_fingerprint(path), record_count=len(rows))
+            else:
+                extracted = _extract_case_text(path)
+        else:
+            extracted = _extract_case_text(path)
         if not extracted.strip():
             raise ValueError(f"Case document has no text: {path}")
-        relative = str(path.relative_to(folder))
         content = f"ORIGINAL CASE SOURCE: {relative}\n\n{extracted}\n"
         total += len(content.encode("utf-8"))
         if total > 1_000_000:
