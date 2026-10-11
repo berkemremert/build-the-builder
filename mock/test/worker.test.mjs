@@ -8,17 +8,17 @@ const call = (app, path, options = {}, env = {}) => app.fetch(
   { CUSTOMER_STATE: fakeState, MOCK_STATE_SCOPE: 'validation', ...env }, {},
 );
 
-test('scaffold is alive but refuses readiness and bank calls', async () => {
+test('health is alive and bank routes fail closed when storage is unavailable', async () => {
   const health = await call(worker, '/healthz');
   assert.equal(health.status, 200);
   assert.deepEqual(await health.json(), { status: 'alive' });
   assert.equal(health.headers.get('Cache-Control'), 'no-store');
 
-  const readiness = await call(worker, '/readyz');
+  const readiness = await call(worker, '/readyz', {}, { CUSTOMER_STATE: null });
   assert.equal(readiness.status, 503);
   assert.deepEqual(await readiness.json(), { ready: false });
 
-  const bankCall = await call(worker, '/get_account', { method: 'POST' });
+  const bankCall = await call(worker, '/voice/v1/cards.list', { method: 'POST' }, { CUSTOMER_STATE: null });
   assert.equal(bankCall.status, 503);
   assert.deepEqual(await bankCall.json(), { error: 'bank_mock_not_configured' });
 });
