@@ -11,7 +11,8 @@ import re
 from typing import Any
 
 from api_bindings import (account_response_collection, identity_response_fields,
-                          note_request_fields, promise_request_fields)
+                          identity_selector_field, note_request_fields,
+                          promise_request_fields)
 from openapi_resolver import normalize_openapi
 from payment_amounts import parse_payment_amount
 from payment_dates import parse_payment_date
@@ -354,10 +355,7 @@ def _queue_for(openapi: dict, role: str, policy: dict) -> str:
 
 def _identity_fields(openapi: dict, policy: dict) -> list[str]:
     schema = _api_spec(openapi, "verify_identity")[2]
-    field = (schema.get("properties") or {}).get("field") or {}
-    values = [str(value) for value in field.get("enum") or []]
-    if len(values) < 2:
-        raise ValueError("verify_identity.field must offer at least two fields")
+    _, values = identity_selector_field(schema)
     source = "\n".join(str(policy.get(key) or "") for key in ("identity", "raw_brief"))
     aliases = {
         "date_of_birth": ("date of birth", "birth date", "dob"),
@@ -1834,6 +1832,7 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     identity_response = identity_response_fields(openapi["paths"][identity_path][identity_method.lower()])
     holidays = _holiday_dates(policy)
     bands = _deadline_bands(policy)
+    identity_selector, _ = identity_selector_field(_api_spec(openapi, "verify_identity")[2])
     identity_fields = _identity_fields(openapi, policy)
     outcomes = _outcome_names(openapi, policy)
     reason_names, close_reason_names, note_codes, close_codes = _reason_names(openapi, policy)
@@ -1871,9 +1870,9 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
     verify_hook = (_VERIFY_HOOK.replace("__COMPLETE_FIELD__", repr(identity_response["complete"]))
                    .replace("__ANSWER_FIELD__", repr(identity_response["answer"]))
                    .replace("__REMAINING_FIELD__", repr(identity_response["remaining"])))
-    verify_dob = _api_tool(openapi, "verify_identity", fixed={"field": identity_fields[0]},
+    verify_dob = _api_tool(openapi, "verify_identity", fixed={identity_selector: identity_fields[0]},
                            description=f"Check the customer's {identity_fields[0].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
-    verify_phone = _api_tool(openapi, "verify_identity", fixed={"field": identity_fields[1]},
+    verify_phone = _api_tool(openapi, "verify_identity", fixed={identity_selector: identity_fields[1]},
                              description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
     callback = _api_tool(openapi, "schedule_callback", description="Book a valid callback after a third party gives an exact day and time.", post_code=_CALLBACK_HOOK)
     account = _api_tool(openapi, "get_account", description="Load late products only after both security answers have passed.")

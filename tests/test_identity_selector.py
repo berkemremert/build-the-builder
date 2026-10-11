@@ -18,6 +18,26 @@ class IdentitySelectorTests(unittest.TestCase):
         self.assertEqual(("question_code", ["birth_year", "passcode"]),
                          identity_selector_field(schema))
 
+    def test_workflow_binds_both_verification_tools_to_renamed_selector(self) -> None:
+        api = synthetic_api()
+        schema = api["paths"]["/verify_identity"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        schema["properties"]["question_code"] = schema["properties"].pop("field")
+        schema["properties"]["response_value"] = schema["properties"].pop("answer")
+        schema["required"] = ["question_code" if field == "field" else
+                              "response_value" if field == "answer" else field
+                              for field in schema["required"]]
+        workflow = build_workflow(synthetic_policy(), api)
+        self.assertEqual([], validate_workflow(workflow, api))
+        selectors = []
+        for node in ("identity_dob", "identity_phone"):
+            props = (workflow["nodes"][node]["tools"][0]["function"]
+                     ["parameters"]["properties"]["body"]["properties"])
+            self.assertNotIn("field", props)
+            self.assertNotIn("answer", props)
+            self.assertEqual("{{response_value}}", props["response_value"]["default"])
+            selectors.append(props["question_code"]["default"])
+        self.assertEqual(["birth_year", "passcode"], selectors)
+
     def test_ambiguous_selector_fails_closed(self) -> None:
         schema = {"type": "object", "properties": {
             "choice_a": {"type": "string", "enum": ["A", "B"]},
@@ -26,13 +46,13 @@ class IdentitySelectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unambiguous security selector"):
             identity_selector_field(schema)
 
-    def test_qa_requires_fixed_selector_on_verify_tools(self) -> None:
+    def test_qa_rejects_selector_outside_source_enum(self) -> None:
         api = synthetic_api()
         workflow = build_workflow(synthetic_policy(), api)
         body = (workflow["nodes"]["identity_dob"]["tools"][0]["function"]
                 ["parameters"]["properties"]["body"]["properties"])
-        body["field"]["default"] = "{{field}}"
-        self.assertTrue(any("bind a fixed security selector" in error
+        body["field"]["default"] = "unknown_check"
+        self.assertTrue(any("bind a valid security selector" in error
                             for error in validate_workflow(workflow, api)))
 
 

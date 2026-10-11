@@ -407,9 +407,9 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"{location}: {exc}")
             else:
                 chosen = (body_props.get(selector) or {}).get("default")
-                if chosen not in choices:
+                if chosen not in choices and chosen != "{{" + selector + "}}":
                     errors.append(f"{location}.body.properties.{selector}.default: "
-                                  f"bind a fixed security selector from {choices!r}")
+                                  f"bind a valid security selector from {choices!r}")
         if name == "create_promise" and placement == "pre_action":
             try:
                 semantic_fields = promise_request_fields(schema)
