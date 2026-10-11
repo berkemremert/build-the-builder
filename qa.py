@@ -20,6 +20,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           promise_request_fields, transfer_request_fields,
                           close_request_fields)
 from api_parameters import required_header_bindings
+from api_servers import operation_url
 from openapi_resolver import normalize_openapi
 
 
@@ -232,15 +233,21 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
         if key in workflow:
             errors.append(f"workflow.{key}: remove the model override; use the fixed model in freya.py")
 
-    servers = [s.get("url", "").rstrip("/") for s in openapi.get("servers", []) if isinstance(s, dict)]
-    expected_urls = {
-        f"{server}{path}": (path, method.lower())
-        for server in servers
-        for path, methods in openapi["paths"].items()
-        if isinstance(methods, dict)
-        for method in methods
-        if method.lower() in {"get", "post", "put", "patch", "delete"}
-    }
+    expected_urls = {}
+    for path, methods in openapi["paths"].items():
+        if not isinstance(methods, dict):
+            continue
+        for method in methods:
+            if method.lower() not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            try:
+                url = operation_url(openapi, path, method)
+            except ValueError as exc:
+                errors.append(f"openapi: {exc}")
+                continue
+            if url in expected_urls and expected_urls[url] != (path, method.lower()):
+                errors.append(f"openapi: URL {url!r} maps to multiple operations")
+            expected_urls[url] = (path, method.lower())
     if not expected_urls:
         errors.append("openapi.servers and paths must define absolute tool URLs")
     identity_operations = [operation for path, methods in openapi["paths"].items()
