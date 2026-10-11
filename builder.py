@@ -508,6 +508,21 @@ def _validation_failed(result: Any) -> bool:
     return False
 
 
+def _contract_operation_names(openapi: dict[str, Any]) -> set[str]:
+    names = set()
+    for path, path_item in (openapi.get("paths") or {}).items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method.lower() in {"get", "post", "put", "patch", "delete"} and isinstance(operation, dict):
+                names.add(str(operation.get("operationId") or str(path).rstrip("/").split("/")[-1]))
+    return names
+
+
+_PRACTICE_OPERATIONS = frozenset({"verify_identity", "get_account", "create_promise", "add_note",
+                                  "schedule_callback", "transfer_to_agent", "close_call"})
+
+
 def _run_practice_test(agent_id: str, brief: str, out: Path, trace: Trace, started: float) -> dict[str, Any]:
     result_path = out / "practice-results.json"
     result_path.unlink(missing_ok=True)
@@ -590,14 +605,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         from workflow_generator import build_workflow
         from qa import validate_workflow
 
-        workflow = build_workflow(policy, openapi)
+        contract_names = _contract_operation_names(openapi)
+        generic_workflow = bool(case_folder and not _PRACTICE_OPERATIONS.issubset(contract_names))
+        if generic_workflow:
+            from generic_workflow_fallback import build_generic_workflow
+            workflow = build_generic_workflow(policy, openapi)
+            trace.write("workflow_generator_selected", kind="contract_driven",
+                        operation_names=sorted(contract_names))
+        else:
+            workflow = build_workflow(policy, openapi)
+            trace.write("workflow_generator_selected", kind="deterministic",
+                        operation_names=sorted(contract_names))
         if not isinstance(workflow, dict):
             raise TypeError("build_workflow must return a workflow object")
         local_path = out / f"{args.slot}.local.workflow.json"
         local_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         trace.write("workflow_written", path=str(local_path), node_count=len(workflow.get("nodes", {})), global_node_count=len(workflow.get("global_nodes", {})))
         summary["local_workflow"] = str(local_path)
-        validation = validate_workflow(workflow, openapi)
+        if generic_workflow:
+            from qa import validate_generic_workflow
+            validation = validate_generic_workflow(workflow, openapi)
+        else:
+            validation = validate_workflow(workflow, openapi)
         if _validation_failed(validation):
             trace.write("validation_failed", result=validation)
             raise ValueError(f"Workflow validation failed: {validation}")

@@ -1241,6 +1241,133 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
     return list(dict.fromkeys(errors))
 
 
+def validate_generic_workflow(workflow: dict, openapi: dict) -> list[str]:
+    """Validate a contract-driven workflow without assuming practice tool names."""
+    errors: list[str] = []
+    if not isinstance(workflow, dict):
+        return ["workflow must be a JSON object"]
+    try:
+        contract = normalize_openapi(openapi)
+    except ValueError as error:
+        return [f"openapi: {error}"]
+    operations = {}
+    for path, methods in (contract.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, operation in methods.items():
+            if method.lower() not in {"get", "post", "put", "patch", "delete"} or not isinstance(operation, dict):
+                continue
+            try:
+                url = operation_url(contract, path, method)
+            except ValueError as error:
+                errors.append(f"openapi: {error}")
+                continue
+            name = str(operation.get("operationId") or path.rstrip("/").split("/")[-1])
+            if not name or url in operations:
+                errors.append(f"openapi: ambiguous operation at {path}")
+            operations[url] = (name, method.upper(), operation)
+    if not operations:
+        errors.append("openapi: no callable HTTP operations")
+    nodes = workflow.get("nodes")
+    if not isinstance(nodes, dict) or not nodes:
+        return errors + ["workflow.nodes must be a nonempty object"]
+    if len(operations) > 1 and "service" not in nodes:
+        errors.append("workflow: contract-driven account service is unavailable because identity could not be proved")
+    initial = workflow.get("initial_node")
+    if initial not in nodes:
+        errors.append("workflow.initial_node must name a node")
+    for path, value in _walk(workflow):
+        if value is None:
+            errors.append(f"{path}: remove null")
+        elif isinstance(value, str) and _SECRET.search(value):
+            errors.append(f"{path}: remove embedded secret")
+    edges = {}
+    tool_names = set()
+    for key, node in nodes.items():
+        location = f"workflow.nodes.{key}"
+        if not isinstance(node, dict):
+            errors.append(f"{location} must be an object")
+            continue
+        if node.get("name") != key:
+            errors.append(f"{location}.name must equal the node key")
+        if node.get("node_type") not in _NODE_TYPES:
+            errors.append(f"{location}.node_type is invalid")
+        edges[key] = []
+        for field in ("tools", "pre_actions"):
+            for index, tool in enumerate(node.get(field) or []):
+                where = f"{location}.{field}[{index}]"
+                fn = tool.get("function") if isinstance(tool, dict) else None
+                if not isinstance(fn, dict):
+                    errors.append(f"{where}: expected a function tool")
+                    continue
+                handler = fn.get("handler")
+                if handler == "__function__:code_exec":
+                    source = (((fn.get("parameters") or {}).get("properties") or {}).get("code") or {}).get("default")
+                    if not isinstance(source, str):
+                        errors.append(f"{where}: code_exec needs source")
+                    else:
+                        try:
+                            compile(source, where, "exec")
+                        except SyntaxError as error:
+                            errors.append(f"{where}: Python syntax error on line {error.lineno}")
+                    continue
+                if handler != "__function__:api_call":
+                    errors.append(f"{where}: unsupported tool handler")
+                    continue
+                props = (fn.get("parameters") or {}).get("properties") or {}
+                url = (props.get("url") or {}).get("default")
+                method = (props.get("method") or {}).get("default")
+                if url not in operations:
+                    errors.append(f"{where}: URL is absent from the supplied OpenAPI")
+                    continue
+                expected_name, expected_method, operation = operations[url]
+                if fn.get("name") != expected_name or method != expected_method:
+                    errors.append(f"{where}: operation name or HTTP method differs from OpenAPI")
+                tool_names.add(expected_name)
+                schema = (operation.get("requestBody") or {}).get("content", {}).get("application/json", {}).get("schema") or {}
+                body = props.get("body") or {}
+                leaves = body.get("properties") or {}
+                if not isinstance(leaves, dict):
+                    errors.append(f"{where}: request body fields must be an object")
+                    continue
+                for required in schema.get("required") or []:
+                    if required not in leaves:
+                        errors.append(f"{where}: required request field {required!r} is absent")
+                for body_field in leaves:
+                    if body_field not in (schema.get("properties") or {}):
+                        errors.append(f"{where}: request field {body_field!r} is absent from OpenAPI")
+        for transition in node.get("transitions") or []:
+            target = transition.get("target_node") if isinstance(transition, dict) else None
+            if target not in nodes:
+                errors.append(f"{location}: transition target {target!r} is absent")
+            else:
+                edges[key].append(target)
+        for field in ("passthrough_default_transition", "max_turn_transition"):
+            target = node.get(field)
+            if target:
+                if target not in nodes:
+                    errors.append(f"{location}: {field} target is absent")
+                else:
+                    edges[key].append(target)
+        if node.get("node_type") == "end_call":
+            terminal = node.get("terminal") or {}
+            if (terminal.get("function") or {}).get("handler") != "__function__:end_call":
+                errors.append(f"{location}: end_call needs its terminal handler")
+    if initial in nodes:
+        reached, pending = set(), [initial]
+        while pending:
+            current = pending.pop()
+            if current in reached:
+                continue
+            reached.add(current)
+            pending.extend(edges.get(current, []))
+        if not any(nodes[name].get("node_type") == "end_call" for name in reached if isinstance(nodes[name], dict)):
+            errors.append("workflow: no reachable end_call node")
+        for name in nodes.keys() - reached:
+            errors.append(f"workflow.nodes.{name}: unreachable from initial_node")
+    return errors
+
+
 def run_practice(agent_id: str, brief: str, only=None, reps: int = 1,
                  style: str | None = None, timeout: float = 1800) -> dict:
     """Run the kit's official scorer once and capture its structured result.
