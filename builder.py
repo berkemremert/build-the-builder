@@ -125,8 +125,10 @@ def _case_inputs(folder: Path) -> tuple[list[Path], Path | None, dict[str, Any] 
     if not folder.is_dir():
         raise ValueError(f"Case folder is not a directory: {folder}")
     candidates = sorted((path for path in folder.rglob("*") if path.is_file() and
-                         not any(part.startswith(".") or part.lower() in {"out", "output", "__pycache__"}
-                                 for part in path.relative_to(folder).parts)),
+                         not path.name.startswith(".") and
+                         not any(part.startswith(".") or part.lower() in {"out", "output", "__pycache__"} or
+                                 re.search(r"(?:^|[-_])mock(?:$|[-_])", part, re.I)
+                                 for part in path.relative_to(folder).parts[:-1])),
                         key=lambda path: str(path.relative_to(folder)).lower())
     contracts: list[tuple[Path, dict[str, Any]]] = []
     documents: list[Path] = []

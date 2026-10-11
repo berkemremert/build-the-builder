@@ -75,6 +75,9 @@ class BuilderAcceptanceTests(unittest.TestCase):
             (folder / "sources" / "meetings").mkdir(parents=True)
             (folder / "sources" / "emails").mkdir(parents=True)
             (folder / "test-environment").mkdir()
+            (folder / "mock" / "example").mkdir(parents=True)
+            (folder / "mock" / "example" / "sample.json").write_text(
+                '{"fake":"mock helper only"}', encoding="utf-8")
             (folder / "BRIEF.md").write_text("Overview", encoding="utf-8")
             (folder / "sources" / "emails" / "2026-10-09-recap.txt").write_text(
                 "Later decision", encoding="utf-8")
@@ -86,6 +89,7 @@ class BuilderAcceptanceTests(unittest.TestCase):
             (folder / "test-environment" / "customers.json").write_text(
                 json.dumps(fixture), encoding="utf-8")
             documents, _, _ = builder._case_inputs(folder)
+            self.assertFalse(any("mock" in path.parts for path in documents))
             self.assertLess(documents.index(folder / "sources" / "meetings" / "2026-10-07-session.txt"),
                             documents.index(folder / "sources" / "emails" / "2026-10-09-recap.txt"))
             out = Path(directory) / "out"
