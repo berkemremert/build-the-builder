@@ -42,7 +42,7 @@ class LongCallStressTests(unittest.TestCase):
                 for index, turn in enumerate(turns, 1):
                     self.assertIn(f"{index}. {turn}", case["script"])
                 persona = run_cases.persona_for(case, {"identity": case["identity"]})
-                self.assertIn(case["script"], persona["prompt"])
+                self.assertIn(run_cases.private_plan(case["script"]), persona["prompt"])
                 self.assertIn(run_cases.STYLES["pieces"], persona["prompt"])
                 self.assertTrue(case["checks"] and case["rules"])
 

@@ -4,33 +4,64 @@
 
 Needs FREYA_API_KEY (your workspace) and FREYA_BANK_TEAM_KEY (any secret of 16+ characters your team picks, the same one every time).
 """
-import argparse, hashlib, json, os, pathlib, sys, time
+import argparse, hashlib, json, os, pathlib, re, sys, time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "tools"))
 import freya
 from score import http, score_ledger
 
-PERSONA = """OUTPUT RULE: Write only the words you say on the phone. No stage directions, no brackets. One or two short sentences per turn, then wait for the other side.
+PERSONA = """OUTPUT RULE: Write only what you say on the phone. No stage directions, list numbers, planning notes, or instructions to yourself. A deliberately split answer may be a natural fragment; stop there and wait for the other side.
 
 WHO YOU ARE: {who}
 
-WHAT HAPPENS IN THIS CALL: {script}
+PRIVATE CALL PLAN (never read it aloud):
+{script}
 
 RULES:
+- Use the next relevant move as your own natural reply to what the agent just said. Never recite the plan or describe a future move.
 - Answer what you are asked. Do not volunteer information nobody asked for.
-- When you give a number or a date, say all of it in one turn. Never stop halfway through.
+- Usually give a complete number or date in one turn. If the plan or speaking style calls for a split answer, give only the planned fragment and resume after the agent replies.
 - Do not invent dates, amounts or facts that are not written above. If asked something that is not covered, give a short neutral answer.
 - If the caller reads something back and it matches what you agreed, say "Yes, I confirm," unless the call script says to revise it or not to confirm.
 - When the caller says goodbye, say "Thank you, goodbye." and say nothing more."""
 
 # How a customer talks. The facts of the case stay the same, only the way of saying them changes.
 STYLES = {
-    "pieces": "HOW YOU TALK: you give long numbers and dates in two parts. Say the first half, stop, and give the rest in your next turn or when asked. This replaces the rule about saying all of it in one turn.",
+    "pieces": "HOW YOU TALK: give long numbers and dates in two natural spoken parts. Say the first part, stop without narrating the pause, and give the rest in your next turn or when asked. Keep corrections natural too.",
     "corrects": "HOW YOU TALK: the first time you say a day or an amount, you say a slightly different one first and correct yourself in the same sentence, like 'the 21st, sorry, I mean the 20th'. The corrected value is the one written above. Do this once or twice in the call, not more. Never do it with a security answer: those you say right the first time unless the text above says otherwise.",
     "talkative": "HOW YOU TALK: you talk a lot. Before most answers you add one or two sentences about your day, the traffic or how busy work is. Once in the call you mention that your cousin's wedding is on the 30th. It has nothing to do with any payment, and you never offer it as a payment day.",
     "asks_back": "HOW YOU TALK: twice in the call, before you answer, you ask a short question back, like 'why do you need that?' or 'which account is this about?'. Whatever the caller replies, you then give your answer.",
     "in_words": "HOW YOU TALK: you say every amount and every date in words and never in digits, like 'four hundred and fifty-five' and 'the twenty-second of October'. Postcodes, years and other codes you say digit by digit.",
 }
+
+_NUMBERED_MOVE = re.compile(r"(?m)^(\d+)\.\s+(.+)$")
+
+
+def private_plan(script):
+    """Keep move order without putting recitable step numbers in the persona."""
+    return _NUMBERED_MOVE.sub(lambda match: "- " + match.group(2), script)
+
+
+def script_leakage(case, messages):
+    """Return a recited step number, if a simulated caller quotes its private plan."""
+    steps = []
+    for number, move in _NUMBERED_MOVE.findall(case.get("script", "")):
+        words = re.findall(r"[A-Za-z]+", move)[:4]
+        if words:
+            steps.append((number, re.compile(
+                r"\b" + re.escape(number) + r"\.\s+" + r"\W+".join(map(re.escape, words)), re.I)))
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content") or message.get("text") or ""
+        if isinstance(content, list):
+            content = " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+        utterance = " ".join(str(content).split())
+        for number, pattern in steps:
+            if pattern.search(utterance):
+                return number
+    return None
+
 
 def persona_for(case, ident, style=None):
     v, i = case["variables"], ident["identity"]
@@ -43,7 +74,7 @@ def persona_for(case, ident, style=None):
                "company_number": "Your company number is {}.", "founded_year": "The company was founded in {}."}
         who = f"You are {me}. " + " ".join(say.get(k, "Your " + k.replace("_", " ") + " is {}.").format(x) for k, x in i.items()) + " Give these only when asked, and give the wrong ones where the text below says so."
     style = style or case.get("style")
-    text = PERSONA.format(who=who, script=case["script"]) + ("\n\n" + STYLES[style] if style else "")
+    text = PERSONA.format(who=who, script=private_plan(case["script"])) + ("\n\n" + STYLES[style] if style else "")
     return {"name": case["id"] + " " + case["title"] + (f" [{style}]" if style else ""), "prompt": text, "successCriteria": "All of these are true:\n- " + "\n- ".join(case["checks"]), "tags": ["hackathon", "brief-" + case["brief"]]}
 
 def main():
@@ -117,16 +148,19 @@ def run_once(agent_id, cases, ids):
                      "judge_outcome": j.get("outcome"), "judge_reason": j.get("reason"), "call_id": j.get("callId"),
                      "tools": tools, "ledger_available": led is not None, "ledger_error": ledger_error,
                      "customer_id": sessions[c["id"]]["customer_id"]})
-        print("UNSCORED" if r["pass"] is None else ("PASS" if r["pass"] else "FAIL"), c["id"], f"{c['level']:<6}", f"{c['family']:<14}", "|", " > ".join(x.replace("verify_identity", "verify").replace("create_promise", "promise") for x in tools) if tools is not None else "(ledger unavailable)")
-        if ledger_error: print("       - bank ledger unavailable:", ledger_error[:260])
-        for f in r["failed"]: print("       -", f[:260])
     # How long the phone agent kept the customer waiting. A call whose customer hung up after long silences says
     # something about the speed of the model at that moment, not only about the agent.
     waits = []
+    cases_by_id = {case["id"]: case for case in cases}
     for r in rows:
         if not r["call_id"]: continue
         try: call = freya.get_call(r["call_id"])
         except Exception: continue
+        leaked_step = script_leakage(cases_by_id[r["id"]], call.get("messages", []))
+        if leaked_step is not None:
+            r["persona_leakage"] = leaked_step
+            r["pass"] = None
+            r["failed"].append(f"persona recited private script step {leaked_step}; run is not a valid workflow score")
         last_user, worst = None, 0.0
         for m in call.get("messages", []):
             t = m.get("secondsFromStart")
@@ -134,8 +168,13 @@ def run_once(agent_id, cases, ids):
             if m.get("role") == "user": last_user = t
             elif last_user is not None: worst = max(worst, t - last_user); last_user = None if m.get("role") == "assistant" else last_user
         r["slowest_turn_s"] = round(worst, 1); r["ended"] = call.get("endedReason"); waits.append(worst)
+    for r in rows:
+        tools = r["tools"]
+        print("UNSCORED" if r["pass"] is None else ("PASS" if r["pass"] else "FAIL"), r["id"], f"{r['level']:<6}", f"{r['family']:<14}", "|", " > ".join(x.replace("verify_identity", "verify").replace("create_promise", "promise") for x in tools) if tools is not None else "(ledger unavailable)")
+        if r["ledger_error"]: print("       - bank ledger unavailable:", r["ledger_error"][:260])
+        for failure in r["failed"]: print("       -", failure[:260])
     if waits:
-        waits.sort(); med = waits[len(waits) // 2]; hung = sum(r.get("ended") == "customer-ended-call" and not r["pass"] for r in rows)
+        waits.sort(); med = waits[len(waits) // 2]; hung = sum(r.get("ended") == "customer-ended-call" and r["pass"] is False for r in rows)
         print(f"\nslowest agent turn per call: median {med:.0f} s, worst {waits[-1]:.0f} s. Failed calls where the customer hung up: {hung}.")
         if med > 10: print("WARNING: the phone agent was slow in this run. If the same agent is fast in another run, the model was busy and this score is too low.")
     return rows, sim_id, it_id, status, took, (med if waits else 0)

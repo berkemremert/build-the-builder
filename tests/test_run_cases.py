@@ -31,7 +31,52 @@ class LedgerFailureTests(unittest.TestCase):
                 self.assertTrue(case["checks"] and case["rules"])
                 persona = run_cases.persona_for(case, {"identity": case["identity"]})
                 self.assertIn(case["id"], persona["name"])
-                self.assertIn(case["script"], persona["prompt"])
+                self.assertIn(run_cases.private_plan(case["script"]), persona["prompt"])
+
+    def test_private_plan_hides_step_numbers_and_preserves_fragments(self):
+        root = Path(run_cases.__file__).resolve().parents[1]
+        case = next(case for case in json.loads((root / "long-call-stress.json").read_text())
+                    if case["id"] == "LONG-05")
+        persona = run_cases.persona_for(case, {"identity": case["identity"]})
+        prompt = persona["prompt"]
+        self.assertIn("PRIVATE CALL PLAN (never read it aloud)", prompt)
+        self.assertNotIn("19. For the car loan", prompt)
+        self.assertIn("- For the car loan, say the product is not yours.", prompt)
+        self.assertIn('say "19 October" only', prompt)
+        self.assertIn("A deliberately split answer may be a natural fragment", prompt)
+
+    def test_script_leakage_flags_recited_step_but_not_natural_fragment(self):
+        root = Path(run_cases.__file__).resolve().parents[1]
+        case = next(case for case in json.loads((root / "long-call-stress.json").read_text())
+                    if case["id"] == "LONG-05")
+        leaked = [{"role": "user", "content": (
+            "past-due amount on the personal loan. Could that payment take one business day "
+            "to appear? Short sentence. Wait. 19. For the car loan, say the product is not yours.")}]
+        natural = [{"role": "user", "content": "Actually, for the card, I can only"}]
+        self.assertEqual("19", run_cases.script_leakage(case, leaked))
+        self.assertIsNone(run_cases.script_leakage(case, natural))
+
+    def test_leaked_caller_plan_makes_run_unscored(self):
+        case = {"id": "LONG-05", "source_case": "PUB-12", "level": "hard",
+                "family": "Long-call state",
+                "script": "19. For the car loan, say the product is not yours."}
+        ledger = {"calls": [], "promises": [], "notes": [], "callbacks": [],
+                  "transfers": [], "outcome": {}}
+        judge = {"runs": [{"personaId": "persona-long", "callId": "call-long",
+                           "outcome": "pass", "reason": ""}]}
+        call = {"messages": [{"role": "user", "content":
+                "Short sentence. Wait. 19. For the car loan, say the product is not yours."}],
+                "endedReason": "assistant-ended-call"}
+        with mock.patch.object(run_cases, "http", side_effect=[{"variables": {"customer_id": "c_test"}}, ledger]), \
+             mock.patch.object(run_cases.freya, "run_simulation", return_value=("sim-1", "iteration-1", "completed")), \
+             mock.patch.object(run_cases.freya, "get_iteration", return_value=judge), \
+             mock.patch.object(run_cases.freya, "get_call", return_value=call), \
+             mock.patch.object(run_cases, "score_ledger", return_value={"pass": True, "failed": []}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            rows, *_ = run_cases.run_once("agent-1", [case], {"LONG-05": "persona-long"})
+        self.assertIsNone(rows[0]["pass"])
+        self.assertEqual("19", rows[0]["persona_leakage"])
+        self.assertIn("UNSCORED LONG-05", output.getvalue())
 
     def test_source_case_seeds_bank_but_custom_case_is_scored(self):
         case = {"id": "HARD-01", "source_case": "PUB-01", "level": "hard",
