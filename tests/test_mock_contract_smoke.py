@@ -96,6 +96,8 @@ class MockContractSmokeTests(unittest.TestCase):
                 response.pop("balance")
             if self.mode == "secret":
                 response["debug"] = "SYNTHETIC-SECRET-01"
+            if self.mode == "date":
+                response["as_of"] = "2026-99-99"
             status = 200
         elif (method, path) == ("post", "/v1/promises") and body == {
                 "customer_id": "SYNTHETIC-CUSTOMER-01", "amount": 12}:
@@ -141,6 +143,21 @@ class MockContractSmokeTests(unittest.TestCase):
         result = smoke.run(self.contract, CASES, self.base_url)
         self.assertEqual(result, ["scenario 1 step 1: FAIL response schema mismatch"])
         self.assertNotIn("SYNTHETIC", str(result))
+
+    def test_date_format_is_checked(self):
+        operation = self.contract["paths"]["/customers/{customer_id}"]["get"]
+        schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        schema["required"].append("as_of")
+        schema["properties"]["as_of"] = {"type": "string", "format": "date"}
+        self.mode = "date"
+        self.assertEqual(smoke.run(self.contract, CASES, self.base_url),
+                         ["scenario 1 step 1: FAIL response schema mismatch"])
+
+    def test_response_status_range_is_supported(self):
+        responses = self.contract["paths"]["/promises"]["post"]["responses"]
+        responses["2XX"] = responses.pop("201")
+        self.assertEqual(smoke.run(self.contract, CASES, self.base_url)[-1],
+                         "scenario 1 step 3: PASS")
 
     def test_secret_echo_is_rejected_without_printing_secret(self):
         self.mode = "secret"

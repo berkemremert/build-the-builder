@@ -16,6 +16,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -134,7 +135,9 @@ def _schema_error(value: Any, schema: dict, where: str = "$") -> str | None:
                     return error
     elif isinstance(value, list):
         for boundary, name in (("minItems", "too few items"), ("maxItems", "too many items")):
-            if boundary in schema and (len(value) < schema[boundary] if boundary == "minItems" else len(value) > schema[boundary]):
+            outside = (len(value) < schema[boundary] if boundary == "minItems"
+                       else len(value) > schema[boundary]) if boundary in schema else False
+            if outside:
                 return f"{where}: {name}"
         child = schema.get("items")
         if isinstance(child, dict):
@@ -153,6 +156,20 @@ def _schema_error(value: Any, schema: dict, where: str = "$") -> str | None:
                     return f"{where}: pattern mismatch"
             except re.error:
                 return f"{where}: invalid contract pattern"
+        if schema.get("format") == "date":
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                return f"{where}: date format mismatch"
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                return f"{where}: date format mismatch"
+        elif schema.get("format") == "date-time":
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", value):
+                return f"{where}: date-time format mismatch"
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return f"{where}: date-time format mismatch"
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
             return f"{where}: below minimum"
@@ -197,7 +214,8 @@ def _target_url(contract: dict, operation: Operation, base_url: str, path_params
 
 def _response_schema(operation: Operation, status: int) -> dict | None:
     responses = operation.spec.get("responses") or {}
-    response = responses.get(str(status)) or responses.get("default")
+    response = next((responses[key] for key in (str(status), f"{status // 100}XX", "default")
+                     if key in responses), None)
     if not isinstance(response, dict):
         raise SmokeError("response status is absent from contract")
     content = response.get("content") or {}
@@ -348,7 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Smoke-test a deployed mock against OpenAPI and seeded scenarios")
     parser.add_argument("--contract", required=True, help="OpenAPI JSON file")
     parser.add_argument("--cases", required=True, help="JSON file with seeded scenarios")
-    parser.add_argument("--base-url", required=True, help="Deployed HTTPS mock URL; include API prefix if overriding it")
+    parser.add_argument("--base-url", required=True,
+                        help="Deployed HTTPS mock URL matching the contract servers entry")
     parser.add_argument("--timeout", type=float, default=10)
     args = parser.parse_args(argv)
     try:
