@@ -186,7 +186,7 @@ def _identity_completion_field(operation: _Operation) -> str | None:
     return next(iter(candidates)) if not full and len(candidates) == 1 else None
 
 
-def _result_checks(operation: _Operation) -> list[tuple[tuple[str, ...], object]]:
+def _result_checks(operation: _Operation, rule: str = "", source: str = "") -> list[tuple[tuple[str, ...], object]]:
     """Read explicit success markers from a 2xx JSON response schema."""
     checks: list[tuple[tuple[str, ...], object]] = []
 
@@ -252,7 +252,40 @@ def _result_checks(operation: _Operation) -> list[tuple[tuple[str, ...], object]
                 raw = match.group(1)
                 checks.append((path, int(raw) if field.get("type") == "integer" and raw.isdecimal()
                                else raw))
+    response_schema = _json_schema(operation, response=True)
+    response_descriptions = " ".join(str(response.get("description") or "") for status, response
+                                     in (operation.source.get("responses") or {}).items()
+                                     if str(status).startswith("2") and isinstance(response, dict))
+    success_text = " ".join((source, rule, response_descriptions,
+                             str(response_schema.get("description") or ""),
+                             str((response_schema.get("properties") or {}).get("result", {}).get("description") or "")))
+    if (('result', 'returnCode') in _schema_paths(response_schema) and
+            (re.search(r"\bsuccess\b.{0,100}\breturnCode\b.{0,35}[`\"']1[`\"']", success_text, re.I | re.S)
+             or re.search(r"\breturnCode\b.{0,35}[`\"']1[`\"'].{0,45}\b(?:is\s+)?success\b", success_text, re.I)
+             or re.search(r"\bHTTP\s*200\b.{0,45}\breturnCode\b.{0,35}[`\"']1[`\"']", success_text, re.I))):
+        checks.append((('result', 'returnCode'), '1'))
+    # A write can require a second response marker in addition to the global
+    # envelope code. Keep these checks conjunctive; HTTP 200 alone is insufficient.
+    if (('data', 'responseCode') in _schema_paths(response_schema) and
+            re.search(r"\bresponseCode\b\s*(?:[`\"']?0[`\"']?|(?:equal\s+to|=|is)\s*[`\"']?0[`\"']?)", rule, re.I)):
+        checks.append((('data', 'responseCode'), 0))
+    if ('data', 'exitState') in _schema_paths(response_schema):
+        match = re.search(r"\b(?:success\s+requires?|require)\b.{0,180}?\bdata\.exitState\s*(?:=|is|equal\s+to)?\s*[`\"']([A-Za-z0-9_-]+)[`\"']", rule, re.I)
+        if match:
+            checks.append((('data', 'exitState'), match.group(1)))
     unique = dict(checks)
+    if operation.role in {"read", "write"}:
+        global_code = re.search(r"\bsuccess\s*=\s*HTTP\s*200\b.{0,80}\breturnCode\b.{0,30}[`\"']1[`\"']",
+                                source, re.I | re.S)
+        scoped_code = re.search(r"\breturnCode\b\s*(?:=|is|equal\s+to|[\"'`])\s*[`\"']?1\b", rule, re.I)
+        if (global_code or scoped_code) and unique.get(('result', 'returnCode')) != '1':
+            raise ValueError(f"{operation.name}: source requires result.returnCode '1' but response schema cannot prove it")
+        exit_value = re.search(r"\b(?:success\s+requires?|require)\b.{0,180}?\bdata\.exitState\s*(?:=|is|equal\s+to)?\s*[`\"']([A-Za-z0-9_-]+)[`\"']", rule, re.I)
+        if exit_value and unique.get(('data', 'exitState')) != exit_value.group(1):
+            raise ValueError(f"{operation.name}: source requires data.exitState {exit_value.group(1)!r} but response schema cannot prove it")
+        response_zero = re.search(r"\bresponseCode\b\s*(?:[`\"']?0[`\"']?|(?:equal\s+to|=|is)\s*[`\"']?0[`\"']?)", rule, re.I)
+        if response_zero and unique.get(('data', 'responseCode')) != 0:
+            raise ValueError(f"{operation.name}: source requires data.responseCode 0 but response schema cannot prove it")
     return sorted(unique.items())
 
 
@@ -679,10 +712,20 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
         raise ValueError(f"{operation.name} request must be a JSON object")
     fixed_values = _explicit_fixed_fields(schema, rule)
     fixed_values.update(fixed or {})
-    body_properties = {
-        name: _body_property(name, spec, call_variables or set(), fixed_values, location=operation.name)
-        for name, spec in (schema.get("properties") or {}).items()
-    }
+    body_schema = schema
+    outer = schema.get("properties") or {}
+    data_schema = outer.get("data") if isinstance(outer, dict) else None
+    if (isinstance(data_schema, dict) and data_schema.get("type") == "object" and
+            set(outer) <= {"data", "call"} and isinstance(data_schema.get("properties"), dict)):
+        # Freya exposes model-filled body arguments only from direct body leaves.
+        # The pre-hook restores the bank's nested data envelope before HTTP.
+        body_schema = data_schema
+    body_properties = {}
+    for name, spec in (body_schema.get("properties") or {}).items():
+        leaf = _body_property(name, spec, call_variables or set(), fixed_values, location=operation.name)
+        if body_schema is not schema and "default" not in leaf and leaf.get("type") != "object":
+            leaf["default"] = "{{" + name + "}}"
+        body_properties[name] = leaf
     result = {
         "type": "function", "config": {"timeoutMs": 20000, "maxRetries": 0},
         "function": {"name": operation.name, "handler": "__function__:api_call",
@@ -693,7 +736,7 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
                          "method": {"type": "string", "default": operation.method},
                          "headers": {"type": "object", "properties": headers},
                          "body": {"type": "object", "properties": body_properties,
-                                  "required": schema.get("required") or []},
+                                  "required": body_schema.get("required") or []},
                      }}},
     }
     checks = result_checks or ([( (result_field,), True)] if result_field else [])
@@ -922,6 +965,24 @@ def _end_node() -> dict:
                     "message_mode": {"type": "string", "default": "none"}}}}}}
 
 
+def _normal_completion_utterance(policy: dict) -> str:
+    """Use the source's normal return phrase when it explicitly supplies one."""
+    outcomes = policy.get("outcomes") or {}
+    menu = outcomes.get("main_menu") if isinstance(outcomes, dict) else None
+    if isinstance(menu, str):
+        for pattern in (
+            r"\bnormal\s+(?:completion|goodbye|end)\s*:\s*[“\"]([^”\"]+)[”\"]",
+            r"\b(?:normal\s+(?:goodbye|end)|nothing\s+else|thanks)\b[^:]{0,150}:\s*[“\"]([^”\"]+)[”\"]",
+        ):
+            match = re.search(pattern, menu, re.I | re.S)
+            if match:
+                phrase = match.group(1).strip()
+                if re.search(r"\bthanks\b", menu, re.I) and phrase.startswith("Sizi ana menüye"):
+                    return "Teşekkür ederiz. " + phrase
+                return phrase
+    return "Thank you. Goodbye."
+
+
 def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     """Build a source-grounded, fail-closed workflow from a changed contract.
 
@@ -943,7 +1004,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                  else r"\bok\b|success|saved|recorded|created|completed|closed|transferred|scheduled")
         proof[operation.name] = (_identity_completion_field(operation) if operation.role == "verify"
                                  else _boolean_result(operation, terms))
-        success_checks[operation.name] = _result_checks(operation)
+        success_checks[operation.name] = _result_checks(operation,
+            str(rules.get(operation.name) or ""), str(policy.get("raw_brief") or ""))
         try:
             tools[operation.name] = _tool(openapi, operation, str(rules.get(operation.name) or ""),
                                           proof[operation.name], call_variables=call_variables,
@@ -1018,8 +1080,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     )
     nodes = {
         "farewell": {"name": "farewell", "node_type": "conversation",
-                     "on_enter": {"type": "tts", "text": "Thank you. Goodbye."},
-                     "task_message": "End the call. Do not claim an action succeeded unless the bank confirmed it.",
+                     "on_enter": {"type": "tts", "text": _normal_completion_utterance(policy)},
+                     "task_message": "Speak the source-defined normal completion phrase. Do not claim an action succeeded unless the bank confirmed it.",
                      "passthrough": True,
                      "passthrough_default_transition": "closing" if close_tool else "ended",
                      "transitions": [_always("closing" if close_tool else "ended")]},
@@ -1078,9 +1140,11 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     if verified or upstream_verified:
         nodes["service"] = _conversation(
             "service", "Use the source-confirmed identity context. Follow the source policy for account discussion, calculations, "
-            "offers, and exceptions. Use read tools only when their policy conditions hold. Before a bank write, "
+            "offers, and exceptions. For a debt reading, state every present debt currency using its full Turkish name, "
+            "then name all present no-debt currency blocks in one sentence; a missing block is not zero. "
+            "Ask about another eligible card before any other offer. Use read tools only when their policy conditions hold. Before a bank write, "
             "state the exact proposed action and obtain the customer's explicit confirmation. If no action is "
-            "authorized, end the call. Do not imply any write was recorded here.",
+            "authorized, follow the source's normal completion outcome. Do not imply any write was recorded here.",
             tools=read_tools,
             extraction=[{"name": "explicit_action_confirmation", "type": "string",
                          "enum_values": ["yes", "no", "unknown"],

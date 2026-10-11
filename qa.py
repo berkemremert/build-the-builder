@@ -1360,7 +1360,16 @@ def validate_generic_workflow(workflow: dict, openapi: dict) -> list[str]:
                 tool_urls.add(url)
                 schema = (operation.get("requestBody") or {}).get("content", {}).get("application/json", {}).get("schema") or {}
                 body = props.get("body") or {}
-                errors.extend(_generic_body_errors(body, schema, where))
+                outer = schema.get("properties") or {}
+                data_schema = outer.get("data") if isinstance(outer, dict) else None
+                flattened = (isinstance(data_schema, dict) and data_schema.get("type") == "object"
+                             and set(outer) <= {"data", "call"} and "data" not in (body.get("properties") or {}))
+                if flattened:
+                    if "config['body']['data'] = nested" not in str(tool.get("pre_process_code") or ""):
+                        errors.append(f"{where}: flattened data fields need a bank-envelope pre-hook")
+                    errors.extend(_generic_body_errors(body, data_schema, where))
+                else:
+                    errors.extend(_generic_body_errors(body, schema, where))
         for transition in node.get("transitions") or []:
             target = transition.get("target_node") if isinstance(transition, dict) else None
             if target not in nodes:

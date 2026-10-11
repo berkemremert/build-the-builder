@@ -184,7 +184,7 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
                                                for tool in workflow["nodes"]["service"]["tools"]])
         send = workflow["nodes"]["commit"]["tools"][0]
         self.assertGreater(send["config"]["timeoutMs"], 12000)
-        data_fields = send["function"]["parameters"]["properties"]["body"]["properties"]["data"]["properties"]
+        data_fields = send["function"]["parameters"]["properties"]["body"]["properties"]
         self.assertEqual("{{customerNumber}}", data_fields["customerNo"]["default"])
         self.assertEqual("mail", data_fields["channel"]["default"])
         state = {}

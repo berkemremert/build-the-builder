@@ -35,13 +35,13 @@ class GenericRequestValidationTests(unittest.TestCase):
     def test_nested_required_request_field_is_checked(self):
         workflow = copy.deepcopy(self.workflow)
         body = workflow["nodes"]["service"]["tools"][0]["function"]["parameters"]["properties"]["body"]
-        del body["properties"]["data"]["properties"]["customerNo"]
+        del body["properties"]["customerNo"]
         self.assertTrue(any("required request field 'customerNo'" in error
                             for error in validate_generic_workflow(workflow, self.spec)))
 
     def test_nested_unknown_field_and_invalid_fixed_enum_are_checked(self):
         workflow = copy.deepcopy(self.workflow)
-        fields = workflow["nodes"]["service"]["tools"][0]["function"]["parameters"]["properties"]["body"]["properties"]["data"]["properties"]
+        fields = workflow["nodes"]["service"]["tools"][0]["function"]["parameters"]["properties"]["body"]["properties"]
         fields["channel"]["default"] = "WEB"
         fields["invented"] = {"type": "string", "default": "x"}
         errors = validate_generic_workflow(workflow, self.spec)
@@ -72,7 +72,7 @@ class GenericRequestValidationTests(unittest.TestCase):
         self.spec["paths"]["/read"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["data"]["properties"]["channel"]["enum"] = ["IVR", "WEB"]
         self.policy["tool_policy"]["readAccount"] = 'POST with data.channel = "IVR" for this flow.'
         read = build_generic_workflow(self.policy, self.spec)["nodes"]["service"]["tools"][0]
-        field = read["function"]["parameters"]["properties"]["body"]["properties"]["data"]["properties"]["channel"]
+        field = read["function"]["parameters"]["properties"]["body"]["properties"]["channel"]
         self.assertEqual("IVR", field["default"])
         config = {"body": {"customerNo": "42"}}
         exec(read["pre_process_code"], {"config": config, "vars": {"customerNumber": "42"}})
@@ -95,8 +95,48 @@ class GenericRequestValidationTests(unittest.TestCase):
             exec(read["post_process_code"], {"result": result, "vars": state})
             self.assertEqual(expected, "readAccount" in json.loads(state["generic_read_evidence"]))
 
+    def test_normal_completion_uses_source_main_menu_phrase(self):
+        self.policy["outcomes"] = {"main_menu":
+            "Normal goodbye, thanks, nothing else: “Sizi ana menüye yönlendiriyorum.” "
+            "No eligible card: “Another specific phrase.”"}
+        workflow = build_generic_workflow(self.policy, self.spec)
+        self.assertEqual("Teşekkür ederiz. Sizi ana menüye yönlendiriyorum.",
+                         workflow["nodes"]["farewell"]["on_enter"]["text"])
+        self.policy["outcomes"]["main_menu"] = (
+            "Normal completion and no eligible card. No eligible card: “Different phrase.” "
+            "Normal completion: “Sizi ana menüye yönlendiriyorum.”")
+        workflow = build_generic_workflow(self.policy, self.spec)
+        self.assertEqual("Sizi ana menüye yönlendiriyorum.",
+                         workflow["nodes"]["farewell"]["on_enter"]["text"])
+
 
 class GenericWriteSafetyTests(unittest.TestCase):
+    def test_policy_required_exit_state_is_checked_without_response_enum(self):
+        response = {"type": "object", "properties": {
+            "result": {"type": "object", "properties": {"returnCode": {"type": "string"}}},
+            "data": {"type": "object", "properties": {
+                "exitState": {"type": "string", "description": "A successful send returns DONE."}}}}}
+        spec = {"openapi": "3.0.3", "servers": [{"url": "https://example.test"}], "paths": {
+            "/send": {"post": {"operationId": "sendReport", "summary": "Send report",
+                "responses": {"200": {"description": 'HTTP 200 with result.returnCode equal to "1" is success.',
+                    "content": {"application/json": {"schema": response}}}}}}}}
+        policy = {"raw_brief": "The upstream IVR already authenticated the caller.",
+                  "tool_policy": {"sendReport": 'Require HTTP 200, result.returnCode="1" and data.exitState="DONE".'}}
+        workflow = build_generic_workflow(policy, spec)
+        send = workflow["nodes"]["commit"]["tools"][0]
+        for code, state, accepted in (("1", "DONE", True), ("1", "PENDING", False), ("0", "DONE", False)):
+            variables = {}
+            exec(send["post_process_code"], {"result": {"status_code": 200,
+                "data": {"result": {"returnCode": code}, "data": {"exitState": state}}}, "vars": variables})
+            self.assertEqual("confirmed" if accepted else "unknown", variables["generic_write_result"])
+        del response["properties"]["data"]["properties"]["exitState"]
+        with self.assertRaisesRegex(ValueError, "source requires data.exitState"):
+            build_generic_workflow(policy, spec)
+        response["properties"]["data"]["properties"]["exitState"] = {"type": "string"}
+        del response["properties"]["result"]["properties"]["returnCode"]
+        with self.assertRaisesRegex(ValueError, "source requires result.returnCode"):
+            build_generic_workflow(policy, spec)
+
     def test_successful_send_marker_exposes_guarded_write(self):
         read_schema = {"type": "object", "properties": {
             "data": {"type": "object", "properties": {
