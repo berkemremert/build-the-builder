@@ -1473,8 +1473,9 @@ try:
                                        item.get('date_phrase') or item.get('raw_date') or '').strip()
         for item in proposals)
     shared_day = bool(str(vars.get('multi_common_date_words') or '').strip())
+    individual_day = bool(str(vars.get('proposed_date_words') or '').strip())
     disclosure = str(vars.get('multi_disclosure_state') or '')
-    vars['multi_all_today_next'] = ('advance' if status in ('yes', 'no') or dated or shared_day or
+    vars['multi_all_today_next'] = ('advance' if status in ('yes', 'no') or dated or shared_day or individual_day or
                                    disclosure in ('hardship', 'incomplete') else 'clarify')
 except Exception:
     vars['multi_all_today_next'] = 'clarify'
@@ -1546,6 +1547,9 @@ try:
             return fallback if fallback in product_by_id else ''
         if name in product_by_id:
             return name
+        for known_pid in product_by_id:
+            if known_pid.lower() == name:
+                return known_pid
         matches = []
         for known_pid, product in product_by_id.items():
             label = re.sub(r'\\s+', ' ', str(product.get('label') or '').lower().replace('_', ' ')).strip()
@@ -1643,10 +1647,13 @@ try:
         disclosure = str(vars.get('multi_disclosure_state') or 'none')
         raw_notes = '{}' if disclosure in ('incomplete', 'hardship') else (vars.get('pending_note_reasons_json') or '{}')
         raw_notes = json.loads(raw_notes) if isinstance(raw_notes, str) else raw_notes
+        date_exclusions = set()
         if isinstance(raw_notes, dict):
             for raw_pid, raw_reason in raw_notes.items():
                 claim_pid = resolve_pid(raw_pid)
                 reason = note_reason(raw_reason)
+                if claim_pid and reason:
+                    date_exclusions.add(claim_pid)
                 if claim_pid and reason and reason != __REFUSAL_REASON__:
                     notes[claim_pid] = reason
                     terms.pop(claim_pid, None)
@@ -1663,6 +1670,39 @@ try:
                     if pid not in notes:
                         terms[pid] = dict(product_id=pid, amount=item.get('past_due'), date=common)
             add_terms(vars.get('proposed_terms_json') or '')
+            raw_day = str(vars.get('proposed_date_words') or '').strip()
+            proposal_items = parsed(vars.get('proposed_terms_json') or '')
+            has_structured_day = any(
+                isinstance(item, dict) and str(item.get('date_phrase') or item.get('date_words') or
+                                                   item.get('raw_date') or item.get('date') or '').strip()
+                for item in proposal_items)
+            if raw_day and not common and not has_structured_day and disclosure == 'none':
+                named = resolve_pid(vars.get('multi_initial_date_product_id'))
+                structured_ids = set(resolve_pid(item.get('product_id')) for item in proposal_items
+                                     if isinstance(item, dict))
+                structured_ids.discard('')
+                candidates = [item for item in products
+                              if str(item.get('product_id') or '') not in date_exclusions and
+                              str(item.get('product_id') or '') not in notes]
+                inferred = str(candidates[0].get('product_id') or '') if len(candidates) == 1 else ''
+                structured = next(iter(structured_ids)) if len(structured_ids) == 1 else ''
+                target = named or structured or inferred
+                if target in date_exclusions or target in notes or target not in product_by_id:
+                    target = ''
+                if target:
+                    saved = partial.get(target, {})
+                    if allowed_partial_day(raw_day, product_by_id[target]):
+                        if saved.get('amount') is not None:
+                            terms[target] = dict(product_id=target, amount=saved['amount'], date=raw_day)
+                            partial.pop(target, None)
+                        else:
+                            partial[target] = dict(product_id=target, date=raw_day)
+                    else:
+                        partial[target] = dict(product_id=target, invalid_date=raw_day)
+                else:
+                    vars['multi_initial_date_words'] = raw_day
+                    vars['multi_initial_date_attempts'] = '0'
+                    next_step = 'date_identify'
             if disclosure != 'incomplete':
                 for pid in parsed(vars.get('multi_full_too_much_ids_json') or '[]'):
                     resolved = resolve_pid(pid)
@@ -1672,7 +1712,21 @@ try:
     else:
         pid = str(vars.get('multi_focus_product_id') or '')
         action = str(vars.get('multi_offer_action') or 'unclear')
-        if phase == 'disclosure_completion':
+        if phase == 'date_identify':
+            target = resolve_pid(vars.get('multi_initial_date_product_id'))
+            raw_day = str(vars.get('multi_initial_date_words') or '').strip()
+            if target in product_by_id and target not in notes and raw_day:
+                partial[target] = (dict(product_id=target, date=raw_day) if
+                                   allowed_partial_day(raw_day, product_by_id[target]) else
+                                   dict(product_id=target, invalid_date=raw_day))
+                vars['multi_initial_date_words'] = ''
+                vars['multi_initial_date_attempts'] = '0'
+            else:
+                attempts = int(vars.get('multi_initial_date_attempts') or 0) + 1
+                vars['multi_initial_date_attempts'] = str(attempts)
+                next_step = 'date_identify' if attempts < 2 else 'service_error'
+            vars['multi_initial_date_product_id'] = ''
+        elif phase == 'disclosure_completion':
             raw_claims = vars.get('multi_reply_notes_json') or '{}'
             claims = json.loads(raw_claims) if isinstance(raw_claims, str) else raw_claims
             resolved_claims = []
@@ -1791,7 +1845,7 @@ try:
                   if str(item.get('product_id') or '') not in terms and str(item.get('product_id') or '') not in notes]
     if next_step == 'service_error':
         vars['multi_next'] = 'service_error'
-    elif next_step in ('support', 'clarify', 'identify', 'disclosure', 'question'):
+    elif next_step in ('support', 'clarify', 'identify', 'date_identify', 'disclosure', 'question'):
         vars['multi_phase'] = next_step
         vars['multi_next'] = next_step
         if next_step == 'clarify' and pid in product_by_id:
@@ -2487,7 +2541,7 @@ except Exception:
                                                      {"name": "proposed_terms_json", "type": "string", "min_confidence": 0.55,
                                                       "description": "Only when the latest caller answer proposes or accepts payment terms with a date, return a JSON array string with objects product_id, amount, date. Preserve the caller's raw date words verbatim in date, such as 'today', 'this Friday', 'next Friday', '30 October', or an ISO date; NEVER convert a relative date to a year or use the system clock. Code will resolve it from call now {{now}}. Use account facts {{account_facts}} for product ID and numeric full amount. For multiple products include each agreed product with its own raw date phrase. Leave empty for a bare yes/I confirm, no date, or no terms."},
                                                      {"name": "proposed_date_words", "type": "string", "min_confidence": 0.55,
-                                                      "description": "For a one-product proposal only, copy the exact date phrase spoken in the LATEST caller answer, verbatim, such as 'this Friday'. Do not convert it to a date. Leave empty if the latest answer contains no date phrase, including a bare yes/I confirm."},
+                                                      "description": "Copy the exact date phrase spoken in the LATEST caller answer, verbatim, such as 'this Friday', for a one-product proposal or a dated proposal for one of several products. Do not convert it to a date. Leave empty for a date explicitly applying to all products, no date phrase, or a bare yes/I confirm."},
                                                      {"name": "pending_note_reasons_json", "type": "string", "min_confidence": 0.55,
                                                       "description": "For each product the caller has finally refused, disputed, said already paid, or declined after hardship, return a JSON object string mapping product_id to the correct add_note reason from the source policy and API. Leave empty for a factual question and for 'I cannot pay all of them today', which only rejects paying every product today; no individual product has been finally refused."},
                                                      _enum("single_product_reason", note_codes or ["paid", "dispute", "hardship", "refused", "service_error"],
@@ -2505,6 +2559,8 @@ except Exception:
                                                               min_confidence=0.55),
                                                         {"name": "multi_common_date_words", "type": "string", "min_confidence": 0.55,
                                                          "description": "For a multi-product account only, copy a date phrase explicitly offered for ALL products, such as 'next Friday'. Leave empty for a date applying to just one product."},
+                                                        {"name": "multi_initial_date_product_id", "type": "string", "min_confidence": 0.55,
+                                                         "description": "For a multi-product account only, return the exact product ID from {{account_facts}} if the latest caller answer unambiguously names ONE product for the date in proposed_date_words. A unique card suffix or product label counts. Leave empty if the caller did not identify the dated product; do not choose one based on account order."},
                                                         {"name": "multi_full_too_much_ids_json", "type": "string", "min_confidence": 0.55,
                                                          "description": "For a multi-product account only, return a JSON array of product IDs for which the caller explicitly says that product's FULL past-due amount is too high or unaffordable. 'I cannot pay all of them today' or 'I cannot pay all three of those today' only refuses the timing of the all-today question; neither says any product's full amount is too much, so return [] unless the caller separately names an unaffordable product or amount. Do not infer that every product needs its floor from a no-to-all-today answer."}]
                                                        if multi_enabled else []),
@@ -2690,6 +2746,7 @@ except Exception:
             _eq("multi_support", "multi_next", "support"),
             _eq("multi_disclosure_clarify", "multi_next", "disclosure"),
             _eq("multi_clarify", "multi_next", "clarify"),
+            _eq("multi_initial_date_identify", "multi_next", "date_identify"),
             _eq("multi_offer_fact_answer", "multi_next", "question"),
             _eq("multi_identify", "multi_next", "identify"),
             _always("service_unavailable"),
@@ -2804,6 +2861,18 @@ except Exception:
                               "Transfer requests take priority; otherwise classify as unclear."),
                         {"name": "multi_reply_product_id", "type": "string", "min_confidence": 0.55,
                          "description": "The caller is identifying the product for the paid or dispute claim made immediately before this question. Map their latest answer to the exact product ID in {{account_facts}}. A known card suffix or exact product label is also accepted. Leave empty if the answer does not identify one product."}],
+            transitions=transfer_routes + [_always("multi_advance")],
+            max_turns=2, max_target="multi_advance")
+        nodes["multi_initial_date_identify"] = _conversation(
+            "multi_initial_date_identify",
+            "The caller gave a payment day without enough information to associate it with one product. "
+            "Ask only which product that day applies to, then wait for the answer. "
+            "Do not repeat the day, make an offer, or assume the first product. No tool call is allowed in this node.",
+            opening="Which product did you mean for the day you mentioned?",
+            extraction=[_enum("multi_offer_action", ["transfer_restructuring", "transfer_support", "transfer_human", "unclear"],
+                              "Transfer requests take priority; otherwise classify as unclear."),
+                        {"name": "multi_initial_date_product_id", "type": "string", "min_confidence": 0.55,
+                         "description": "Return the exact product ID from {{account_facts}} only when the latest caller answer identifies one product for the date they just mentioned. A unique card suffix or product label counts. Leave empty if ambiguous. Never choose a product from account order."}],
             transitions=transfer_routes + [_always("multi_advance")],
             max_turns=2, max_target="multi_advance")
         nodes["multi_correction"] = _conversation(
