@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "build-the-builder-bank-mock",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-11",
+  "workers_dev": true
+}
