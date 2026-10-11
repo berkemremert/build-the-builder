@@ -56,7 +56,7 @@ def _declared_call_variables(source: str) -> set[str]:
 def _upstream_identity_confirmed(source: str) -> bool:
     """Recognize an explicit prior IVR identity check, never infer one from tools."""
     matches = re.finditer(
-        r"\b(?:IVR|phone menu)\b.{0,180}\b(?:verified|authenticated|checked (?:identity|who they are))\b|"
+        r"\b(?:IVR|phone menu)\b.{0,180}?\b(?:verified|authenticated|checked (?:identity|who they are))\b|"
         r"\b(?:verified|authenticated)\b.{0,80}\b(?:by|through|in)\s+(?:the\s+)?(?:IVR|phone menu)\b",
         source, re.I | re.S)
     return any(not re.search(r"\b(?:not|never|without|unable)\b", match.group(0), re.I)
@@ -392,18 +392,25 @@ def _explicit_fixed_fields(schema: dict, rule: str) -> dict[str, str]:
         if len(path) != 2 or path[0] != "data" or sum(p[-1] == path[-1] for p in paths) != 1:
             continue
         name = path[-1]
+        field = _schema_at_path(schema, path)
+        enum = field.get("enum") if isinstance(field.get("enum"), list) else []
         pattern = r"\bdata\." + re.escape(name) + r"\s*=\s*([`\"'])([^`\"']+)\1"
         values = []
         for match in re.finditer(pattern, rule, re.I):
             prior = rule[max(0, match.start() - 300):match.start()]
             post = prior.rfind("POST")
-            if post < 0 or ";" in prior[post:] or re.search(r"\b(?:do not|never)\b.{0,40}$", prior, re.I):
+            if (not (enum and match.group(2) in enum) and (post < 0 or ";" in prior[post:])) or re.search(r"\b(?:do not|never)\b.{0,40}$", prior, re.I):
                 continue
             values.append(match.group(2))
+        if enum:
+            plain = r"\bdata\." + re.escape(name) + r"\s*=\s*([A-Za-z0-9_-]+)\b"
+            for match in re.finditer(plain, rule, re.I):
+                prior = rule[max(0, match.start() - 45):match.start()]
+                if match.group(1) in enum and not re.search(r"\b(?:do not|never)\b.{0,40}$", prior, re.I):
+                    values.append(match.group(1))
         if len(set(values)) != 1 or not values:
             continue
         value = values[0]
-        field = _schema_at_path(schema, path)
         if field.get("type") not in (None, "string") or (field.get("enum") and value not in field["enum"]):
             raise ValueError(f"Fixed request value for {name!r} contradicts OpenAPI")
         fixed[name] = value
@@ -446,7 +453,10 @@ def _provenance_plan(operation: _Operation, operations: list[_Operation], rule: 
             raise ValueError(f"{operation.name}: cannot prove listed {field} provenance")
 
     assignments = list(re.finditer(r"\bdata\.([A-Za-z_][A-Za-z0-9_]*)\s*=", rule))
+    fixed_assignments = _explicit_fixed_fields(_json_schema(operation, response=False), rule)
     for match in assignments:
+        if match.group(1) in fixed_assignments:
+            continue
         targets = [path for path in data_paths if path[-1] == match.group(1)]
         if len(targets) != 1:
             continue

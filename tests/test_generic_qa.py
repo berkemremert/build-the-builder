@@ -85,6 +85,15 @@ class GenericRequestValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Fixed bank request value"):
             exec(read["pre_process_code"], {"config": wrong, "vars": {"customerNumber": "42"}})
 
+    def test_unquoted_contract_enum_assignment_is_fixed(self):
+        self.spec["paths"]["/read"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["data"]["properties"]["channel"]["enum"] = ["IVR", "WEB"]
+        self.policy["tool_policy"]["readAccount"] = "The IVR authenticated the caller. Call with data.channel = IVR; never use an empty channel."
+        read = build_generic_workflow(self.policy, self.spec)["nodes"]["service"]["tools"][0]
+        self.assertEqual("IVR", read["function"]["parameters"]["properties"]["body"]["properties"]["channel"]["default"])
+        config = {"body": {"customerNo": "42"}}
+        exec(read["pre_process_code"], {"config": config, "vars": {"customerNumber": "42"}})
+        self.assertEqual("IVR", config["body"]["data"]["channel"])
+
     def test_preview_description_success_code_controls_read_evidence(self):
         operation = self.spec["paths"]["/read"]["post"]
         response = operation["responses"]["200"]
