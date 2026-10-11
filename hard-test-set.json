@@ -1519,7 +1519,7 @@
     "brief": "A",
     "family": "Tool failure",
     "level": "hard",
-    "title": "Two consecutive create_promise failures trigger service error",
+    "title": "First create_promise failure is retried and then succeeds",
     "variables": {
       "first_name": "Grace",
       "last_name": "Lin",
@@ -1539,19 +1539,25 @@
         "minimum_payment": 109.5
       }
     ],
-    "script": "Confirms identity (DOB 23 February 1989, phone 9904). Customer agrees to pay the full overdue amount of 365.00 on Friday 16 October and confirms at the read-back. When create_promise fails on the first attempt, the agent retries once. The second create_promise attempt also fails. The agent explains that the promise could not be recorded.",
+    "script": "Confirms identity (DOB 23 February 1989, phone 9904). Customer agrees to pay the full overdue amount of 365.00 on Friday 16 October and confirms at the read-back. If the agent pauses to retry recording, she waits without changing her payment terms.",
     "expected": {
-      "outcome": "no_promise",
-      "reason": "service_error",
-      "promises": [],
+      "outcome": "promise",
+      "reason": null,
+      "promises": [
+        {
+          "product_id": "p1",
+          "amount": 365.0,
+          "date": "2026-10-16"
+        }
+      ],
       "notes": [],
       "callbacks": [],
       "transfers": []
     },
     "checks": [
       "Retry create_promise exactly once after the first failure.",
-      "When the second create_promise call fails, do not claim that the promise was recorded.",
-      "State that the payment could not be recorded and close as no_promise with reason service_error."
+      "Do not claim the promise was recorded before the successful second create_promise response.",
+      "After the successful retry, state that the promise was recorded and close as promise."
     ],
     "rules": [
       "A 34",

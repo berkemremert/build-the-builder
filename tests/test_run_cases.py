@@ -12,6 +12,40 @@ from tools.score import score_ledger
 
 
 class LedgerFailureTests(unittest.TestCase):
+    def test_hard28_expectation_matches_one_seeded_promise_failure(self):
+        root = Path(run_cases.__file__).resolve().parents[1]
+        public = {case["id"]: case for case in json.loads((root / "public-test-set.json").read_text())}
+        hard = {case["id"]: case for case in json.loads((root / "hard-test-set.json").read_text())}
+        case = hard["HARD-28"]
+        seed = public[case["source_case"]]
+        self.assertEqual([{"tool": "create_promise", "fail_first_n": 1}], seed["faults"])
+        self.assertEqual(seed["expected"], case["expected"])
+        ledger = {**case["expected"], "calls": [
+            {"tool": "create_promise", "result": {"ok": False}},
+            {"tool": "create_promise", "result": {"ok": True}},
+            {"tool": "close_call", "result": {"ok": True}},
+        ]}
+        self.assertEqual([], score_ledger(case, ledger)["failed"])
+
+    def test_hard13_farewell_loop_judge_failure_is_not_overridden_by_ledger(self):
+        root = Path(run_cases.__file__).resolve().parents[1]
+        case = next(case for case in json.loads((root / "hard-test-set.json").read_text())
+                    if case["id"] == "HARD-13")
+        ledger = {**case["expected"], "calls": [
+            {"tool": "close_call", "result": {"ok": True}},
+        ]}
+        judge = {"runs": [{"personaId": "persona-hard", "callId": "call-hard",
+                           "outcome": "fail", "reason": "farewell loop until max_turns_exceeded"}]}
+        with mock.patch.object(run_cases, "http", side_effect=[{"variables": {"customer_id": "c_test"}}, ledger]), \
+             mock.patch.object(run_cases.freya, "run_simulation", return_value=("sim-1", "iteration-1", "completed")), \
+             mock.patch.object(run_cases.freya, "get_iteration", return_value=judge), \
+             mock.patch.object(run_cases.freya, "get_call", return_value={"messages": [], "endedReason": "assistant-ended-call"}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            rows, *_ = run_cases.run_once("agent-1", [case], {"HARD-13": "persona-hard"})
+        self.assertFalse(rows[0]["pass"])
+        self.assertEqual("fail", rows[0]["judge_outcome"])
+        self.assertTrue(any("farewell loop" in failure for failure in rows[0]["failed"]))
+
     def test_hard_cases_reuse_published_account_facts(self):
         root = Path(run_cases.__file__).resolve().parents[1]
         public = {case["id"]: case for case in json.loads((root / "public-test-set.json").read_text())}
