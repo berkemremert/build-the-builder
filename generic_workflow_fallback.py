@@ -341,6 +341,32 @@ def _schema_at_path(schema: dict, path: tuple[str, ...]) -> dict:
     return current if isinstance(current, dict) else {}
 
 
+def _explicit_fixed_fields(schema: dict, rule: str) -> dict[str, str]:
+    """Bind literal data assignments stated in the operation's POST instruction."""
+    paths = _schema_paths(schema)
+    fixed: dict[str, str] = {}
+    for path in paths:
+        if len(path) != 2 or path[0] != "data" or sum(p[-1] == path[-1] for p in paths) != 1:
+            continue
+        name = path[-1]
+        pattern = r"\bdata\." + re.escape(name) + r"\s*=\s*([`\"'])([^`\"']+)\1"
+        values = []
+        for match in re.finditer(pattern, rule, re.I):
+            prior = rule[max(0, match.start() - 300):match.start()]
+            post = prior.rfind("POST")
+            if post < 0 or ";" in prior[post:] or re.search(r"\b(?:do not|never)\b.{0,40}$", prior, re.I):
+                continue
+            values.append(match.group(2))
+        if len(set(values)) != 1 or not values:
+            continue
+        value = values[0]
+        field = _schema_at_path(schema, path)
+        if field.get("type") not in (None, "string") or (field.get("enum") and value not in field["enum"]):
+            raise ValueError(f"Fixed request value for {name!r} contradicts OpenAPI")
+        fixed[name] = value
+    return fixed
+
+
 def _provenance_plan(operation: _Operation, operations: list[_Operation], rule: str,
                      call_variables: set[str]) -> list[dict]:
     """Derive exact request bindings from explicit source rules and OpenAPI shapes."""
@@ -555,7 +581,7 @@ def _pre_provenance_code(operation: _Operation, plan: list[dict]) -> str:
     )
 
 
-def _normalize_request_code(operation: _Operation) -> str:
+def _normalize_request_code(operation: _Operation, rule: str) -> str:
     """Accept Freya's flat tool arguments only when the contract has one data envelope."""
     schema = _json_schema(operation, response=False)
     top = schema.get("properties") or {}
@@ -565,7 +591,7 @@ def _normalize_request_code(operation: _Operation) -> str:
     data_fields = data.get("properties") or {}
     if not isinstance(data_fields, dict):
         return ""
-    fixed = {}
+    fixed = _explicit_fixed_fields(schema, rule)
     for name, field in data_fields.items():
         if not isinstance(field, dict):
             continue
@@ -639,8 +665,10 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
               .get("application/json") or {}).get("schema") or {}
     if schema and schema.get("type", "object") != "object":
         raise ValueError(f"{operation.name} request must be a JSON object")
+    fixed_values = _explicit_fixed_fields(schema, rule)
+    fixed_values.update(fixed or {})
     body_properties = {
-        name: _body_property(name, spec, call_variables or set(), fixed or {}, location=operation.name)
+        name: _body_property(name, spec, call_variables or set(), fixed_values, location=operation.name)
         for name, spec in (schema.get("properties") or {}).items()
     }
     result = {
@@ -918,7 +946,7 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
         plan = _provenance_plan(operation, operations,
                                 str(rules.get(operation.name) or ""), call_variables)
         tool = tools[operation.name]
-        tool["pre_process_code"] = (_normalize_request_code(operation)
+        tool["pre_process_code"] = (_normalize_request_code(operation, str(rules.get(operation.name) or ""))
                                     + _pre_provenance_code(operation, plan)
                                     + tool.get("pre_process_code", ""))
         if operation.role == "read":

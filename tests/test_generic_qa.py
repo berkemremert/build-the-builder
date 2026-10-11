@@ -58,6 +58,19 @@ class GenericRequestValidationTests(unittest.TestCase):
             exec(read["pre_process_code"], {"config": invalid, "vars": {"customerNumber": "42"}})
         self.assertEqual({}, invalid["body"])
 
+    def test_explicit_post_literal_is_bound_and_enforced(self):
+        self.spec["paths"]["/read"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]["data"]["properties"]["channel"]["enum"] = ["IVR", "WEB"]
+        self.policy["tool_policy"]["readAccount"] = 'POST with data.channel = "IVR" for this flow.'
+        read = build_generic_workflow(self.policy, self.spec)["nodes"]["service"]["tools"][0]
+        field = read["function"]["parameters"]["properties"]["body"]["properties"]["data"]["properties"]["channel"]
+        self.assertEqual("IVR", field["default"])
+        config = {"body": {"customerNo": "42"}}
+        exec(read["pre_process_code"], {"config": config, "vars": {"customerNumber": "42"}})
+        self.assertEqual("IVR", config["body"]["data"]["channel"])
+        wrong = {"body": {"customerNo": "42", "channel": "WEB"}}
+        with self.assertRaisesRegex(ValueError, "Fixed bank request value"):
+            exec(read["pre_process_code"], {"config": wrong, "vars": {"customerNumber": "42"}})
+
     def test_preview_description_success_code_controls_read_evidence(self):
         operation = self.spec["paths"]["/read"]["post"]
         response = operation["responses"]["200"]
