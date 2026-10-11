@@ -54,7 +54,15 @@ class LedgerFailureTests(unittest.TestCase):
             "to appear? Short sentence. Wait. 19. For the car loan, say the product is not yours.")}]
         natural = [{"role": "user", "content": "Actually, for the card, I can only"}]
         self.assertEqual("19", run_cases.script_leakage(case, leaked))
+        self.assertEqual("17", run_cases.script_leakage(case, [{"role": "user", "content":
+            "Clarify that this is the current 1320 past-due amount on the personal loan."}]))
+        self.assertIsNone(run_cases.script_leakage(case, [{"role": "user", "content":
+            "I mean I paid the current 1320 past-due amount on my personal loan."}]))
         self.assertIsNone(run_cases.script_leakage(case, natural))
+        natural_plan = {"planned_caller_turns": [
+            "I paid the current 1320 past-due amount on my personal loan this morning."]}
+        self.assertIsNone(run_cases.script_leakage(natural_plan, [{"role": "user", "content":
+            "I paid the current 1320 past-due amount on my personal loan this morning."}]))
 
     def test_leaked_caller_plan_makes_run_unscored(self):
         case = {"id": "LONG-05", "source_case": "PUB-12", "level": "hard",
@@ -76,6 +84,28 @@ class LedgerFailureTests(unittest.TestCase):
             rows, *_ = run_cases.run_once("agent-1", [case], {"LONG-05": "persona-long"})
         self.assertIsNone(rows[0]["pass"])
         self.assertEqual("19", rows[0]["persona_leakage"])
+        self.assertIn("UNSCORED LONG-05", output.getvalue())
+
+    def test_unnumbered_plan_recitation_makes_run_unscored(self):
+        case = {"id": "LONG-05", "source_case": "PUB-12", "level": "hard",
+                "family": "Long-call state", "script": "17. Clarify the current payment claim.",
+                "planned_caller_turns": ["Clarify that this is the current 1320 past-due amount on the personal loan."]}
+        ledger = {"calls": [], "promises": [], "notes": [], "callbacks": [],
+                  "transfers": [], "outcome": {}}
+        judge = {"runs": [{"personaId": "persona-long", "callId": "call-long",
+                           "outcome": "pass", "reason": ""}]}
+        call = {"messages": [{"role": "user", "content":
+                "Clarify that this is the current 1320 past-due amount on the personal loan."}],
+                "endedReason": "assistant-ended-call"}
+        with mock.patch.object(run_cases, "http", side_effect=[{"variables": {"customer_id": "c_test"}}, ledger]), \
+             mock.patch.object(run_cases.freya, "run_simulation", return_value=("sim-1", "iteration-1", "completed")), \
+             mock.patch.object(run_cases.freya, "get_iteration", return_value=judge), \
+             mock.patch.object(run_cases.freya, "get_call", return_value=call), \
+             mock.patch.object(run_cases, "score_ledger", return_value={"pass": True, "failed": []}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            rows, *_ = run_cases.run_once("agent-1", [case], {"LONG-05": "persona-long"})
+        self.assertIsNone(rows[0]["pass"])
+        self.assertEqual("1", rows[0]["persona_leakage"])
         self.assertIn("UNSCORED LONG-05", output.getvalue())
 
     def test_source_case_seeds_bank_but_custom_case_is_scored(self):

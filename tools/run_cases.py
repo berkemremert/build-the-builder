@@ -19,6 +19,7 @@ PRIVATE CALL PLAN (never read it aloud):
 
 RULES:
 - Use the next relevant move as your own natural reply to what the agent just said. Never recite the plan or describe a future move.
+- Plan items such as "Ask...", "Say...", or "Clarify..." describe what to do. Turn them into first-person caller speech; never say those instructions verbatim.
 - Answer what you are asked. Do not volunteer information nobody asked for.
 - Usually give a complete number or date in one turn. If the plan or speaking style calls for a split answer, give only the planned fragment and resume after the agent replies.
 - Do not invent dates, amounts or facts that are not written above. If asked something that is not covered, give a short neutral answer.
@@ -43,13 +44,22 @@ def private_plan(script):
 
 
 def script_leakage(case, messages):
-    """Return a recited step number, if a simulated caller quotes its private plan."""
+    """Return a recited step number when a caller quotes private plan wording."""
     steps = []
-    for number, move in _NUMBERED_MOVE.findall(case.get("script", "")):
+    planned = case.get("planned_caller_turns")
+    moves = ([(str(index), move) for index, move in enumerate(planned, 1)]
+             if isinstance(planned, list) and planned else _NUMBERED_MOVE.findall(case.get("script", "")))
+    for number, move in moves:
         words = re.findall(r"[A-Za-z]+", move)[:4]
         if words:
-            steps.append((number, re.compile(
-                r"\b" + re.escape(number) + r"\.\s+" + r"\W+".join(map(re.escape, words)), re.I)))
+            numbered = re.compile(
+                r"\b" + re.escape(number) + r"\.\s+" + r"\W+".join(map(re.escape, words)), re.I)
+            move_words = re.findall(r"[a-z0-9]+", move.lower())
+            instruction = re.match(
+                r"(?:after|ask|say|clarify|when|for|accept|at|on|offer|follow|give|change|repeat)\b",
+                move, re.I)
+            steps.append((number, numbered, " ".join(move_words)
+                          if instruction and len(move_words) >= 7 else ""))
     for message in messages:
         if message.get("role") != "user":
             continue
@@ -57,8 +67,9 @@ def script_leakage(case, messages):
         if isinstance(content, list):
             content = " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
         utterance = " ".join(str(content).split())
-        for number, pattern in steps:
-            if pattern.search(utterance):
+        normalized = " " + " ".join(re.findall(r"[a-z0-9]+", utterance.lower())) + " "
+        for number, numbered, verbatim in steps:
+            if numbered.search(utterance) or (verbatim and " " + verbatim + " " in normalized):
                 return number
     return None
 
