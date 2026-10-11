@@ -1908,7 +1908,8 @@ try:
     seen = set()
     for item in raw:
         supplied_product = str(item.get('product_id') or item.get('product') or '').strip()
-        supplied_amount = str(item.get('amount') or '').strip()
+        amount_value = item.get('amount')
+        supplied_amount = '' if amount_value is None else str(amount_value).strip()
         supplied_date = str(item.get('date_phrase') or item.get('date_words') or item.get('date') or '').strip()
         if not any((supplied_product, supplied_amount, supplied_date)):
             raise ValueError('No corrected terms')

@@ -95,6 +95,18 @@ class Hard07ConfirmationRegression(unittest.TestCase):
                 self.assertEqual("clarify", state["multi_next"])
                 self.assertEqual(original, state["multi_terms_json"])
 
+    def test_numeric_zero_correction_cannot_reuse_previous_amount(self) -> None:
+        state = self._state()
+        original = state["multi_terms_json"]
+        state["multi_corrected_terms_json"] = json.dumps([{
+            "product_id": "p1", "amount": 0, "date": "fifteen October",
+        }])
+        run_node(self.workflow, "multi_revise", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual("1", state["multi_correction_attempts"])
+        self.assertEqual(original, state["multi_terms_json"])
+        self.assertEqual({}, json.loads(state["multi_correction_parts_json"]))
+
     def test_complete_three_product_correction_after_fragment(self) -> None:
         state = self._state()
         state["product_json"] = json.dumps([
