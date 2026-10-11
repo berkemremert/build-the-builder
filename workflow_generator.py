@@ -19,6 +19,7 @@ from api_servers import operation_url
 from account_item_bindings import product_item_fields
 from business_calendar import business_weekdays
 from bank_names import BANK_NAME, source_bank_name
+from customer_bindings import customer_identifier_field
 from deadline_tables import parse_deadline_tables
 from identity_order import latest_explicit_identity_order
 from openapi_resolver import normalize_openapi
@@ -212,6 +213,7 @@ def _promise_response_contract(openapi: dict) -> tuple[list[str], str, list[str]
 def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
               description: str = "", post_code: str = "") -> dict:
     path, method, schema = _api_spec(openapi, name)
+    customer_field = customer_identifier_field(schema)
     headers = {"Content-Type": {"type": "string", "default": "application/json"}}
     headers.update(required_header_bindings(openapi, path, method))
     fixed = fixed or {}
@@ -221,7 +223,8 @@ def _api_tool(openapi: dict, name: str, *, fixed: dict | None = None,
                 "description": spec.get("description") or f"{field} for {name}."}
         if spec.get("enum"):
             leaf["enum"] = spec["enum"]
-        leaf["default"] = fixed[field] if field in fixed else "{{" + field + "}}"
+        leaf["default"] = ("{{customer_id}}" if field == customer_field else
+                           fixed[field] if field in fixed else "{{" + field + "}}")
         properties[field] = leaf
     params = {"type": "object", "properties": {
         "url": {"type": "string", "default": operation_url(openapi, path, method)},

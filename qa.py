@@ -21,6 +21,7 @@ from api_bindings import (account_response_collection, identity_response_fields,
                           close_request_fields)
 from api_parameters import required_header_bindings
 from api_servers import operation_url
+from customer_bindings import customer_identifier_field
 from openapi_resolver import normalize_openapi
 from write_result_fields import write_success_field
 
@@ -409,6 +410,15 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                 errors.append(f"{location}.body.properties: add required API field {field!r}")
             elif field not in required and isinstance(body_props[field], dict) and "default" not in body_props[field]:
                 errors.append(f"{location}.body.required: include unbaked API field {field!r}")
+        try:
+            customer_field = customer_identifier_field(schema)
+        except ValueError as exc:
+            errors.append(f"{location}: {exc}")
+        else:
+            customer_default = (body_props.get(customer_field) or {}).get("default")
+            if customer_default != "{{customer_id}}":
+                errors.append(f"{location}.body.properties.{customer_field}.default: "
+                              "bind required customer identifier to {{customer_id}} from call variables")
         for field, spec in body_props.items():
             where = f"{location}.body.properties.{field}"
             if field not in api_props:
@@ -432,8 +442,6 @@ def validate_workflow(workflow: dict, openapi: dict) -> list[str]:
                     errors.append(f"{where}.default: {default!r} is not in OpenAPI enum {allowed!r}")
             if "const" in spec and "default" not in spec:
                 errors.append(f"{where}: const does not send a value; use default or let the model fill it")
-            if field == "customer_id" and spec.get("default") != "{{customer_id}}":
-                errors.append(f"{where}: set default to {{{{customer_id}}}} from call variables")
         if name == "verify_identity":
             try:
                 selector, choices = identity_selector_field(schema)
