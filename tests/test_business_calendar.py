@@ -16,7 +16,8 @@ def _changed_policy() -> dict:
     policy["raw_brief"] += (
         "\nLater calendar memo: Business days now include Saturday. "
         "Workdays run Monday through Saturday; only Sunday and named bank holidays are closed. "
-        "Offer on the last business day of this week."
+        "Offer on the last business day of this week. "
+        "Callbacks are for today or the next business day, from 10:00 to 19:00, both included."
     )
     return policy
 
@@ -54,9 +55,11 @@ class BusinessCalendarTests(unittest.TestCase):
         self.assertIn("Saturday", workflow["nodes"]["third_party"]["task_message"])
         callback = workflow["nodes"]["third_party"]["tools"][0]
         guard = callback["pre_process_code"]
-        exec(guard, {"vars": state, "config": {"body": {"callback_day": "2031-04-26"}}})
+        exec(guard, {"vars": state, "config": {"body": {"callback_day": "2031-04-26",
+                                                         "callback_slot": "12:00"}}})
         with self.assertRaisesRegex(ValueError, "not a business day"):
-            exec(guard, {"vars": state, "config": {"body": {"callback_day": "2031-04-27"}}})
+            exec(guard, {"vars": state, "config": {"body": {"callback_day": "2031-04-27",
+                                                             "callback_slot": "12:00"}}})
 
 
 if __name__ == "__main__":

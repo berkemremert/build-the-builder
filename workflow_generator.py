@@ -19,6 +19,7 @@ from api_body_bindings import fixed_required_body_values
 from api_servers import operation_url
 from account_item_bindings import product_item_fields
 from business_calendar import business_weekdays
+from callback_rules import callback_guard_code, callback_request_fields, callback_window
 from bank_names import BANK_NAME, source_bank_name
 from customer_bindings import customer_identifier_field
 from deadline_tables import parse_deadline_tables
@@ -1920,22 +1921,10 @@ def build_workflow(policy: dict, openapi: dict) -> dict:
                              description=f"Check the customer's {identity_fields[1].replace('_', ' ')} after their own answer. Never use a third party's answer.", post_code=verify_hook)
     callback = _api_tool(openapi, "schedule_callback", source=brief or prose, description="Book a valid callback after a third party gives an exact day and time.", post_code=callback_hook)
     callback_schema = _api_spec(openapi, "schedule_callback")[2]
-    callback_date_fields = [field for field, spec in (callback_schema.get("properties") or {}).items()
-                            if isinstance(spec, dict) and (spec.get("format") == "date" or
-                                re.search(r"(?:^|_)(?:date|day)$", field))]
-    if len(callback_date_fields) != 1:
-        raise ValueError("schedule_callback OpenAPI must identify one callback date field")
-    callback["pre_process_code"] = f"""import datetime
-body = config.get('body')
-if not isinstance(body, dict):
-    raise ValueError('Callback body is missing')
-day = datetime.date.fromisoformat(str(body.get({callback_date_fields[0]!r}) or ''))
-today = datetime.datetime.fromisoformat(str(vars.get('now') or '').replace('Z', '+00:00')).date()
-if day < today:
-    raise ValueError('Callback date is in the past')
-if day > today and (day.weekday() not in {weekdays!r} or day.isoformat() in {holidays!r}):
-    raise ValueError('Callback date is not a business day')
-"""
+    callback_fields = callback_request_fields(callback_schema)
+    callback["pre_process_code"] = callback_guard_code(
+        callback_fields["date"], callback_fields["time"], holidays, weekdays,
+        callback_window(brief or prose))
     account = _api_tool(openapi, "get_account", source=brief or prose, description="Load late products only after both security answers have passed.")
     promise = _api_tool(openapi, "create_promise", source=brief or prose, description="Record one confirmed, valid promise for one product. Retry once only after an explicit bank response says nothing was recorded.", post_code=promise_hook)
     note = _api_tool(openapi, "add_note", source=brief or prose, description="For a multi-product account only, record each product without a promise as refused, hardship, dispute, paid or service_error. Never add a note on a transfer.", post_code=note_hook)
