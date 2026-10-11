@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -98,6 +99,8 @@ def _check_case_snapshot(rows: list[dict], mock_url: str | None = None) -> None:
         raise SubmissionError("Trace has no source document fingerprints")
     # Use the builder's own discovery rules so a newly added case document
     # cannot be silently absent from the packaged run.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     from builder import _case_inputs
     documents, contract, _ = _case_inputs(folder)
     expected = [str(path.resolve()) for path in documents]
