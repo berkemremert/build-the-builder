@@ -59,6 +59,53 @@ def _policy() -> dict:
 
 
 class GenericWorkflowFallbackTests(unittest.TestCase):
+    def test_nested_request_and_string_code_success_are_source_bound(self):
+        result_schema = {"type": "object", "description": 'HTTP 200 with returnCode "S" indicates success.',
+                         "properties": {"returnCode": {"type": "string"}}}
+        spec = {"openapi": "3.0.3", "servers": [{"url": "https://example.test"}], "paths": {}}
+        for path, name, summary, fields, extra in (
+            ("/account.lookup", "lookupAccount", "Read account balance", {"customerNo": {"type": "string"}}, {}),
+            ("/letter.dispatch", "dispatchLetter", "Send requested letter", {
+                "customerNo": {"type": "string"}, "channel": {"type": "string", "enum": ["mail"]}},
+             {"responseCode": {"type": "integer", "description": "0 on success."},
+              "exitState": {"type": "string", "enum": ["FINISHED"]}}),
+        ):
+            spec["paths"][path] = {"post": {"operationId": name, "summary": summary,
+                "requestBody": {"content": {"application/json": {"schema": {"type": "object",
+                    "properties": {"data": {"type": "object", "properties": fields,
+                                            "required": list(fields)}}}}}},
+                "responses": {"200": {"description": "success", "content": {"application/json": {
+                    "schema": {"type": "object", "properties": {
+                        "result": result_schema, "data": {"type": "object", "properties": extra}}}}}}}}}
+        policy = {"raw_brief": "Every call gives variables:\n- `customerNumber`: customer number.\n"
+                               "The IVR has authenticated the caller before handoff. "
+                               "Send only after explicit customer confirmation."}
+        workflow = build_generic_workflow(policy, spec)
+        self.assertEqual("service", workflow["initial_node"])
+        self.assertEqual(["lookupAccount"], [tool["function"]["name"]
+                                               for tool in workflow["nodes"]["service"]["tools"]])
+        send = workflow["nodes"]["commit"]["tools"][0]
+        data_fields = send["function"]["parameters"]["properties"]["body"]["properties"]["data"]["properties"]
+        self.assertEqual("{{customerNumber}}", data_fields["customerNo"]["default"])
+        self.assertEqual("mail", data_fields["channel"]["default"])
+        state = {}
+        result = {"status_code": 200, "data": {"result": {"returnCode": "S"},
+                                                "data": {"responseCode": 0, "exitState": "FINISHED"}}}
+        exec(send["post_process_code"], {"result": result, "vars": state})
+        self.assertEqual("confirmed", state["generic_write_result"])
+        rejected = {"status_code": 200, "data": {"result": {"returnCode": "S"},
+                                                  "data": {"responseCode": 7, "exitState": "FINISHED"}}}
+        exec(send["post_process_code"], {"result": rejected, "vars": state})
+        self.assertEqual("unknown", state["generic_write_result"])
+
+    def test_auth_token_endpoint_is_not_exposed_to_caller(self):
+        spec = _spec()
+        spec["paths"]["/oauth2/token"] = {"post": _operation("token", "Issue access token")}
+        workflow = build_generic_workflow(_policy(), spec)
+        exposed = [tool["function"]["name"] for node in workflow["nodes"].values()
+                   for tool in node.get("tools", []) + node.get("pre_actions", [])]
+        self.assertNotIn("token", exposed)
+
     def test_describes_exact_operation_ids_and_urls(self):
         operations = describe_contract(_spec(), _policy())
         self.assertEqual(

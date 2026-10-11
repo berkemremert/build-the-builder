@@ -68,6 +68,9 @@ def _role(name: str, method: str, operation: dict, tool_rule: str) -> str:
     summary = str(operation.get("summary") or "").lower()
     description = str(operation.get("description") or "").lower()
     detail = " ".join((label, summary, description))
+    if (label in {"token", "access token", "refresh token"} or
+            re.search(r"\b(?:oauth\d*\s+token|access\s+token|refresh\s+token|token\s+grant)\b", label)):
+        return "auth"
     if re.search(r"verif|identit|authenticat|security.check|security.question", label):
         return "verify"
     if re.search(r"close|finish|end.call|finali[sz]|disposition", label):
@@ -78,10 +81,14 @@ def _role(name: str, method: str, operation: dict, tool_rule: str) -> str:
         return "close"
     if method == "get":
         return "read"
+    if re.search(r"\b(?:get|fetch|retrieve|read|list|lookup|query|search|view|balance|"
+                 r"preview|decide|estimate|quote|calculate|inspect)\b", label):
+        return "read"
     if re.search(r"\b(?:send|change|update|modify|save|submit|create|record|set|write|"
                  r"g[oö]nder|de[gğ]i[sş]tir|g[uü]ncelle|kaydet|olu[sş]tur|tan[iı]mla)\b", detail):
         return "write"
-    if re.search(r"\b(?:get|fetch|retrieve|read|list|lookup|query|search|show|view|"
+    if re.search(r"\b(?:get|fetch|retrieve|read|list|lookup|query|search|show|view|balance|"
+                 r"preview|decide|estimate|quote|calculate|inspect|"
                  r"sorgula|listele|g[oö]r[uü]nt[uü]le|getir|oku)\b", detail):
         return "read"
     if re.search(r"\b(?:read.only|retrieve|lookup|query|list|sorgula|listele)\b", tool_rule, re.I):
@@ -179,8 +186,101 @@ def _identity_completion_field(operation: _Operation) -> str | None:
     return next(iter(candidates)) if not full and len(candidates) == 1 else None
 
 
+def _result_checks(operation: _Operation) -> list[tuple[tuple[str, ...], object]]:
+    """Read explicit success markers from a 2xx JSON response schema."""
+    checks: list[tuple[tuple[str, ...], object]] = []
+
+    def walk(schema: dict, path: tuple[str, ...] = ()) -> None:
+        if not isinstance(schema, dict):
+            return
+        description = str(schema.get("description") or "")
+        properties = schema.get("properties") or {}
+        if isinstance(properties, dict):
+            for name, child in properties.items():
+                if not isinstance(child, dict):
+                    continue
+                child_path = (*path, name)
+                walk(child, child_path)
+                nested_description = str(child.get("description") or "")
+                if child.get("type") == "boolean" and re.search(
+                        r"\bok\b|success|saved|recorded|created|completed|sent|changed", name + " " + nested_description, re.I):
+                    checks.append((child_path, True))
+                elif re.search(r"\b(?:on|means?|indicates?)\s+success\b", nested_description, re.I):
+                    value = re.search(r"\b([A-Za-z0-9_-]+)\s+(?:on|means?|indicates?)\s+success\b",
+                                      nested_description, re.I)
+                    if value:
+                        raw = value.group(1)
+                        checks.append((child_path, int(raw) if child.get("type") == "integer" and raw.isdecimal()
+                                       else raw))
+                elif (len(child.get("enum") or []) == 1 and
+                      re.search(r"\b(?:exit.?state|response.?code|result.?status|success.?code)\b", name, re.I)):
+                    checks.append((child_path, child["enum"][0]))
+        if path and isinstance(properties, dict) and description:
+            for name in properties:
+                match = re.search(r"\b" + re.escape(name) + r"\s*[`\"']([^`\"']+)[`\"']\s+"
+                                  r"(?:indicates?|means?)\s+success\b", description, re.I)
+                if match:
+                    checks.append(((*path, name), match.group(1)))
+
+    for status, response in (operation.source.get("responses") or {}).items():
+        if not str(status).startswith("2") or not isinstance(response, dict):
+            continue
+        schema = ((response.get("content") or {}).get("application/json") or {}).get("schema") or {}
+        walk(schema)
+    unique = dict(checks)
+    return sorted(unique.items())
+
+
+def _call_variable_for(name: str, variables: set[str]) -> str | None:
+    lowered = name.lower().replace("_", "")
+    exact = [value for value in variables if value.lower().replace("_", "") == lowered]
+    if len(exact) == 1:
+        return exact[0]
+    if lowered.startswith("customer"):
+        aliases = [value for value in variables if value.lower().replace("_", "")
+                   in {"customerid", "customerno", "customernumber", "customeridentifier"}]
+        if len(aliases) == 1:
+            return aliases[0]
+    return None
+
+
+def _body_property(name: str, spec: dict, call_variables: set[str],
+                   fixed: dict, *, location: str) -> dict:
+    if not isinstance(spec, dict):
+        raise ValueError(f"{location} request field {name!r} is invalid")
+    kind = spec.get("type", "string")
+    if kind == "object":
+        properties = spec.get("properties") or {}
+        if not isinstance(properties, dict):
+            raise ValueError(f"{location} request object {name!r} has invalid properties")
+        return {"type": "object", "properties": {
+            key: _body_property(key, child, call_variables, fixed, location=location + "." + name)
+            for key, child in properties.items()}, "required": spec.get("required") or []}
+    leaf = {"type": kind, "description": spec.get("description") or f"{name} for {location}."}
+    if "enum" in spec:
+        leaf["enum"] = spec["enum"]
+    if name in fixed:
+        value = fixed[name]
+        if ("enum" in spec and value not in spec["enum"] and
+                not re.fullmatch(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}", str(value))):
+            raise ValueError(f"{location} fixed value for {name!r} is outside OpenAPI enum")
+        leaf["default"] = value
+    elif "const" in spec:
+        leaf["default"] = spec["const"]
+    elif "default" in spec:
+        leaf["default"] = spec["default"]
+    elif isinstance(spec.get("enum"), list) and len(spec["enum"]) == 1:
+        leaf["default"] = spec["enum"][0]
+    elif variable := _call_variable_for(name, call_variables):
+        leaf["default"] = "{{" + variable + "}}"
+    elif re.fullmatch(r"(?:customer|client|party|person)_?id", name, re.I):
+        leaf["default"] = "{{customer_id}}"
+    return leaf
+
+
 def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | None = None,
-          fixed: dict | None = None, call_variables: set[str] | None = None) -> dict:
+          fixed: dict | None = None, call_variables: set[str] | None = None,
+          result_checks: list[tuple[tuple[str, ...], object]] | None = None) -> dict:
     url = operation_url(openapi, operation.path, operation.method)
     headers = {"Content-Type": {"type": "string", "default": "application/json"}}
     headers.update(required_header_bindings(openapi, operation.path, operation.method))
@@ -188,30 +288,10 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
               .get("application/json") or {}).get("schema") or {}
     if schema and schema.get("type", "object") != "object":
         raise ValueError(f"{operation.name} request must be a JSON object")
-    body_properties = {}
-    for name, spec in (schema.get("properties") or {}).items():
-        if not isinstance(spec, dict):
-            raise ValueError(f"{operation.name} request field {name!r} is invalid")
-        leaf = {"type": spec.get("type", "string"),
-                "description": spec.get("description") or f"{name} for {operation.name}."}
-        if "enum" in spec:
-            leaf["enum"] = spec["enum"]
-        if name in (fixed or {}):
-            if ("enum" in spec and fixed[name] not in spec["enum"] and
-                    not re.fullmatch(r"\{\{[A-Za-z_][A-Za-z0-9_]*\}\}", str(fixed[name]))):
-                raise ValueError(f"{operation.name} fixed value for {name!r} is outside OpenAPI enum")
-            leaf["default"] = fixed[name]
-        elif "const" in spec:
-            leaf["default"] = spec["const"]
-        elif "default" in spec:
-            leaf["default"] = spec["default"]
-        elif isinstance(spec.get("enum"), list) and len(spec["enum"]) == 1:
-            leaf["default"] = spec["enum"][0]
-        elif name in (call_variables or set()):
-            leaf["default"] = "{{" + name + "}}"
-        elif re.fullmatch(r"(?:customer|client|party|person)_?id", name, re.I):
-            leaf["default"] = "{{customer_id}}"
-        body_properties[name] = leaf
+    body_properties = {
+        name: _body_property(name, spec, call_variables or set(), fixed or {}, location=operation.name)
+        for name, spec in (schema.get("properties") or {}).items()
+    }
     result = {
         "type": "function", "config": {"timeoutMs": 12000, "maxRetries": 0},
         "function": {"name": operation.name, "handler": "__function__:api_call",
@@ -225,7 +305,17 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
                                   "required": schema.get("required") or []},
                      }}},
     }
-    if result_field and operation.role == "write":
+    checks = result_checks or ([( (result_field,), True)] if result_field else [])
+    if checks and operation.role == "write":
+        check_source = (
+            "    checks = " + repr(checks) + "\n"
+            "    def field(path):\n"
+            "        value = data\n"
+            "        for part in path:\n"
+            "            value = value.get(part) if isinstance(value, dict) else None\n"
+            "        return value\n"
+            "    ok = str(result.get('status_code') or '').startswith('2') and all(field(path) == expected for path, expected in checks)\n"
+        )
         result["post_process_code"] = (
             "try:\n"
             "    result.pop('header', None)\n"
@@ -233,7 +323,7 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
             "    if not isinstance(data, dict):\n"
             "        data = {}\n"
             "        result['data'] = data\n"
-            f"    ok = str(result.get('status_code') or '').startswith('2') and data.get({result_field!r}) is True\n"
+            + check_source +
             "    vars['generic_write_result'] = 'confirmed' if ok else 'unknown'\n"
             f"    vars['generic_recorded_action'] = {operation.name!r} if ok else ''\n"
             "    data['what_to_do_next'] = ('The bank confirmed the action. Follow the exact source policy for confirmation.' "
@@ -441,14 +531,17 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     rules = rules if isinstance(rules, dict) else {}
     tools = {}
     proof = {}
+    success_checks = {}
     for operation in operations:
         terms = (r"verif|identit|authenticat|complete|passed" if operation.role == "verify"
                  else r"\bok\b|success|saved|recorded|created|completed|closed|transferred|scheduled")
         proof[operation.name] = (_identity_completion_field(operation) if operation.role == "verify"
                                  else _boolean_result(operation, terms))
+        success_checks[operation.name] = _result_checks(operation)
         try:
             tools[operation.name] = _tool(openapi, operation, str(rules.get(operation.name) or ""),
-                                          proof[operation.name], call_variables=call_variables)
+                                          proof[operation.name], call_variables=call_variables,
+                                          result_checks=success_checks[operation.name])
         except ValueError:
             # The API transport cannot safely bind some OpenAPI parameters.
             # Omission keeps the workflow runnable without fabricating values.
@@ -461,7 +554,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
     verified = len(verify) == 1
     verify_op = verify[0] if verified else None
     read_tools = [tools[op.name] for op in operations if op.role == "read" and op.name in tools]
-    write_tools = [tools[op.name] for op in operations if op.role == "write" and op.name in tools and proof[op.name]]
+    write_tools = [tools[op.name] for op in operations if op.role == "write" and op.name in tools
+                   and (proof[op.name] or success_checks[op.name])]
     close_operations = [op for op in operations if op.role == "close" and op.name in tools]
     if len(close_operations) > 1:
         raise ValueError("OpenAPI has more than one callable close operation")
