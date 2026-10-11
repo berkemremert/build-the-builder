@@ -308,7 +308,7 @@ def run(contract: dict, cases: dict, base_url: str, *, timeout: float = 10,
             if (not isinstance(expected, list) or not expected or
                     any(type(code) is not int or not 100 <= code <= 599 for code in expected)):
                 raise SmokeError("expect_status must be one or more integer codes")
-            if any(200 <= code < 300 for code in expected):
+            if all(200 <= code < 300 for code in expected):
                 covered.add((operation.method, operation.path))
             steps.append((step, operation, expected))
         planned.append((scenario, steps))

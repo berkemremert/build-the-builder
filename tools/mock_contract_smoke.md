@@ -21,7 +21,7 @@ seeded customers. `/healthz` and `/readyz` are at the Worker origin root and
 are outside the bank OpenAPI operations.
 
 The cases file is JSON. Give every OpenAPI operation at least one step whose
-expected status is 2xx. Steps run in order within each scenario. A complete
+expected status or statuses are all 2xx. Steps run in order within each scenario. A complete
 synthetic example appears in `tests/test_mock_contract_smoke.py`.
 
 ```json

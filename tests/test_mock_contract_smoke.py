@@ -145,6 +145,13 @@ class MockContractSmokeTests(unittest.TestCase):
             smoke.run(self.contract, cases, self.base_url)
         self.assertEqual(self.calls, [])
 
+    def test_mixed_success_and_error_status_does_not_count_as_coverage(self):
+        cases = copy.deepcopy(CASES)
+        cases["scenarios"][0]["steps"][1]["expect_status"] = [201, 500]
+        with self.assertRaisesRegex(smoke.SmokeError, "every contract operation"):
+            smoke.run(self.contract, cases, self.base_url)
+        self.assertEqual(self.calls, [])
+
     def test_response_schema_failure_has_no_values(self):
         self.mode = "schema"
         result = smoke.run(self.contract, CASES, self.base_url)
