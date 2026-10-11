@@ -539,7 +539,7 @@ def _provenance_plan(operation: _Operation, operations: list[_Operation], rule: 
             elif field_schema.get("enum") and re.search(r"currency|type", path[-1], re.I):
                 raise ValueError(f"{operation.name}: cannot prove source choice for {path[-1]}")
 
-    if operation.role == "write" and re.search(r"successful\s+preview", rule, re.I):
+    if operation.role == "write" and re.search(r"(?:successful|approved)\s+preview|preview", rule, re.I):
         candidates = []
         for op in reads:
             detail = " ".join((op.name, str(op.source.get("summary") or ""),
@@ -709,7 +709,6 @@ def _post_read_evidence_code(operation: _Operation,
                     f"        if all(k in evidence for k in required):\n"
                     f"            vars['generic_action_prereq_ready'] = 'yes'\n"
                     f"            vars[{('generic_prereq_ready_' + write_name)!r}] = 'yes'\n"
-                    f"            vars['confirmed_write_action'] = {write_name!r}\n"
                 )
     return (
         "import json\n"
@@ -796,6 +795,7 @@ def _tool(openapi: dict, operation: _Operation, rule: str, result_field: str | N
             f"    vars['generic_recorded_action'] = {operation.name!r} if ok else ''\n"
             "    vars['explicit_action_confirmation'] = 'unknown'\n"
             "    vars['confirmed_write_action'] = ''\n"
+            "    vars['generic_action_prereq_ready'] = 'no'\n"
             "    data['what_to_do_next'] = ('The bank confirmed the action. Follow the exact source policy for confirmation.' "
             "if ok else 'The action is unconfirmed. Do not retry or claim success.')\n"
             "except Exception:\n"
@@ -1066,6 +1066,17 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             # The API transport cannot safely bind some OpenAPI parameters.
             # Omission keeps the workflow runnable without fabricating values.
             continue
+    write_prereqs: dict[str, list[str]] = {}
+    for operation in operations:
+        if operation.name in tools and operation.role == "write":
+            try:
+                w_plan = _provenance_plan(operation, operations,
+                                          str(rules.get(operation.name) or ""), call_variables)
+                w_sources = sorted({step["source"] for step in w_plan if "source" in step})
+                if w_sources:
+                    write_prereqs[operation.name] = w_sources
+            except Exception:
+                pass
     for operation in operations:
         if operation.name not in tools or operation.role not in {"read", "write"}:
             continue
@@ -1078,7 +1089,8 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
         if operation.role == "read":
             tool["post_process_code"] = (tool.get("post_process_code", "")
                                          + _post_read_evidence_code(operation,
-                                                                    success_checks[operation.name]))
+                                                                    success_checks[operation.name],
+                                                                    write_prereqs))
     verify = [op for op in operations if op.role == "verify" and op.name in tools and proof[op.name]]
     upstream_verified = len(verify) == 0 and _upstream_identity_confirmed(source)
     if len(verify) != 1 and not upstream_verified and any(op.role in {"verify", "read", "write"} for op in operations):
@@ -1210,13 +1222,15 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             "there is nothing else to do. A courtesy thank-you followed by a new request is not completion. "
             "Do not imply any write was recorded here.",
             tools=read_tools,
-            extraction=[{"name": "explicit_action_confirmation", "type": "string",
-                         "enum_values": ["yes", "no", "unknown"],
-                         "description": "Judge the caller's latest reply in conversation context. Yes only when it clearly accepts "
-                                        "the assistant's immediately preceding exact proposed bank write, after any "
-                                        "source-required preview or disclosure. A bare yes to that proposal counts. "
-                                        "An initial request to do an action, a demand to skip consent, a vague "
-                                        "maybe, or agreement to a different question is not confirmation.",
+            extraction=([{"name": "requested_write_action", "type": "string",
+                          "enum_values": [tool["function"]["name"] for tool in write_tools],
+                          "description": "The one bank write the caller is currently requesting or discussing. "
+                                         "An initial request identifies an action but is not consent to execute it.",
+                          "min_confidence": 0.45}] if write_tools else [])
+            + [{"name": "caller_transfer_requested", "type": "string",
+                         "enum_values": ["yes", "no"],
+                         "description": "Yes when the caller requests transfer to a customer representative or agent, "
+                                        "or explicitly agrees or waits for a transfer offered by the assistant (such as 'bekliyorum', 'aktar').",
                          "min_confidence": 0.45},
                         {"name": "caller_finished", "type": "string",
                          "enum_values": ["yes", "no"],
@@ -1226,17 +1240,53 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
                                         "or a thank-you followed by a request. Declining one offered action "
                                         "alone is not finishing the call.",
                          "min_confidence": 0.9}]
-            + ([{"name": "confirmed_write_action", "type": "string",
-                 "enum_values": [tool["function"]["name"] for tool in write_tools],
-                 "description": "The single exact bank write action the customer explicitly confirmed. "
-                                "Leave empty when no exact action is confirmed.",
-                 "min_confidence": 0.9}] if write_tools else [])
             + reason_extraction("no_promise"),
-            transitions=([_when("explicit_action_confirmation", "yes", "commit",
-                                "Customer explicitly confirmed the action")] if write_tools else [])
+            transitions=[
+                (_and_when([("requested_write_action", operation.name),
+                            ("generic_prereq_ready_" + operation.name, "yes")],
+                           "proposal_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
+                           "Requested action has verified prerequisite reads")
+                 if operation.name in write_prereqs else
+                 _when("requested_write_action", operation.name,
+                       "proposal_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name),
+                       "Prepare the caller's requested action"))
+                for operation in operations if operation.role == "write"
+                and any(tool["function"]["name"] == operation.name for tool in write_tools)]
+            + [_when("caller_transfer_requested", "yes", "farewell", "Caller requested or acknowledged agent transfer")]
             + [_when("caller_finished", "yes", "farewell", "Caller clearly has no further request")],
             turns=20)
         if write_tools:
+            for operation in operations:
+                if operation.role != "write" or operation.name not in {tool["function"]["name"] for tool in write_tools}:
+                    continue
+                proposal_name = "proposal_" + re.sub(r"[^A-Za-z0-9_]", "_", operation.name)
+                proposal_rule = str(rules.get(operation.name) or "")
+                nodes[proposal_name] = _conversation(
+                    proposal_name,
+                    "The caller requested the bank action " + operation.name + ". Use only verified bank reads "
+                    "and the source policy to state the exact proposal, required preview, and destination. "
+                    "If a required choice or value is missing, ask for it first. Then ask for an explicit "
+                    "yes or no. Do not execute the write in this stage. An initial demand to skip consent "
+                    "does not count. Source rule: " + proposal_rule,
+                    extraction=[{"name": "explicit_action_confirmation", "type": "string",
+                                 "enum_values": ["yes", "no", "unknown"],
+                                 "description": "Judge only the caller's reply to this proposal stage. Yes means the "
+                                                "caller clearly accepts the exact action just proposed after "
+                                                "required previews and choices. A bare yes counts; a vague "
+                                                "maybe or answer to another question does not.",
+                                 "min_confidence": 0.45},
+                                {"name": "confirmed_write_action", "type": "string",
+                                 "enum_values": [operation.name],
+                                 "description": "Set only when the caller clearly accepts this exact proposal.",
+                                 "min_confidence": 0.45}],
+                    transitions=[_and_when([("explicit_action_confirmation", "yes"),
+                                            ("confirmed_write_action", operation.name)]
+                                           + ([("generic_prereq_ready_" + operation.name, "yes")]
+                                              if operation.name in write_prereqs else []),
+                                           "commit", "Caller accepted the proposed action after its prerequisite reads"),
+                                 _when("explicit_action_confirmation", "no", "service",
+                                       "Caller declined the proposed action")],
+                    turns=8)
             nodes["commit"] = _conversation(
                 "commit", "The customer explicitly confirmed an exact action. Call only the bank write tool "
                 "authorized by that confirmation and the source policy. The bank must return an explicit success "

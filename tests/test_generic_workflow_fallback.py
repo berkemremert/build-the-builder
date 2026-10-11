@@ -209,7 +209,8 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         workflow = build_generic_workflow(_policy(), _spec())
         write = workflow["nodes"]["commit"]["tools"][0]
         source = write["pre_process_code"]
-        self.assertIn("confirmed_write_action", str(workflow["nodes"]["service"]["extraction_schema"]))
+        self.assertNotIn("confirmed_write_action", str(workflow["nodes"]["service"]["extraction_schema"]))
+        self.assertIn("confirmed_write_action", str(workflow["nodes"]["proposal_saveArrangement"]["extraction_schema"]))
 
         for state in ({}, {"explicit_action_confirmation": "yes",
                            "confirmed_write_action": "anotherWrite"}):
@@ -252,7 +253,9 @@ class GenericWorkflowFallbackTests(unittest.TestCase):
         self.assertEqual("ended", nodes["closing"]["passthrough_default_transition"])
         verification_edges = nodes["verification"]["transitions"]
         self.assertTrue(all("checkPerson_response.data.verified" in str(edge) for edge in verification_edges))
-        self.assertIn("explicit_action_confirmation", str(nodes["service"]["transitions"]))
+        self.assertIn("requested_write_action", str(nodes["service"]["transitions"]))
+        self.assertNotIn("commit", [edge["target_node"] for edge in nodes["service"]["transitions"]])
+        self.assertIn("explicit_action_confirmation", str(nodes["proposal_saveArrangement"]["transitions"]))
         self.assertEqual("https://bank.example.test/arrangements",
                          nodes["commit"]["tools"][0]["function"]["parameters"]["properties"]["url"]["default"])
 
