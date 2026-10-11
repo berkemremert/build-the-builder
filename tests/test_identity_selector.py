@@ -21,6 +21,13 @@ class IdentitySelectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "more than two identity checks"):
             build_workflow(policy, api)
 
+    def test_enumerated_three_questions_cannot_build_two_check_workflow(self) -> None:
+        api = synthetic_api(identity_order=["birth_year", "passcode", "postcode"])
+        policy = synthetic_policy()
+        policy["raw_brief"] += "\nAsk birth year, passcode, and postcode in that order.\n"
+        with self.assertRaisesRegex(ValueError, "more than two identity checks"):
+            build_workflow(policy, api)
+
     def test_later_source_memo_replaces_extracted_identity_order(self) -> None:
         api = synthetic_api()
         policy = synthetic_policy(identity="Ask birth year first, then passcode.")

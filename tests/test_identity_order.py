@@ -25,9 +25,14 @@ class IdentityOrderTests(unittest.TestCase):
                                                         ["passcode", "birth_year"]))
 
     def test_ambiguous_three_selectors_fails_closed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Ambiguous identity question order"):
+        with self.assertRaisesRegex(ValueError, "more than two identity checks"):
             latest_explicit_identity_order("Ask birth year first, then passcode, then date of birth.",
                                            ["birth_year", "passcode", "date_of_birth"])
+
+    def test_enumerated_three_checks_without_count_fail_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "more than two identity checks"):
+            latest_explicit_identity_order("Ask birth year, passcode, and postcode in that order.",
+                                           ["birth_year", "passcode", "postcode"])
 
     def test_split_three_question_requirement_fails_closed(self) -> None:
         source = ("Ask birth year first. Then ask passcode. Then ask postcode. "

@@ -28,8 +28,6 @@ def latest_explicit_identity_order(source: str, values: list[str]) -> list[str] 
     latest = None
     for sentence in re.finditer(r"[^.!?\n]+", source):
         clause = sentence.group()
-        if not re.search(r"\b(?:first|then|before|after|followed by|identity order)\b", clause, re.I):
-            continue
         hits = []
         for value in values:
             for name in ALIASES.get(value, (value.replace("_", " "),)):
@@ -41,8 +39,11 @@ def latest_explicit_identity_order(source: str, values: list[str]) -> list[str] 
         for _, _, value in hits:
             if value not in ordered:
                 ordered.append(value)
-        if len(ordered) > 2:
-            raise ValueError("Ambiguous identity question order in source")
+        if len(ordered) > 2 and re.search(
+                r"\b(?:ask|verify|check|first|then|before|after|order)\b", clause, re.I):
+            raise ValueError("Source requires more than two identity checks; workflow supports two")
+        if not re.search(r"\b(?:first|then|before|after|followed by|identity order)\b", clause, re.I):
+            continue
         if len(ordered) != 2:
             continue
         first = next(hit for hit in hits if hit[2] == ordered[0])
