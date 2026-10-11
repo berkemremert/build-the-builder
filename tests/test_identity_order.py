@@ -29,6 +29,18 @@ class IdentityOrderTests(unittest.TestCase):
             latest_explicit_identity_order("Ask birth year first, then passcode, then date of birth.",
                                            ["birth_year", "passcode", "date_of_birth"])
 
+    def test_split_three_question_requirement_fails_closed(self) -> None:
+        source = ("Ask birth year first. Then ask passcode. Then ask postcode. "
+                  "All three must pass before get_account.")
+        with self.assertRaisesRegex(ValueError, "more than two identity checks"):
+            latest_explicit_identity_order(source, ["birth_year", "passcode", "postcode"])
+
+    def test_three_wrong_answers_does_not_mean_three_questions(self) -> None:
+        source = ("Ask two security questions: first birth year, then passcode. "
+                  "Three wrong answers end the check.")
+        self.assertEqual(["birth_year", "passcode"],
+                         latest_explicit_identity_order(source, ["birth_year", "passcode", "postcode"]))
+
 
 if __name__ == "__main__":
     unittest.main()

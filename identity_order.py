@@ -10,10 +10,21 @@ ALIASES = {
     "phone_last4": ("last four digits of the phone", "last 4 digits of the phone", "phone number"),
     "birth_year": ("birth year",),
 }
+_MORE_THAN_TWO_CHECKS = re.compile(
+    r"\b(?:three|four|five|six|seven|eight|nine|ten|[3-9]|10)\s+"
+    r"(?:(?:security|identity|verification)\s+)?"
+    r"(?:questions|checks|factors)\b|"
+    r"\ball\s+(?:three|four|five|six|seven|eight|nine|ten|[3-9]|10)\s+"
+    r"(?:must|need to|have to)\s+"
+    r"(?:pass|be\s+(?:verified|completed))\b",
+    re.I,
+)
 
 
 def latest_explicit_identity_order(source: str, values: list[str]) -> list[str] | None:
     """Return the final clearly ordered pair of selectors, or None if absent."""
+    if _MORE_THAN_TWO_CHECKS.search(source):
+        raise ValueError("Source requires more than two identity checks; workflow supports two")
     latest = None
     for sentence in re.finditer(r"[^.!?\n]+", source):
         clause = sentence.group()
