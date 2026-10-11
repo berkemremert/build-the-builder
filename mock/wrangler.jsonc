@@ -1,10 +1,18 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "build-the-builder-bank-mock",
-  "main": "src/index.mjs",
+  "main": "src/worker.mjs",
   "compatibility_date": "2026-10-11",
   "workers_dev": true,
   "vars": {
     "MOCK_BASE_PATH": ""
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CUSTOMER_STATE", "class_name": "CustomerState" }
+    ]
+  },
+  "exports": {
+    "CustomerState": { "type": "durable-object", "storage": "sqlite" }
   }
 }

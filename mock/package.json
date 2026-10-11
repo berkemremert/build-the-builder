@@ -3,13 +3,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node --test test/*.test.mjs",
+    "test:durable": "WRANGLER_LOG_PATH=.wrangler/logs vitest run",
     "check:bundle": "WRANGLER_LOG_PATH=.wrangler/logs wrangler deploy --dry-run"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.4.0",
+    "vitest": "^4.1.11",
     "wrangler": "^4.149.0"
   }
 }

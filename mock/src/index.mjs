@@ -1,4 +1,5 @@
 import * as bank from './bank.mjs';
+import { createCustomerStateService } from './state-client.mjs';
 
 function json(body, status, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -24,7 +25,8 @@ async function configuredBank(implementation, env) {
   if (implementation.enabled !== true ||
       typeof implementation.loadContract !== 'function' ||
       typeof implementation.loadData !== 'function' ||
-      typeof implementation.handleBankRequest !== 'function') {
+      typeof implementation.handleBankRequest !== 'function' ||
+      typeof env?.CUSTOMER_STATE?.getByName !== 'function') {
     return null;
   }
   const [contract, data] = await Promise.all([
@@ -84,6 +86,7 @@ export function createWorker(implementation = bank) {
           contract: configured.contract,
           data: configured.data,
           operationPath,
+          state: createCustomerStateService(env),
         });
         return response instanceof Response
           ? response
