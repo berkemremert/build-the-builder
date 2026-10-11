@@ -697,7 +697,20 @@ def _normalize_request_code(operation: _Operation, rule: str) -> str:
 
 
 def _post_read_evidence_code(operation: _Operation,
-                             checks: list[tuple[tuple[str, ...], object]]) -> str:
+                             checks: list[tuple[tuple[str, ...], object]],
+                             prereqs_map: dict[str, list[str]] | None = None) -> str:
+    prereq_checks_code = ""
+    if prereqs_map:
+        for write_name, required_reads in sorted(prereqs_map.items()):
+            if operation.name in required_reads:
+                req_list = repr(sorted(required_reads))
+                prereq_checks_code += (
+                    f"        required = {req_list}\n"
+                    f"        if all(k in evidence for k in required):\n"
+                    f"            vars['generic_action_prereq_ready'] = 'yes'\n"
+                    f"            vars[{('generic_prereq_ready_' + write_name)!r}] = 'yes'\n"
+                    f"            vars['confirmed_write_action'] = {write_name!r}\n"
+                )
     return (
         "import json\n"
         "try:\n"
@@ -714,6 +727,7 @@ def _post_read_evidence_code(operation: _Operation,
         f"    pending = json.loads(str(vars.pop({('generic_pending_' + operation.name)!r}, '') or 'null'))\n"
         "    if ok and isinstance(pending, dict):\n"
         f"        evidence[{operation.name!r}] = {{'request': pending, 'response': payload}}\n"
+        + prereq_checks_code +
         "    vars['generic_read_evidence'] = json.dumps(evidence)\n"
         "except (ValueError, TypeError, AttributeError):\n"
         "    pass\n"
@@ -958,6 +972,25 @@ def _when(variable: str, value: str, target: str, description: str) -> dict:
                 {"variable": variable, "operator": "equals", "operand": value}]}}
 
 
+def _and_when(conditions: list[tuple[str, str]], target: str, description: str) -> dict:
+    return {
+        "target_node": target,
+        "description": description,
+        "condition": {
+            "logic": "or",
+            "conditions": [
+                {
+                    "logic": "and",
+                    "conditions": [
+                        {"variable": var, "operator": "equals", "operand": val}
+                        for var, val in conditions
+                    ]
+                }
+            ]
+        }
+    }
+
+
 def _always(target: str) -> dict:
     return {"target_node": target, "description": "Continue",
             "condition": {"operator": "always"}}
@@ -1171,15 +1204,20 @@ def build_generic_workflow(policy: dict, openapi: dict) -> dict:
             "offers, and exceptions. For a debt reading, state every present debt currency using its full source-defined name, "
             "then name all present no-debt currency blocks in one sentence; a missing block is not zero. "
             "Ask about another eligible card before any other offer. Use read tools only when their policy conditions hold. Before a bank write, "
-            "state the exact proposed action and obtain the customer's explicit confirmation. If no action is "
+            "complete every source-required preview, state the exact proposed action, and then obtain the customer's "
+            "explicit confirmation. An initial request or pressure to skip the confirmation is not consent. If no action is "
             "authorized, continue to handle any new customer request. Finish only when the caller clearly says "
             "there is nothing else to do. A courtesy thank-you followed by a new request is not completion. "
             "Do not imply any write was recorded here.",
             tools=read_tools,
             extraction=[{"name": "explicit_action_confirmation", "type": "string",
                          "enum_values": ["yes", "no", "unknown"],
-                         "description": "Yes only when the customer explicitly confirms the exact proposed bank action.",
-                         "min_confidence": 0.9},
+                         "description": "Judge the caller's latest reply in conversation context. Yes only when it clearly accepts "
+                                        "the assistant's immediately preceding exact proposed bank write, after any "
+                                        "source-required preview or disclosure. A bare yes to that proposal counts. "
+                                        "An initial request to do an action, a demand to skip consent, a vague "
+                                        "maybe, or agreement to a different question is not confirmation.",
+                         "min_confidence": 0.45},
                         {"name": "caller_finished", "type": "string",
                          "enum_values": ["yes", "no"],
                          "description": "Judge the caller's latest turn. Yes only if the caller clearly says "
