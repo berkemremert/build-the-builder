@@ -7,6 +7,7 @@ then run ``manifest`` after that commit so its commit field names the exact tree
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -77,7 +78,43 @@ def _last_event(rows: list[dict], name: str) -> dict:
     return found[-1]
 
 
-def validate_export(workflow_path: Path, trace_path: Path) -> tuple[str, str]:
+def _check_case_snapshot(rows: list[dict], mock_url: str | None = None) -> None:
+    """Check that the traced case inputs still match the complete discovered case."""
+    discovered = [row for row in rows if row.get("event") == "case_discovered"]
+    if not discovered:
+        return
+    if len(discovered) != 1:
+        raise SubmissionError("Trace must identify exactly one case snapshot")
+    case = discovered[0]
+    folder = Path(str(case.get("folder") or ""))
+    if not folder.is_dir():
+        raise SubmissionError("Traced case folder is unavailable for source snapshot check")
+    if mock_url is not None and case.get("mock_url") != mock_url:
+        raise SubmissionError("Trace mock URL does not match submission mock URL")
+    inputs = _last_event(rows, "inputs")
+    fingerprints = inputs.get("source_documents")
+    if not isinstance(fingerprints, list) or not fingerprints:
+        raise SubmissionError("Trace has no source document fingerprints")
+    # Use the builder's own discovery rules so a newly added case document
+    # cannot be silently absent from the packaged run.
+    from builder import _case_inputs
+    documents, contract, _ = _case_inputs(folder)
+    expected = [str(path.resolve()) for path in documents]
+    actual = [item.get("path") if isinstance(item, dict) else None for item in fingerprints]
+    if actual != expected or case.get("documents") != expected:
+        raise SubmissionError("Case source snapshot differs from the traced document set")
+    for item, path in zip(fingerprints, documents):
+        if item.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest():
+            raise SubmissionError(f"Case source changed after build: {path.name}")
+    recorded_contract = inputs.get("openapi")
+    if contract is not None and (not isinstance(recorded_contract, dict) or
+                                 recorded_contract.get("path") != str(contract.resolve()) or
+                                 recorded_contract.get("sha256") != hashlib.sha256(contract.read_bytes()).hexdigest()):
+        raise SubmissionError("Case OpenAPI snapshot differs from the traced contract")
+
+
+def validate_export(workflow_path: Path, trace_path: Path,
+                    mock_url: str | None = None) -> tuple[str, str]:
     """Prove the artifact is a Freya export from the successful traced run."""
     workflow_text = workflow_path.read_text(encoding="utf-8")
     trace_text = trace_path.read_text(encoding="utf-8")
@@ -93,6 +130,7 @@ def validate_export(workflow_path: Path, trace_path: Path) -> tuple[str, str]:
     if not isinstance(export.get("workflow"), dict) or not export["workflow"].get("nodes"):
         raise SubmissionError("Workflow export has no workflow nodes")
     rows = _read_trace(trace_path)
+    _check_case_snapshot(rows, mock_url)
     start = _last_event(rows, "start")
     saved = _last_event(rows, "freya_saved_published")
     exported = _last_event(rows, "freya_exported")
@@ -103,8 +141,16 @@ def validate_export(workflow_path: Path, trace_path: Path) -> tuple[str, str]:
     if any(row.get("workflow_id") != workflow_id for row in (saved, exported, end)) or any(
             row.get("agent_id") != agent_id for row in (saved, end)):
         raise SubmissionError("Workflow and trace IDs do not match the same published build")
-    if not saved.get("version"):
+    version = saved.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise SubmissionError("Trace does not confirm a published workflow version")
+    if end.get("version") is not None and end["version"] != version:
+        raise SubmissionError("Trace end version does not match the published version")
+    for field in ("version", "version_id"):
+        if field in export and export[field] is not None and export[field] != saved.get(field):
+            raise SubmissionError(f"Export {field} does not match the published version")
+    if not (rows.index(start) < rows.index(saved) < rows.index(exported) < rows.index(end)):
+        raise SubmissionError("Trace events are not in build order")
     if Path(str(exported.get("path") or "")).name != workflow_path.name:
         raise SubmissionError("Trace export filename does not match the workflow artifact")
     if Path(str(end.get("trace") or "")).name != trace_path.name:
@@ -191,7 +237,7 @@ def check_manifest(root: Path, manifest: dict) -> tuple[str, str]:
     _committed_file(root, trace_rel, trace)
     _scan_text(json.dumps(manifest), "submission.json")
     _scan_committed_files(root)
-    return validate_export(workflow, trace)
+    return validate_export(workflow, trace, manifest["mock_url"])
 
 
 def create_manifest(root: Path, workflow: str, trace: str, mock_url: str,

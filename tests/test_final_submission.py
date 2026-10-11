@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import tempfile
 import unittest
@@ -91,6 +92,44 @@ class FinalSubmissionTests(unittest.TestCase):
                                        "https://mock.berking.workers.dev",
                                        "python3 builder.py {case_folder} {mock_url}",
                                        Path(self.temp.name) / "submission.json")
+
+    def test_case_snapshot_rejects_added_or_changed_source(self) -> None:
+        case = Path(self.temp.name) / "case"
+        case.mkdir()
+        document = case / "BRIEF.md"
+        document.write_text("original case\n")
+        path = str(document.resolve())
+        fingerprint = {"path": path, "sha256": hashlib.sha256(document.read_bytes()).hexdigest()}
+        self.events[0:0] = [
+            {"event": "case_discovered", "folder": str(case), "documents": [path],
+             "mock_url": "https://mock.berking.workers.dev"},
+            {"event": "inputs", "source_documents": [fingerprint]},
+        ]
+        self._write_trace()
+        self.assertEqual(("workflow-1", "agent-1"), submission.validate_export(
+            self.workflow, self.trace, "https://mock.berking.workers.dev"))
+        with self.assertRaisesRegex(submission.SubmissionError, "mock URL"):
+            submission.validate_export(self.workflow, self.trace, "https://other.workers.dev")
+        (case / "2026-10-10-follow-up.txt").write_text("new source\n")
+        with self.assertRaisesRegex(submission.SubmissionError, "source snapshot"):
+            submission.validate_export(self.workflow, self.trace)
+        (case / "2026-10-10-follow-up.txt").unlink()
+        document.write_text("revised case\n")
+        with self.assertRaisesRegex(submission.SubmissionError, "source changed"):
+            submission.validate_export(self.workflow, self.trace)
+
+    def test_export_and_trace_versions_must_agree(self) -> None:
+        self.events[-1]["version"] = 2
+        self._write_trace()
+        with self.assertRaisesRegex(submission.SubmissionError, "end version"):
+            submission.validate_export(self.workflow, self.trace)
+        self.events[-1]["version"] = 1
+        self.workflow.write_text(json.dumps({"workflow_id": "workflow-1", "agent_id": "agent-1",
+                                             "version": 2,
+                                             "workflow": {"nodes": {"start": {"node_type": "conversation"}}}}))
+        self._write_trace()
+        with self.assertRaisesRegex(submission.SubmissionError, "Export version"):
+            submission.validate_export(self.workflow, self.trace)
 
 
 if __name__ == "__main__":
