@@ -74,7 +74,8 @@ class GeneratedPaymentAmountTests(unittest.TestCase):
                  "all_today_status": "no"}
         run_node(self.workflow, "multi_advance", state)
         self.assertEqual("p1", state["multi_focus_product_id"])
-        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([{
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": json.dumps([{
             "product_id": "p1", "amount": "four hundred, sorry, I mean four hundred and fifty-five",
             "date": "2026-10-15"}])})
         run_node(self.workflow, "multi_advance", state)
@@ -85,7 +86,8 @@ class GeneratedPaymentAmountTests(unittest.TestCase):
                 candidate = {"now": state["now"], "product_json": state["product_json"],
                              "all_today_status": "no"}
                 run_node(self.workflow, "multi_advance", candidate)
-                candidate.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([{
+                candidate.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                                  "multi_reply_terms_json": json.dumps([{
                     "product_id": "p1", "amount": amount, "date": "2026-10-15"}])})
                 run_node(self.workflow, "multi_advance", candidate)
                 self.assertNotIn("p1", json.loads(candidate["multi_terms_json"]))

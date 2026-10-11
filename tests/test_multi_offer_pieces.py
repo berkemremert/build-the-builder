@@ -151,6 +151,46 @@ class MultiOfferPiecesTests(unittest.TestCase):
         self.assertEqual("p2", state["multi_focus_product_id"])
         self.assertEqual(offered_day, json.loads(state["multi_terms_json"])["p1"]["date"])
 
+    def test_missing_date_spoken_does_not_accept_copied_offer_date(self) -> None:
+        state = self.prepared()
+        run_code(self.workflow, "multi_select_offer", state)
+        offered_day = state["multi_offer_date"]
+        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([{
+            "product_id": "p1", "amount": 510, "date": offered_day,
+        }])})
+        state.pop("multi_reply_date_spoken", None)
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual(("p1", "1", "clarify"),
+                         (state["multi_focus_product_id"], state["multi_offer_stage"], state["multi_next"]))
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+        self.assertEqual(510.0, json.loads(state["multi_partial_terms_json"])["p1"]["amount"])
+
+    def test_common_date_keeps_previously_spoken_product_amount(self) -> None:
+        state = self.prepared()
+        # Caller: "I can pay 300 for the credit card."
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "no",
+                      "multi_reply_terms_json": '[{"product_id":"p1","amount":300}]'})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual(300.0, json.loads(state["multi_partial_terms_json"])["p1"]["amount"])
+
+        # A copied common date is not evidence that the caller said it.
+        state.update({"multi_offer_action": "proposal", "multi_reply_common_date_words": "Friday 16 October"})
+        state.pop("multi_reply_date_spoken", None)
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("clarify", state["multi_next"])
+        self.assertEqual({}, json.loads(state["multi_terms_json"]))
+
+        # Caller: "Friday 16 October for all of them."
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_common_date_words": "Friday 16 October"})
+        run_code(self.workflow, "multi_advance", state)
+        self.assertEqual("confirm", state["multi_next"])
+        terms = json.loads(state["multi_terms_json"])
+        self.assertEqual((300.0, 1320.0, 140.0),
+                         (terms["p1"]["amount"], terms["p2"]["amount"], terms["p3"]["amount"]))
+        self.assertEqual({}, json.loads(state["multi_partial_terms_json"]))
+
     def test_paid_claim_wins_over_same_turn_question(self) -> None:
         state = self.prepared()
         state.update({"multi_offer_action": "paid", "multi_offer_fact_question": "yes",

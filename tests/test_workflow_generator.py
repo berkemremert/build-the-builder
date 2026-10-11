@@ -480,7 +480,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("p1", state["multi_focus_product_id"])
         self.assertEqual({"p2": "paid"}, json.loads(state["multi_notes_json"]))
 
-        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": json.dumps([
             {"product_id": "9015", "amount": "five hundred and ten",
              "date_words": "tomorrow, the fifteenth of October"},
         ])})
@@ -518,7 +519,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
                       "pending_note_reasons_json": '{"p2":"already_paid"}'})
         _run_code_node(workflow, "multi_advance", state)
         # Freya v5 produced this exact valid value at confidence 0.4989695.
-        state.update({"multi_offer_action": "proposal", "multi_reply_product_id": "p1",
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_product_id": "p1",
                       "multi_reply_terms_json": '[{"product_id":"p1","amount":"five hundred and ten",'
                                                 '"date":"tomorrow, the fifteenth of October"}]'})
         _run_code_node(workflow, "multi_advance", state)
@@ -559,7 +561,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
             with self.subTest(terms=bad_terms):
                 state = dict(base, product_json=json.dumps(products), all_today_status="no")
                 _run_code_node(workflow, "multi_advance", state)
-                state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps(bad_terms)})
+                state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                              "multi_reply_terms_json": json.dumps(bad_terms)})
                 _run_code_node(workflow, "multi_advance", state)
                 self.assertEqual("clarify", state["multi_next"])
                 self.assertEqual({}, json.loads(state["multi_terms_json"]))
@@ -607,7 +610,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         ], "2026-10-14T11:00")
         state.update({"product_json": json.dumps(products), "all_today_status": "no"})
         _run_code_node(workflow, "multi_advance", state)
-        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json": json.dumps([
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json": json.dumps([
             {"product_id": "card ending 9015", "amount": "one hundred and fifty three", "date": "tomorrow"},
         ])})
         _run_code_node(workflow, "multi_advance", state)
@@ -767,7 +771,8 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         self.assertEqual("p1", state["multi_focus_product_id"])
         _run_code_node(workflow, "multi_select_offer", state)
         self.assertEqual(220, float(state["multi_offer_amount"]))
-        state.update({"multi_offer_action": "proposal", "multi_reply_terms_json":
+        state.update({"multi_offer_action": "proposal", "multi_reply_date_spoken": "yes",
+                      "multi_reply_terms_json":
                       '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})
         _run_code_node(workflow, "multi_advance", state)
         self.assertEqual("p2", state["multi_focus_product_id"])
@@ -896,6 +901,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         completed.update({
             "multi_disclosure_followup": "proposal",
             "multi_disclosure_claim_present": "yes",
+            "multi_reply_date_spoken": "yes",
             "multi_reply_notes_json": '{"personal loan":"paid"}',
             "multi_reply_terms_json": ('[{"product_id":"credit card",'
                                        '"amount":"five hundred and ten",'
@@ -903,7 +909,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         })
         fields = {field["name"] for field in workflow["nodes"]["multi_disclosure_clarify"]["extraction_schema"]}
         self.assertTrue({"multi_disclosure_claim_present", "multi_reply_notes_json",
-                         "multi_reply_terms_json"} <= fields)
+                         "multi_reply_terms_json", "multi_reply_date_spoken"} <= fields)
         _run_code_node(workflow, "multi_disclosure_resolve", completed)
         self.assertEqual("multi_advance", _first_engine_route(workflow["nodes"]["multi_disclosure_resolve"], completed))
         self.assertEqual("disclosure_completion", completed["multi_phase"])
@@ -934,6 +940,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
 
         combined = copy.deepcopy(initial)
         combined.update(multi_disclosure_followup="proposal", multi_disclosure_claim_present="yes",
+                        multi_reply_date_spoken="yes",
                         multi_reply_notes_json='{"personal loan":"paid","car loan":"dispute"}',
                         multi_reply_terms_json=('[{"product_id":"credit card",'
                                                 '"amount":"five hundred and ten","date":"tomorrow"}]'))
@@ -1027,6 +1034,7 @@ class WorkflowGeneratorAcceptanceTests(unittest.TestCase):
         proposed = dict(prepared, all_today_status="no", multi_disclosure_state="incomplete")
         _run_code_node(workflow, "multi_advance", proposed)
         proposed.update({"multi_disclosure_followup": "proposal",
+                         "multi_reply_date_spoken": "yes",
                          "multi_reply_terms_json":
                          '[{"product_id":"p1","amount":220,"date":"Friday 16 October"}]'})
         _run_code_node(workflow, "multi_disclosure_resolve", proposed)

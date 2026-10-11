@@ -1599,7 +1599,7 @@ try:
             if pid not in product_by_id or pid in notes:
                 continue
             date = str(item.get('date_phrase') or item.get('date_words') or item.get('raw_date') or item.get('date') or '').strip()
-            if latest_reply and str(vars.get('multi_reply_date_spoken') or 'yes') != 'yes':
+            if latest_reply and str(vars.get('multi_reply_date_spoken') or '') != 'yes':
                 date = ''
             supplied_amount = item.get('amount')
             if supplied_amount is None or str(supplied_amount).strip() == '':
@@ -1710,11 +1710,13 @@ try:
             next_step = 'clarify'
         elif action in ('proposal', 'accepted'):
             common = str(vars.get('multi_reply_common_date_words') or '').strip()
-            if common:
+            if common and str(vars.get('multi_reply_date_spoken') or '') == 'yes':
                 for item in products:
                     other = str(item.get('product_id') or '')
                     if other not in terms and other not in notes:
-                        terms[other] = dict(product_id=other, amount=item.get('past_due'), date=common)
+                        amount = partial.get(other, {}).get('amount', item.get('past_due'))
+                        terms[other] = dict(product_id=other, amount=amount, date=common)
+                        partial.pop(other, None)
             add_terms(vars.get('multi_reply_terms_json') or '', pid, True)
             if pid not in terms and pid not in notes:
                 next_step = 'clarify'
@@ -2658,7 +2660,9 @@ except Exception:
                                  "Independently of any payment proposal, yes if this completed answer explicitly claims the CURRENT past-due amount on any product was already paid or disputes that a product belongs to the caller. A lost card, an old payment, or unfinished words without a completed claim are no. If yes, map every such claim in multi_reply_notes_json; never silently drop it."),
                          "min_confidence": 0.55},
                         {"name": "multi_reply_terms_json", "type": "string", "min_confidence": 0.45,
-                         "description": "If the latest completed answer gives a fresh payment proposal, return a JSON array string of product_id, amount, and RAW date words for each product explicitly covered. Extract this independently of paid or dispute claims on other products. Leave empty otherwise."},
+                         "description": "If the latest completed answer gives a fresh payment proposal, return a JSON array string of product_id and only the amount and RAW date words actually spoken for each product explicitly covered. Omit a missing date rather than copying an earlier offer. Extract this independently of paid or dispute claims on other products. Leave empty otherwise."},
+                        _enum("multi_reply_date_spoken", ["yes", "no"],
+                              "yes only if the latest completed answer explicitly names an exact payment day. no for an amount-only proposal, paid or dispute claim, or unclear completion. Never copy a previously offered date."),
                         {"name": "multi_reply_notes_json", "type": "string", "min_confidence": 0.45,
                          "description": "For EACH product explicitly claimed paid or disputed in the completed answer, return a JSON object string mapping its exact product_id or unambiguous product label from {{account_facts}} to paid or dispute. Paid means the CURRENT past-due amount was already paid; a product closed or paid off in the past is a dispute. Extract this independently of any payment proposal on another product. Do not infer a claim from an unfinished phrase or a lost card. Leave empty if there is no completed claim."}],
             transitions=[_eq("transfer_restructuring", "multi_disclosure_followup", "transfer_restructuring"),
